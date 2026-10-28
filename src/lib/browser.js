@@ -62,5 +62,22 @@
     });
   };
 
-  AT.sendMessage = (message) => api.runtime.sendMessage(message);
+  // A listener that does not recognise the type answers nothing, and the
+  // runtime then resolves with undefined (or rejects when the receiving
+  // context is gone). Callers all branch on `response.ok`, so collapse both
+  // shapes into one failure object instead of leaking rejections.
+  AT.sendMessage = async (message) => {
+    const type = message?.type ?? 'message';
+    try {
+      const response = await api.runtime.sendMessage(message);
+      if (response && typeof response === 'object') return response;
+      return { ok: false, error: `no listener answered ${type}`, code: 'no-response' };
+    } catch (error) {
+      return {
+        ok: false,
+        error: error?.message ?? String(error),
+        code: error?.code ?? 'no-response'
+      };
+    }
+  };
 })();

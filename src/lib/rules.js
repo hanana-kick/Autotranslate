@@ -37,7 +37,7 @@
     }
     host = stripWww(host.replace(/^\*\./, ''));
     if (!host || !/^[a-z0-9._~%:[\]-]+$/.test(host)) return null;
-    return { raw: input, host, path, scheme };
+    return { host, path, scheme };
   };
 
   const stripWww = (host) => host.replace(/^www\./, '');
@@ -75,7 +75,7 @@
       if (!rule || !C.SITE_RULE_ACTIONS.includes(rule.action)) continue;
       const pattern = rules.parse(rule.pattern);
       if (!pattern || !rules.matches(pattern, url)) continue;
-      const candidate = { action: rule.action, pattern: rule.raw };
+      const candidate = { action: rule.action, pattern: rule.pattern };
       const score = rules.score(pattern);
       if (!best || score > best.score) {
         best = { ...candidate, score };
@@ -96,7 +96,10 @@
   rules.canonical = (raw) => {
     const parsed = rules.parse(raw);
     if (!parsed) return null;
+    // `example.com/` and `example.com` are the same rule; keeping the bare
+    // slash would let users store both.
     const scheme = parsed.scheme ? `${parsed.scheme}://` : '';
-    return `${scheme}${parsed.host}${parsed.path}`;
+    const path = parsed.path === '/' ? '' : parsed.path;
+    return `${scheme}${parsed.host}${path}`;
   };
 })();

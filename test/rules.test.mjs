@@ -61,9 +61,15 @@ test('rules without a usable action or pattern are ignored', () => {
   assert.equal(rules.resolve([['example.com', 'never']], 'not-a-url'), null);
 });
 
+test('resolve names the stored pattern, not an internal parse field', () => {
+  const rule = rules.resolve([{ pattern: 'example.com/news/*', action: 'never' }], 'https://example.com/news/1');
+  assert.deepEqual(rule, { action: 'never', pattern: 'example.com/news/*' });
+});
+
 test('canonical folds case, wildcards and leading www', () => {
   assert.equal(rules.canonical('  *.Example.com/News/*  '), 'example.com/news/*');
   assert.equal(rules.canonical('www.example.com'), 'example.com');
+  assert.equal(rules.canonical('www.Example.com/'), 'example.com', 'a bare trailing slash is not part of the rule');
   assert.equal(rules.canonical('https://example.com'), 'https://example.com');
   assert.equal(rules.canonical(''), null);
   assert.equal(rules.canonical('   '), null);
