@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Autotranslate</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="popup">
+    <header class="row spread">
+      <span class="row">
+        <img src="icons/icon-32.png" alt="" width="20" height="20" />
+        <strong data-i18n="extensionName"></strong>
+      </span>
+      <label class="switch" data-i18n-title="popup_enabledTitle">
+        <input type="checkbox" id="enabled" />
+        <span data-i18n="popup_enabled"></span>
+      </label>
+    </header>
+
+    <p class="host" id="host"></p>
+    <p class="status" id="status" role="status" data-i18n="popup_idle"></p>
+
+    <section class="field">
+      <label for="targetLang" data-i18n="popup_targetLanguage"></label>
+      <select id="targetLang"></select>
+    </section>
+
+    <section class="field">
+      <label for="siteRule" data-i18n="popup_siteRule"></label>
+      <select id="siteRule">
+        <option value="" data-i18n="popup_ruleInherit"></option>
+        <option value="always" data-i18n="popup_ruleAlways"></option>
+        <option value="never" data-i18n="popup_ruleNever"></option>
+      </select>
+    </section>
+
+    <footer class="row buttons">
+      <button id="translate" type="button" data-i18n="popup_translate"></button>
+      <button id="restore" type="button" class="secondary" data-i18n="popup_restore"></button>
+      <button id="options" type="button" class="ghost" data-i18n="popup_options"></button>
+    </footer>
+
+    <script src="vendor/browser-polyfill.js"></script>
+    <script src="lib/constants.js"></script>
+    <script src="lib/browser.js"></script>
+    <script src="lib/rules.js"></script>
+    <script src="lib/settings.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

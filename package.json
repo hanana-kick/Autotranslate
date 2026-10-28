@@ -1,0 +1,22 @@
+{
+  "name": "autotranslate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Automatic page translation extension for Chrome and Firefox (Manifest V3).",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:chrome": "node scripts/build.mjs --target=chrome",
+    "build:firefox": "node scripts/build.mjs --target=firefox",
+    "watch": "node scripts/build.mjs --watch",
+    "icons": "node scripts/make-icons.mjs",
+    "lint": "node scripts/build.mjs --check",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "webextension-polyfill": "0.12.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

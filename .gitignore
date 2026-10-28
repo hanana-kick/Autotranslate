@@ -1,0 +1,8 @@
+node_modules/
+build/
+dist/
+*.xpi
+*.zip
+.DS_Store
+.npm-cache/
+.tmp/
