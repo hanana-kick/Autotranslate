@@ -222,5 +222,7 @@
   "welcome_readyExisting": { "message": "모델이 이미 설치되어 있습니다. 시작을 누르면 번역이 켜집니다." },
   "welcome_start": { "message": "번역 시작" },
   "welcome_starting": { "message": "내려받기를 시작합니다…" },
-  "welcome_done": { "message": "완료되었습니다. 이제 페이지가 자동으로 번역됩니다." }
+  "welcome_done": { "message": "완료되었습니다. 이제 페이지가 자동으로 번역됩니다." },
+  "options_modelStored": { "message": "모델은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
+  "welcome_modelStored": { "message": "파일은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } }
 }

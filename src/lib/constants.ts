@@ -22,11 +22,13 @@ namespace AT {
     CONTENT_TRANSLATE_SELECTION: string;
     CONTENT_RESTORE: string;
     CONTENT_PING: string;
+    CONTENT_STATE: string;
     // background -> offscreen document (the on-device host)
     LOCAL_TRANSLATE: string;
     LOCAL_LOAD: string;
     LOCAL_UNLOAD: string;
     LOCAL_COUNT: string;
+    LOCAL_QUERY: string;
     // host -> background
     LOCAL_STATUS: string;
     // popup / options -> background; kept apart from the host types so a
@@ -107,11 +109,17 @@ namespace AT {
       CONTENT_TRANSLATE_SELECTION: 'at/content-translate-selection',
       CONTENT_RESTORE: 'at/content-restore',
       CONTENT_PING: 'at/content-ping',
+      // content -> background: what this tab is doing, asked when the worker
+      // has no memory of it (MV3 terminates the worker after a quiet spell).
+      CONTENT_STATE: 'at/content-state',
       // background -> offscreen document
       LOCAL_TRANSLATE: 'at/local-translate',
       LOCAL_LOAD: 'at/local-load',
       LOCAL_UNLOAD: 'at/local-unload',
       LOCAL_COUNT: 'at/local-count',
+      // background -> host: "what is your state?" (`LOCAL_STATUS` travels the
+      // other way; sharing one type let the background answer its own question).
+      LOCAL_QUERY: 'at/local-query',
       // host -> background
       LOCAL_STATUS: 'at/local-status',
       // popup / options -> background

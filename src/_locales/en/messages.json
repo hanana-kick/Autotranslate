@@ -222,5 +222,7 @@
   "welcome_readyExisting": { "message": "The model is already installed. Press Start to turn translation on." },
   "welcome_start": { "message": "Start translating" },
   "welcome_starting": { "message": "Starting the download…" },
-  "welcome_done": { "message": "Done. Pages are translated automatically from now on." }
+  "welcome_done": { "message": "Done. Pages are translated automatically from now on." },
+  "options_modelStored": { "message": "Model stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } },
+  "welcome_modelStored": { "message": "The file is stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } }
 }

@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -12,9 +12,22 @@ export const BUILD_TS = join(ROOT, 'build', 'ts', 'src');
  */
 export type ATNamespace = Record<string, any>;
 
-/** A fetch init stand-in, narrowed to the members the tests actually read. */
 export function load(...files: string[]): ATNamespace {
-  for (const file of files) (0, eval)(readFileSync(join(BUILD_TS, file), 'utf8'));
+  for (const file of files) {
+    // The suites eval the compiled output, so a stale build silently tests the
+    // previous revision. Say so instead of reporting a green run for old code.
+    const compiled = join(BUILD_TS, file);
+    const source = join(SRC, file.replace(/\.js$/, '.ts'));
+    try {
+      if (statSync(source).mtimeMs > statSync(compiled).mtimeMs) {
+        throw new Error(`${file} is older than ${source}: run \`npm run build\` (or \`npx tsc -p tsconfig.json\`) first`);
+      }
+    } catch (error: unknown) {
+      if (error instanceof Error && error.message.includes('older than')) throw error;
+      // A missing source is fine: some files are generated.
+    }
+    (0, eval)(readFileSync(compiled, 'utf8'));
+  }
   return (globalThis as ATNamespace).AT as ATNamespace;
 }
 

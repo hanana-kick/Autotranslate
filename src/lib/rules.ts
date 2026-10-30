@@ -45,7 +45,8 @@ namespace AT.rules {
     if (typeof raw !== 'string') return null;
     const input = raw.trim();
     if (!input || input.length > 200) return null;
-    let text = input.toLowerCase();
+    // Hosts are case-insensitive, paths are not: only the host is folded.
+    let text = input;
     let scheme: string | null = null;
     const schemeMatch = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/.exec(text);
     if (schemeMatch) {
@@ -59,7 +60,8 @@ namespace AT.rules {
       host = text.slice(0, slash);
       path = text.slice(slash);
     }
-    host = stripWww(host.replace(/^\*\./, ''));
+    // Only the host is folded: `example.com/Docs/*` keeps its path casing.
+    host = stripWww(host.replace(/^\*\./, '').toLowerCase());
     if (!host || !/^[a-z0-9._~%:[\]-]+$/.test(host)) return null;
     return { host, path, scheme };
   }
@@ -69,7 +71,7 @@ namespace AT.rules {
     if (!url || !pattern) return false;
     if (pattern.scheme && pattern.scheme !== url.protocol.replace(':', '')) return false;
     const host = stripWww(url.hostname.toLowerCase());
-    const want = stripWww(pattern.host);
+    const want = stripWww(pattern.host.toLowerCase());
     if (host !== want && !host.endsWith(`.${want}`)) return false;
     if (pattern.path) {
       const prefix = pattern.path.replace(/\*+$/, '');

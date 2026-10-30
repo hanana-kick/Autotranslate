@@ -252,7 +252,9 @@ namespace AT.options {
       const wasSelected = settings!.localModelId === model.id;
       const removed = await AT.modelstore.remove(model.id);
       if (wasSelected) {
-        settings = await AT.settings.save({ ...settings!, localModelId: '' });
+        // Patch one field: the page's copy of the rest may already be stale
+        // (another context changed the switch while this page was open).
+        settings = await AT.settings.save({ localModelId: '' });
         await AT.sendMessage({ type: C.MSG.LOCAL_RELEASE });
       }
       setStatus(
@@ -292,20 +294,32 @@ namespace AT.options {
     setBusy(false);
     if (!outcome.ok) {
       const detail = outcome.error === 'needs-token' ? '' : `: ${outcome.error ?? 'unknown'}`;
+      // Two different things happened: the bytes are stored but the model does
+      // not load, or nothing arrived at all. Saying "download failed" for the
+      // first one sends the user to re-download 3.9 GiB they already have.
       setStatus(
         el('modelStatus'),
         outcome.error === 'cancelled'
           ? AT.i18n.msg('options_cancelled')
           : outcome.error === 'needs-token'
             ? AT.i18n.msg('options_needsToken')
-            : AT.i18n.msg('options_downloadFailed') + detail,
+            : outcome.stored
+              ? AT.i18n.msg('options_modelStored', outcome.error ?? 'model-load-failed')
+              : AT.i18n.msg('options_downloadFailed') + detail,
         'error'
       );
+      if (outcome.stored && outcome.modelId) {
+        settings = await AT.settings.save({ localModelId: outcome.modelId });
+      }
       await refreshModels();
+      render();
       return;
     }
-    if (!settings!.localModelId) {
-      settings = await AT.settings.save({ ...settings!, localModelId: outcome.modelId });
+    // The transfer replaced an earlier copy under the same name; if that copy was
+    // the selected one, the selection would now point at a deleted id.
+    const dangling = !settings!.localModelId || outcome.retired.includes(settings!.localModelId);
+    if (dangling) {
+      settings = await AT.settings.save({ localModelId: outcome.modelId });
     }
     setStatus(
       el('modelStatus'),
@@ -327,13 +341,16 @@ namespace AT.options {
       setStatus(el('modelStatus'), AT.i18n.msg('options_badUrl'), 'error');
       return;
     }
+    // Claim the transfer before the first await: a second click during the
+    // token write used to start a second download of the same 3.9 GiB.
+    if (inflight) return;
     const token = el('modelToken').value.trim();
     const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
-    await AT.modelstore.setToken(token).catch((error: unknown) => setStatus(el('modelStatus'), reason(error), 'error'));
     const controller = new AbortController();
     inflight = controller;
     setBusy(true);
     showProgress(0, expected ?? null);
+    await AT.modelstore.setToken(token).catch((error: unknown) => setStatus(el('modelStatus'), reason(error), 'error'));
     try {
       await settle(
         await AT.modelflow.installFromUrl({ url, token, signal: controller.signal, onProgress: showProgress })
@@ -425,13 +442,27 @@ namespace AT.options {
     });
   }
 
+  /**
+   * The form is not the only writer: the popup toggles the switch and changes the
+   * language while this page may be open. Repainting from storage keeps the next
+   * Save from writing values the user has not seen for a while.
+   */
+  function watchStorage(): void {
+    AT.storage?.onChanged?.addListener((changes, area) => {
+      if (area !== 'local' || !changes[C.STORAGE_KEY]) return;
+      void AT.settings.load().then((loaded) => {
+        settings = loaded;
+        render();
+      });
+    });
+  }
+
   document.addEventListener('DOMContentLoaded', async () => {
     AT.i18n.apply(document);
     buildSelects();
     settings = await AT.settings.load();
     el('modelUrl').value = AT.local.MODEL_SOURCES[0]?.url ?? '';
     el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
-    wire();
     // Ask first, then report: the usage line is only meaningful once the
     // browser has answered whether it will keep the bytes.
     await AT.modelflow.keepStorage();
@@ -439,5 +470,9 @@ namespace AT.options {
     // painted once the store has answered rather than from settings alone.
     await Promise.all([refreshModels(), refreshLocalStatus()]);
     render();
+    // Listeners go on last: a Save before `render()` would persist the markup's
+    // empty defaults over the user's settings.
+    wire();
+    watchStorage();
   });
 }

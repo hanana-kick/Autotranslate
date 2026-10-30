@@ -15,13 +15,18 @@ namespace AT.modelflow {
   };
 
   export type Outcome = {
+    /** The model is stored *and* loaded: this is what `ok` means. */
     ok: boolean;
+    /** The bytes reached storage; loading them is a separate step. */
+    stored: boolean;
     modelId: string;
     name: string;
     bytes: number;
     seconds: number;
-    /** `cancelled`, `needs-token`, `bad-url`, the store's own code, or a prepare failure. */
+    /** `cancelled`, `needs-token`, `bad-url`, the store's own code, or a load failure. */
     error: string | null;
+    /** Ids of earlier copies this transfer replaced. */
+    retired: string[];
   };
 
   /** The source the extension offers by default; the user may still pick a file. */
@@ -48,16 +53,18 @@ namespace AT.modelflow {
     const bytes = result.bytes;
     const seconds = Math.max(1, Math.round((Date.now() - started) / 1000));
     if (!result.ok || !result.record) {
-      return { ok: false, modelId: '', name, bytes, seconds, error: result.error ?? 'unknown' };
+      return { ok: false, stored: false, modelId: '', name, bytes, seconds, error: result.error ?? 'unknown', retired: [] };
     }
     const prepared = await prepare(result.record.id);
     return {
       ok: prepared.ok,
+      stored: true,
       modelId: result.record.id,
       name: result.record.name,
       bytes,
       seconds,
-      error: prepared.ok ? null : (prepared.error ?? 'model-load-failed')
+      error: prepared.ok ? null : (prepared.error ?? 'model-load-failed'),
+      retired: result.retired ?? []
     };
   }
 
@@ -71,10 +78,10 @@ namespace AT.modelflow {
   export async function installFromUrl(install: Install = {}): Promise<Outcome> {
     const started = Date.now();
     const url = AT.local.normalizeDownloadUrl(install.url ?? SOURCE.url);
-    if (!url) return { ok: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'bad-url' };
+    if (!url) return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'bad-url', retired: [] };
     const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
     if (expected && !(await AT.modelstore.fits(expected))) {
-      return { ok: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'no-space' };
+      return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'no-space', retired: [] };
     }
     await keepStorage();
     const result = await AT.modelstore.download({

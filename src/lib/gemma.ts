@@ -615,7 +615,7 @@ namespace AT.gemma {
   export function langFor(code: string | null | undefined): GemmaLang | null {
     if (typeof code !== 'string' || !code) return null;
     const spelled = code.replace(/_/g, '-');
-    const alias = ALIASES[spelled];
+    const alias = Object.hasOwn(ALIASES, spelled) ? ALIASES[spelled] : undefined;
     if (alias) return alias;
     return isLang(spelled) ? spelled : null;
   }

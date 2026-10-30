@@ -57,6 +57,16 @@ namespace AT.content {
     timer: number;
     card: HTMLElement | null;
     busy: Promise<AT.MessageResult | undefined>;
+    /** Set by restore(): a pass in flight stops writing its answers. */
+    stopped: boolean;
+    /** The target language the current pipeline was built for. */
+    targetLang: string | null;
+    /** Last progress report, so a long pass is not silent in the UI. */
+    lastReport: number;
+    /** What the last report said, so a tab can answer for itself. */
+    lastStatus: string;
+    lastTranslated: number;
+    lastError: string | null;
   };
 
   /** The handle on globalThis that makes a second injection a no-op. */
@@ -87,7 +97,13 @@ declare var __autotranslate: AT.content.Boot | undefined;
     observer: null,
     timer: 0,
     card: null,
-    busy: Promise.resolve(undefined)
+    busy: Promise.resolve(undefined),
+    stopped: false,
+    targetLang: null,
+    lastReport: 0,
+    lastStatus: 'idle',
+    lastTranslated: 0,
+    lastError: null
   };
 
   globalThis.__autotranslate = {
@@ -133,13 +149,25 @@ declare var __autotranslate: AT.content.Boot | undefined;
         // A long paragraph is several sentences; sending it whole either
         // overflows the model's context or gets cut mid-clause by the char
         // chunker. Split first, rejoin in place.
-        sentences: { split: AT.targets.sentences, maxChars: C.SENTENCE_MAX_CHARS }
+        sentences: { split: AT.targets.sentences, maxChars: C.SENTENCE_MAX_CHARS },
+        // A restore in another task owns the page: stop writing.
+        shouldAbort: () => state.stopped,
+        // A pass over a long page takes a minute; say so while it works.
+        onProgress: ({ translated }) => {
+          const now = Date.now();
+          if (now - state.lastReport < 700) return;
+          state.lastReport = now;
+          void report({ status: 'translating', translated });
+        }
       });
     }
     return state.pipeline;
   }
 
   function report(patch: AT.content.Patch): Promise<AT.Response | void> {
+    state.lastStatus = patch.status ?? state.lastStatus;
+    state.lastTranslated = patch.translated ?? state.lastTranslated;
+    state.lastError = patch.error ?? null;
     return AT.sendMessage({
       type: C.MSG.STATE_CHANGED,
       status: patch.status,
@@ -368,7 +396,14 @@ declare var __autotranslate: AT.content.Boot | undefined;
 
   /** One full pass over the page, then keep up with what changes. */
   async function runTranslation(settings: AT.settings.ContentSnapshot): Promise<AT.MessageResult> {
+    state.stopped = false;
     const pipeline = ensurePipeline(settings);
+    // A pass into a different language has to start from the page's own text:
+    // the records and the cache both belong to the previous language.
+    if (state.targetLang !== null && state.targetLang !== settings.targetLang) {
+      pipeline.restore();
+    }
+    state.targetLang = settings.targetLang;
     // More nodes than one pass may translate: carry on by ourselves.
     const result = await pipeline.translate();
     startObserver();
@@ -411,8 +446,17 @@ declare var __autotranslate: AT.content.Boot | undefined;
   }
 
   async function restore(): Promise<AT.MessageResult> {
+    // A pass in flight must not write its answers back over the restored page,
+    // and the user must not wait for the model to finish before the switch works.
+    state.stopped = true;
+    state.dirty = false;
+    state.full = false;
+    state.roots = [];
+    state.targetLang = null;
     stopObserver();
     stopViewportPass();
+    clearTimeout(state.timer);
+    state.timer = 0;
     const restored = state.pipeline ? state.pipeline.restore().restored : 0;
     await report({ status: 'idle' });
     return { status: 'idle', restored };
@@ -473,6 +517,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.card = card;
   }
 
+  /** A selection longer than this is cut at a sentence boundary, not sent whole. */
+  const SELECTION_MAX_PARTS = 12;
+
   async function translateSelection(message: AT.content.SelectionRequest): Promise<AT.MessageResult> {
     const settings = message.settings ?? state.settings;
     if (!settings) throw new Error('selection request without settings');
@@ -482,8 +529,13 @@ declare var __autotranslate: AT.content.Boot | undefined;
       showCard(AT.i18n.msg('content_noSelection'), settings);
       return { status: 'empty' };
     }
-    const [translated] = await requestBatch({ texts: [selected], role: 'unknown', context: null }, settings);
-    showCard(translated || selected, settings);
+    // A Ctrl+A selection is a whole page in one prompt: split it like a long
+    // paragraph and cap it, or the model works for minutes on one generation.
+    const parts = AT.targets.sentences(selected).slice(0, SELECTION_MAX_PARTS);
+    const gap = /\s/.test(selected) ? ' ' : '';
+    const texts = parts.length > 1 ? parts : [selected.slice(0, C.SENTENCE_MAX_CHARS)];
+    const translated = await requestBatch({ texts, role: 'unknown', context: null }, settings);
+    showCard(translated.filter((text) => text).join(gap) || selected, settings);
     return { status: 'selection' };
   }
 
@@ -491,6 +543,12 @@ declare var __autotranslate: AT.content.Boot | undefined;
   // its handler reads, once.
   AT.onMessage({
     [C.MSG.CONTENT_PING]: () => ({ pong: true }),
+    // The worker may have been suspended since it last heard from this tab.
+    [C.MSG.CONTENT_STATE]: () => ({
+      status: state.lastStatus,
+      translated: state.lastTranslated,
+      error: state.lastError
+    }),
     [C.MSG.CONTENT_TRANSLATE]: (message) => {
       const request = message as AT.content.TranslateRequest;
       state.busy = state.busy.then(() => translate(request), () => translate(request));

@@ -264,7 +264,9 @@ namespace AT {
   // identically in Chrome and Firefox.
   export function onMessage(handlers: MessageHandlers): void {
     extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
-      const handler = handlers[message?.type];
+      // Own properties only: `handlers['constructor']` would otherwise resolve
+      // to Object and answer a type nobody handles.
+      const handler = Object.hasOwn(handlers, message?.type ?? '') ? handlers[message?.type] : undefined;
       if (!handler) return false;
       Promise.resolve()
         .then(() => handler(message, sender))

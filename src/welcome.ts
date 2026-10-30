@@ -101,15 +101,24 @@ namespace AT.welcome {
             ? AT.i18n.msg('options_needsToken')
             : outcome.error === 'no-space'
               ? AT.i18n.msg('options_noSpace', AT.local.formatBytes(AT.modelflow.SOURCE.size))
-              : source === 'file'
-                ? AT.i18n.msg('welcome_importFailed', outcome.error ?? 'unknown')
-                : `${AT.i18n.msg('options_downloadFailed')}: ${outcome.error ?? 'unknown'}`;
+              : outcome.stored
+                // The file is in storage; only loading it failed. Saying the
+                // import failed would send the user to repeat a 3.9 GiB copy.
+                ? AT.i18n.msg('welcome_modelStored', outcome.error ?? 'model-load-failed')
+                : source === 'file'
+                  ? AT.i18n.msg('welcome_importFailed', outcome.error ?? 'unknown')
+                  : `${AT.i18n.msg('options_downloadFailed')}: ${outcome.error ?? 'unknown'}`;
       readyModel = null;
       renderInstalled();
       setStatus(text, 'error');
       return;
     }
     readyModel = await AT.modelstore.get(outcome.modelId);
+    // Starting has to write a selection that exists: a replaced copy would leave
+    // `localModelId` pointing at a file the store already deleted.
+    if (readyModel && (!settings?.localModelId || outcome.retired.includes(settings.localModelId))) {
+      settings = await AT.settings.save({ localModelId: readyModel.id });
+    }
     renderInstalled();
     setStatus(
       AT.i18n.msg('options_downloadDone', [

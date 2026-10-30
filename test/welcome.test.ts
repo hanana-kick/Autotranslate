@@ -176,6 +176,8 @@ const MODEL = { id: 'translategemma-4b-it-int8-web-a1b2c3', name: 'translategemm
 /** A transfer result, as `AT.modelflow.Outcome` shapes it. */
 const outcome = (over: ATNamespace = {}): ATNamespace => ({
   ok: true,
+  stored: true,
+  retired: [],
   modelId: MODEL.id,
   name: MODEL.name,
   bytes: MODEL.size,
@@ -400,7 +402,12 @@ test('a successful download paints progress, arms start and saves the model', as
 
   await click(field('start'));
 
-  assert.deepEqual(calls.saves, [{ enabled: true, localModelId: MODEL.id, targetLang: 'de' }]);
+  // The transfer selects the model it just installed, then Start turns the
+  // extension on with the language the user picked.
+  assert.deepEqual(calls.saves, [
+    { localModelId: MODEL.id },
+    { enabled: true, localModelId: MODEL.id, targetLang: 'de' }
+  ]);
   assert.equal(env.doc.body.dataset.done, 'true');
   assert.equal(field('start').hidden, true);
   assert.equal(field('start').disabled, true);

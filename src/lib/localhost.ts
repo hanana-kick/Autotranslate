@@ -30,8 +30,8 @@ namespace AT.localhost {
     /** The model's own tokenizer; the ground truth the chunker only estimates. */
     sizeInTokens?: (query: string) => number | undefined;
     cancelProcessing?: () => void;
-    delete?: () => void;
-    clear?: () => void;
+    /** The runtime's only disposer (`TaskRunner.close`); nothing else exists. */
+    close?: () => void;
     isIdle?: boolean;
   };
 
@@ -156,14 +156,11 @@ namespace AT.localhost {
         // A dead runtime cannot cancel; nothing to recover.
       }
       try {
-        llm.delete?.();
+        // `close()` frees the wasm graph; without it the weights stay allocated
+        // and the next load stacks a second model on top of the first.
+        llm.close?.();
       } catch {
-        // delete() and clear() are both best-effort.
-      }
-      try {
-        llm.clear?.();
-      } catch {
-        // ditto
+        // A dead runtime has nothing left to free.
       }
     }
     llm = null;
@@ -191,6 +188,13 @@ namespace AT.localhost {
     if (!adapter) fail('no-webgpu', 'no WebGPU adapter was found');
     state.supported = true;
     state.reason = null;
+    // A probe that failed once must not keep the host reporting an error for the
+    // rest of the session: the next successful probe clears it.
+    if (state.state === 'error') {
+      state.state = 'unloaded';
+      state.lastError = null;
+      publish();
+    }
   }
 
   async function loadRuntime(): Promise<GenaiModule> {
@@ -464,6 +468,7 @@ namespace AT.localhost {
         const request = message as CountRequest;
         return await enqueue(() => countNow(request));
       }
+      case C.MSG.LOCAL_QUERY:
       case C.MSG.LOCAL_STATUS:
         return { status: await status() };
       default:

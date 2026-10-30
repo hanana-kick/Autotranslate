@@ -27,6 +27,7 @@ namespace AT.offscreen {
     [C.MSG.LOCAL_LOAD]: handle,
     [C.MSG.LOCAL_UNLOAD]: handle,
     [C.MSG.LOCAL_COUNT]: handle,
-    [C.MSG.LOCAL_STATUS]: handle
+    [C.MSG.LOCAL_STATUS]: handle,
+    [C.MSG.LOCAL_QUERY]: handle
   });
 }

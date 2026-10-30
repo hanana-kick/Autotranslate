@@ -148,6 +148,7 @@ function inlineHostStub(record: { place: string | null; handled: string[]; messa
         case 'at/local-unload':
           return publish({ ...unloadedStatus });
         case 'at/local-status':
+        case 'at/local-query':
           return { status: state };
         case 'at/local-translate': {
           const texts = Array.isArray(message.texts) ? message.texts : [];
@@ -412,7 +413,7 @@ test('install seeds settings, opens onboarding and registers the context menu', 
 test('content batches reach the host once per unique text', async () => {
   const { AT, send, recorded } = environment({
     inlineHost: 'stub',
-    settings: { localModelId: 'model-a', targetLang: 'ko' }
+    settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' }
   });
   const reply = await send({ type: AT.C.MSG.BATCH, texts: ['Hello', 'Hello', 'Good morning'] });
   assert.equal(reply.ok, true);
@@ -424,7 +425,7 @@ test('content batches reach the host once per unique text', async () => {
 
 test('host failures reach the content script as an error, not a half translation', async () => {
   const { AT, send } = environment({
-    settings: { localModelId: 'model-a', targetLang: 'ko' },
+    settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' },
     withOffscreen: true,
     resident: true,
     hostReplies: {
@@ -826,7 +827,7 @@ test('the real host reaches the vendored runtime once WebGPU answers', async () 
 test('page context from the content script is normalised before the engine sees it', async () => {
   const { AT, recorded, send } = environment({
     inlineHost: 'stub',
-    settings: { localModelId: 'model-a', targetLang: 'ko' }
+    settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' }
   });
 
   const reply = await send({
@@ -874,7 +875,10 @@ test('the status the popup reads comes from a fresh probe of the host', async ()
     withOffscreen: true,
     resident: true,
     settings: { localModelId: 'model-a' },
-    hostReplies: { 'at/local-status': () => ({ ok: true, status: readyStatus }) }
+    hostReplies: {
+      'at/local-query': () => ({ ok: true, status: readyStatus }),
+      'at/local-status': () => ({ ok: true, status: readyStatus })
+    }
   });
 
   const first = await send({ type: AT.C.MSG.LOCAL_GET_STATUS });
@@ -883,7 +887,8 @@ test('the status the popup reads comes from a fresh probe of the host', async ()
   assert.equal(first.status.modelName, 'TranslateGemma 4B IT (int8, web)');
   assert.equal(first.supported, true);
 
-  const asked = () => recorded.hostMessages.filter((entry) => entry.type === AT.C.MSG.LOCAL_STATUS).length;
+  const asked = () =>
+    recorded.hostMessages.filter((entry) => entry.type === AT.C.MSG.LOCAL_QUERY).length;
   assert.equal(asked(), 1);
   await send({ type: AT.C.MSG.LOCAL_GET_STATUS });
   assert.equal(asked(), 2, 'every look asks the host, so an idle unload cannot hide behind a cache');

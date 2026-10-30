@@ -27,12 +27,14 @@ const MSG_NAMES = [
   'CONTENT_TRANSLATE_SELECTION',
   'CONTENT_RESTORE',
   'CONTENT_PING',
+  'CONTENT_STATE',
   // The on-device protocol: background <-> host, and the UI asking the
   // background to keep the host warm.
   'LOCAL_TRANSLATE',
   'LOCAL_LOAD',
   'LOCAL_UNLOAD',
   'LOCAL_COUNT',
+  'LOCAL_QUERY',
   'LOCAL_STATUS',
   'LOCAL_PREPARE',
   'LOCAL_RELEASE',

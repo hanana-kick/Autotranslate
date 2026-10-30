@@ -871,15 +871,16 @@ test('adding a rule canonicalises the pattern, persists it and re-renders the li
   const saved = savedSettings(env);
   assert.deepEqual(saved.siteRules, [
     { pattern: 'news.example.com', action: 'never' },
-    { pattern: 'news.example.com/news/*', action: 'always' }
-  ], 'the host and path are lower-cased, the typed action kept');
+    // Hosts fold to lower case; a path keeps the casing the server uses.
+    { pattern: 'news.example.com/News/*', action: 'always' }
+  ], 'the host is folded, the path and the typed action are kept');
   assert.equal(field('rulePattern').value, '', 'the input is cleared for the next rule');
   assert.equal(field('saveStatus').dataset.kind, 'ok');
   assert.deepEqual(
     ruleItems(field('ruleList')).map((item) => [item.querySelectorAll('code')[0]!.textContent, item.querySelectorAll('span.tag')[0]!.dataset.action]),
     [
       ['news.example.com', 'never'],
-      ['news.example.com/news/*', 'always']
+      ['news.example.com/News/*', 'always']
     ],
     'the list is repainted from the reply, not from the input'
   );

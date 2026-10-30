@@ -41,7 +41,7 @@ const VENDOR_FILES: { from: string; to: string }[] = [
 ];
 // 'offscreen' hosts the on-device model; Firefox has no such API and the
 // firefox target strips it, so it never ships in that bundle.
-const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'activeTab', 'tabs', 'offscreen', 'sidePanel'];
+const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel'];
 type Manifest = {
   manifest_version?: number;
   name?: string;

@@ -181,6 +181,19 @@ namespace AT.engines {
     return { translations, detected };
   }
 
+  /**
+   * A generation is a single serial model call, so a prompt that carries thirty
+   * paragraphs leaves the page looking untouched for a minute and answers in one
+   * shot. Windows keep each call short and let the caller see results arrive.
+   */
+  const MAX_TEXTS_PER_PROMPT = 4;
+
+  function windowed<T>(items: readonly T[], size: number): T[][] {
+    const out: T[][] = [];
+    for (let index = 0; index < items.length; index += size) out.push(items.slice(index, index + size));
+    return out;
+  }
+
   export async function translate(request: TranslateRequest = {}): Promise<TranslateResult> {
     const { texts = [], source = 'auto', target, localModelId = '', localMaxTokens = AT.local.DEFAULT_MAX_TOKENS } = request;
     if (!Array.isArray(texts)) throw new EngineError('config', 'texts must be an array');
@@ -201,23 +214,33 @@ namespace AT.engines {
      * characters by a constant. The estimate is only the fallback for a host
      * that cannot answer (an older document, a failed load).
      */
-    const counted = await AT.local.callHost({
-      type: C.MSG.LOCAL_COUNT,
-      modelId: localModelId,
-      maxTokens: localMaxTokens,
-      texts: unique,
-      source: AT.gemma.isLang(source) ? source : '',
-      target: AT.gemma.isLang(target) ? target : '',
-      context: AT.pagecontext.hint(request.context ?? null) ?? ''
-    });
-    const counts = Array.isArray(counted?.counts) ? counted.counts.map((value) => Number(value)) : null;
-    const overhead = Number(counted?.overhead);
-    let chunks: string[][];
-    if (counted?.ok && counts && counts.length === unique.length && Number.isFinite(overhead)) {
-      chunks = AT.local.chunkByCounts(unique, counts, localMaxTokens, overhead);
-    } else {
-      AT.warn('the host did not count tokens, packing by estimate');
-      chunks = AT.local.chunkByTokens(unique, localMaxTokens);
+    const countsFor = async (window: string[]): Promise<{ counts: number[] | null; overhead: number }> => {
+      const counted = await AT.local.callHost({
+        type: C.MSG.LOCAL_COUNT,
+        modelId: localModelId,
+        maxTokens: localMaxTokens,
+        texts: window,
+        source: AT.gemma.isLang(source) ? source : '',
+        target: AT.gemma.isLang(target) ? target : '',
+        context: AT.pagecontext.hint(request.context ?? null) ?? ''
+      });
+      const counts = Array.isArray(counted?.counts) ? counted.counts.map((value) => Number(value)) : null;
+      const overhead = Number(counted?.overhead);
+      if (!counted?.ok || !counts || counts.length !== window.length || !Number.isFinite(overhead)) {
+        return { counts: null, overhead: 0 };
+      }
+      return { counts, overhead };
+    };
+
+    const chunks: string[][] = [];
+    for (const window of windowed(unique, MAX_TEXTS_PER_PROMPT)) {
+      const { counts, overhead } = await countsFor(window);
+      if (counts) {
+        chunks.push(...AT.local.chunkByCounts(window, counts, localMaxTokens, overhead));
+      } else {
+        AT.warn('the host did not count tokens, packing by estimate');
+        chunks.push(...AT.local.chunkByTokens(window, localMaxTokens));
+      }
     }
 
     const batchOut = new Map<string, string>();

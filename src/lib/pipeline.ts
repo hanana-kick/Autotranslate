@@ -34,6 +34,10 @@ namespace AT.pipeline {
     sentences?: AT.dom.Sentences | undefined;
     /** Viewport height; the browser's own when omitted. */
     viewportHeight?: () => number;
+    /** Checked between groups, so a restore can drop a pass it no longer owns. */
+    shouldAbort?: (() => boolean) | undefined;
+    /** Called after every group, so the UI can show progress instead of silence. */
+    onProgress?: ((progress: { translated: number; requested: number }) => void) | undefined;
     /** Test seams; a real DOM provides both when omitted. */
     describe?: ((node: Text) => AT.targets.NodeInfo) | undefined;
     measure?: ((node: Text) => { top: number; bottom: number }) | undefined;
@@ -127,6 +131,13 @@ namespace AT.pipeline {
     const viewportHeight = request.viewportHeight ?? (() => globalThis.innerHeight || 800);
 
     const done = new Set<Text>();
+    /** A pass owns the translator's run table: two of them must not interleave. */
+    let passes: Promise<unknown> = Promise.resolve();
+    const once = <T>(job: () => Promise<T>): Promise<T> => {
+      const next = passes.then(job, job);
+      passes = next.catch(() => undefined);
+      return next;
+    };
     /** Nodes a background pass has already reached this round. A page that
      *  keeps rewriting its own top (a video site re-rendering its feed) would
      *  otherwise spend every tick there and never reach the comments below. */
@@ -144,6 +155,8 @@ namespace AT.pipeline {
         maxNodes: settings.maxNodes,
         batchChars: settings.batchChars,
         sentences: request.sentences,
+        shouldAbort: request.shouldAbort,
+        onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
         translate: async (texts) => {
           batches += 1;
           // The region is set per group by the plan below; a batch that arrives
@@ -214,10 +227,13 @@ namespace AT.pipeline {
       let requested = 0;
       let runs = 0;
       let failed = 0;
+      /** Groups that threw outright; a group can also fail in part. */
+      let groupFailures = 0;
       let attempted = 0;
       let error: string | null = null;
       let firstError: unknown = null;
       for (const group of groups) {
+        if (request.shouldAbort?.() === true) break;
         const subset = group.ids
           .map((id) => ordered[Number(id)])
           .filter((node): node is Text => node !== undefined);
@@ -228,6 +244,10 @@ namespace AT.pipeline {
           const result = await dom.translateNodes(subset);
           requested += result.requested;
           runs += result.runs;
+          if (result.failed > 0) {
+            failed += result.failed;
+            error ??= result.error ?? 'a batch was refused';
+          }
           // Only what the translator actually wrote is done. A heading the model
           // answered with nothing stays eligible, so the next pass retries it
           // instead of leaving the page half English forever.
@@ -235,10 +255,12 @@ namespace AT.pipeline {
             if (dom.has(node)) done.add(node);
             if (budgeted) swept.add(node);
           }
+          request.onProgress?.({ translated: dom.stats().translated, requested });
         } catch (caught: unknown) {
           // A generation that fails must not take the rest of the page with it. Those nodes stay eligible; the caller is
           // told what happened.
           failed += 1;
+          groupFailures += 1;
           if (!firstError) firstError = caught;
           error ??= String((caught as { message?: unknown })?.message ?? caught);
           AT.warn('translation batch failed', group.role, caught);
@@ -247,13 +269,13 @@ namespace AT.pipeline {
       role = null;
       // Nothing got through: fail the pass so the caller shows the host's own
       // error instead of a silent no-op. A partial pass returns normally.
-      if (attempted > 0 && failed === attempted) throw firstError;
+      if (attempted > 0 && groupFailures === attempted) throw firstError;
       return { requested, translated: dom.stats().translated, runs, batches: batches - before, failed, error };
     }
 
     return {
-      translate: () => run(null, true),
-      refresh: (root, budget) => run(root ?? null, false, budget),
+      translate: () => once(() => run(null, true)),
+      refresh: (root, budget) => once(() => run(root ?? null, false, budget)),
       isTranslated(node: Text) {
         return translator ? translator.holds(node) : false;
       },

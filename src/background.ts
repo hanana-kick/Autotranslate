@@ -247,12 +247,35 @@ if (typeof self.importScripts === 'function') {
       return { status: 'skipped', reason: plan.reason };
     }
     await ensureInjected(tab.id);
-    const response = (await api.tabs.sendMessage(tab.id, {
-      type: C.MSG.CONTENT_TRANSLATE,
-      decision: plan,
-      settings: AT.settings.contentSnapshot(settings)
-    })) as AT.background.ContentReply | undefined;
-    if (!response?.ok) throw new Error(response?.error ?? 'the content script did not answer');
+    // The model answers after the whole pass; without this the popup reads
+    // `state: null` and says "not translated yet" while the page is working.
+    const pending = stateFor(tab.id);
+    pending.status = 'translating';
+    pending.targetLang = settings.targetLang;
+    pending.error = null;
+    await updateBadge(tab.id);
+    let response: AT.background.ContentReply | undefined;
+    try {
+      response = (await api.tabs.sendMessage(tab.id, {
+        type: C.MSG.CONTENT_TRANSLATE,
+        decision: plan,
+        settings: AT.settings.contentSnapshot(settings)
+      })) as AT.background.ContentReply | undefined;
+    } catch (error: unknown) {
+      // Keep the reason the page gave instead of a bare channel error.
+      const state = stateFor(tab.id);
+      state.status = 'error';
+      state.error = String((error as { message?: unknown })?.message ?? error);
+      await updateBadge(tab.id);
+      throw error;
+    }
+    if (!response?.ok) {
+      const state = stateFor(tab.id);
+      state.status = 'error';
+      state.error = response?.error ?? 'the content script did not answer';
+      await updateBadge(tab.id);
+      throw new Error(state.error);
+    }
     const state = stateFor(tab.id);
     state.status = response.status === 'translated' ? 'translated' : 'idle';
     state.translated = response.translated ?? 0;
@@ -294,6 +317,9 @@ if (typeof self.importScripts === 'function') {
 
   async function translateBatch(message: AT.background.BatchRequest): Promise<AT.MessageResult> {
     const settings = await getSettings();
+    // The switch is the policy: a page that was translated before it went off
+    // must not keep spending generations on new text.
+    if (!settings.enabled) throw new Error('translation is turned off');
     const request: AT.engines.TranslateRequest = {
       texts: message.texts ?? [],
       source: message.sourceLang ?? settings.sourceLang,
@@ -334,9 +360,28 @@ if (typeof self.importScripts === 'function') {
         : null,
       canTranslate: isInjectable(tab?.url),
       rule: rule?.action ?? null,
-      state: tab?.id != null ? tabStates.get(tab.id) ?? null : null,
+      state: tab?.id != null ? await tabStateOf(tab.id, tab.url) : null,
       local: await localState(true)
     };
+  }
+
+  /**
+   * The state of a tab, from memory or from the tab itself. A Chrome service
+   * worker is terminated after a quiet spell, so the map is not the truth: the
+   * content script knows whether the page in front of the user is translated.
+   */
+  async function tabStateOf(tabId: number, url?: string): Promise<AT.background.TabState | null> {
+    const known = tabStates.get(tabId) ?? null;
+    if (known || !isInjectable(url)) return known;
+    const reply = (await api.tabs
+      .sendMessage(tabId, { type: C.MSG.CONTENT_STATE })
+      .catch(() => undefined)) as { ok?: boolean; status?: string; translated?: number; error?: string | null } | undefined;
+    if (!reply?.ok) return null;
+    const state = stateFor(tabId);
+    state.status = typeof reply.status === 'string' ? reply.status : 'idle';
+    state.translated = Number(reply.translated) || 0;
+    state.error = reply.error ?? null;
+    return state;
   }
 
   async function reportState(message: AT.background.StateReport, sender: AT.Sender): Promise<AT.MessageResult> {
@@ -432,7 +477,11 @@ if (typeof self.importScripts === 'function') {
     });
   }
 
-  function ensureHost(): Promise<void> {
+  async function ensureHost(): Promise<void> {
+    // The document can die after it was created (a GPU crash, the browser
+    // reclaiming it). A cached resolved promise would then keep every call
+    // pointed at a listener that no longer exists.
+    if (hostPromise && HOST_PLACEMENT !== 'background' && !(await hostIsUp())) hostPromise = null;
     hostPromise ??= (HOST_PLACEMENT === 'background' ? installInlineHost() : createOffscreen()).catch(
       (error: unknown) => {
         hostPromise = null;
@@ -495,7 +544,7 @@ if (typeof self.importScripts === 'function') {
   async function localState(probe: boolean): Promise<{ status: AT.local.LocalStatus; supported: boolean }> {
     if (probe) {
       await ensureHost();
-      const reply = await AT.local.callHost({ type: C.MSG.LOCAL_STATUS });
+      const reply = await AT.local.callHost({ type: C.MSG.LOCAL_QUERY });
       if (reply?.ok) hostStatus = AT.local.normalizeStatus(reply.status);
     }
     const status = hostStatus ?? AT.local.normalizeStatus(null);
@@ -541,10 +590,13 @@ if (typeof self.importScripts === 'function') {
     if (changeInfo.status !== 'complete' || !tab) return;
     if (!isInjectable(tab.url)) {
       tabStates.delete(tabId);
+      void updateBadge(tabId);
       return;
     }
     getSettings()
-      .then((settings) => translateTab(tabId, { decision: decide(tab.url, settings) }))
+      // `translateTab` re-reads the tab, so it must take the decision from that
+      // read: the event's snapshot can belong to a page that is already gone.
+      .then(() => translateTab(tabId))
       .catch((error) => AT.warn('auto translate failed', error));
   });
 
@@ -552,19 +604,51 @@ if (typeof self.importScripts === 'function') {
     tabStates.delete(tabId);
   });
 
+  /**
+   * Pushes a settings change into the tabs that are already translated: the
+   * switch and the target language are the two controls a user expects to apply
+   * to the page in front of them, wherever they were changed from.
+   */
+  async function retargetTabs(settings: AT.settings.Settings, previous: AT.settings.Settings): Promise<void> {
+    if (previous.enabled === settings.enabled && previous.targetLang === settings.targetLang) return;
+    const snapshot = AT.settings.contentSnapshot(settings);
+    const tabs = [...tabStates.keys()];
+    for (const id of tabs) {
+      try {
+        if (!settings.enabled) {
+          await api.tabs.sendMessage(id, { type: C.MSG.CONTENT_RESTORE });
+        } else {
+          await api.tabs.sendMessage(id, {
+            type: C.MSG.CONTENT_TRANSLATE,
+            decision: { action: 'translate', reason: 'settings' },
+            settings: snapshot
+          });
+        }
+      } catch {
+        // A tab without a listener has nothing to restore.
+        tabStates.delete(id);
+      }
+    }
+    await Promise.all(tabs.map((id) => updateBadge(id)));
+  }
+
   // A context with storage always has onChanged; the plain-JS version relied on
   // the same guarantee, so the assertion keeps a missing member a TypeError.
   api.storage.onChanged!.addListener((changes, area) => {
     if (area !== 'local' || !changes[C.STORAGE_KEY]) return;
+    const edited = changes[C.STORAGE_KEY];
+    const previous = edited?.oldValue ? AT.settings.normalize(edited.oldValue) : null;
     settingsCache = null;
-    // Whatever is resident was loaded for the model the user had chosen;
-    // keeping it after they picked another one would translate with a model
-    // nobody selected. The engine is not part of this: a model prepared from
-    // the options page stays warm while the user translates elsewhere.
-    if (localKey === null) return;
     void getSettings()
-      .then((settings) => (localKey === settings.localModelId ? undefined : releaseLocal()))
-      .catch((error) => AT.warn('releasing the on-device model failed', error));
+      .then(async (settings) => {
+        // Whatever was resident was loaded for the model the user had chosen;
+        // keeping it after they picked another one would translate with a model
+        // nobody selected. A model prepared from the options page stays warm
+        // while the user translates elsewhere.
+        if (localKey !== null && localKey !== settings.localModelId) await releaseLocal();
+        if (previous) await retargetTabs(settings, previous);
+      })
+      .catch((error) => AT.warn('applying a settings change failed', error));
   });
 
   // The runtime hands over untrusted JSON: each handler names the payload it

@@ -43,6 +43,10 @@ namespace AT.dom {
     mergeInline?: boolean;
     /** Split long text nodes into sentences. Off when absent. */
     sentences?: Sentences | undefined;
+    /** Checked between jobs: a restore in another task can drop a queued answer. */
+    shouldAbort?: (() => boolean) | undefined;
+    /** Called after each chunk's answers are written, so a pass can report progress. */
+    onApply?: ((translated: number) => void) | undefined;
   };
 
   export type Item = {
@@ -56,7 +60,14 @@ namespace AT.dom {
   /** `text` is what the node held before we touched it; `applied` what we wrote. */
   export type Original = { source: string; text: string | null; applied?: string };
 
-  export type Result = { requested: number; translated: number; runs: number };
+  export type Result = {
+    requested: number;
+    translated: number;
+    runs: number;
+    /** Chunks the model refused; the ones around them still landed. */
+    failed: number;
+    error: string | null;
+  };
 
   export type Translator = {
     collect(root: Node | null | undefined, limit?: number): Text[];
@@ -164,7 +175,9 @@ namespace AT.dom {
       batchChars = AT.C.DEFAULT_BATCH_CHARS,
       translate,
       mergeInline = true,
-      sentences
+      sentences,
+      shouldAbort,
+      onApply
     } = options;
 
     if (typeof translate !== 'function') {
@@ -215,15 +228,19 @@ namespace AT.dom {
 
     function apply(item: Item, translated: string | undefined): void {
       const body = typeof translated === 'string' ? translated.trim() : '';
-      const next = body ? item.lead + body + item.trail : item.source;
-      if (next === item.source) return;
+      // No answer at all: leave the record alone so a later pass retries.
+      if (!body) return;
+      const next = item.lead + body + item.trail;
       if (!originals.has(item.node)) {
         originals.set(item.node, { source: item.source, text: item.node.nodeValue });
       }
       const entry = originals.get(item.node);
       if (!entry) return;
+      // The model answering with the same text (a proper noun, a page already in
+      // the target language) is still an answer: recording it is what stops the
+      // node from being planned again on every pass.
       entry.applied = next;
-      item.node.nodeValue = next;
+      if (next !== item.source) item.node.nodeValue = next;
     }
 
     /**
@@ -253,7 +270,13 @@ namespace AT.dom {
           if (nodes.length >= limit) return;
           if (child.nodeType === 3) {
             const textNode = child as Text;
-            if (!accepted(textNode)) continue;
+            if (!accepted(textNode)) {
+              // Whitespace and punctuation between inline elements get their own
+              // text node; the run's key cannot carry them, so it has to end
+              // here instead of welding the words on both sides.
+              flush();
+              continue;
+            }
             if (!current) current = [];
             current.push(itemFor(textNode));
             nodes.push(textNode);
@@ -344,33 +367,75 @@ namespace AT.dom {
         }
         pending.push(job);
       }
-      if (unique.length) await request(unique);
+      /**
+       * Writes every job whose answers are all in the cache, and reports what it
+       * wrote. A job that is still waiting for one of its sentences stays in
+       * `pending` for the next round.
+       */
+      function applyReady(): number {
+        let wrote = 0;
+        for (let index = 0; index < pending.length; index += 1) {
+          const job = pending[index];
+          if (!job) continue;
+          // A restore that arrived while the model was working owns the page now.
+          if (shouldAbort?.() === true) return wrote;
+          const first = job.items[0];
+          if (job.split && first) {
+            const parts = job.split.parts;
+            const pieces = parts.map((part) => cache.get(part));
+            // A missing part has no answer yet: leave the node for the next pass.
+            if (pieces.some((piece) => piece === undefined)) continue;
+            apply(first, pieces.join(job.split.gap));
+          } else if (job.items.length === 1 && first) {
+            const answer = cache.get(job.keys[0] ?? '');
+            if (answer === undefined) continue;
+            apply(first, answer);
+          } else {
+            const answer = cache.get(job.keys[0] ?? '');
+            if (answer === undefined) continue;
+            const parts = distributeRun(job.items, answer);
+            mergedRuns += 1;
+            job.items.forEach((item, position) => {
+              const piece = parts[position] ?? '';
+              // A node that received no words must not keep its source text: the
+              // sentence moved out of it.
+              if (piece) apply(item, piece);
+              else clear(item);
+            });
+          }
+          pending.splice(index, 1);
+          index -= 1;
+          wrote += 1;
+        }
+        return wrote;
+      }
 
       mergedRuns = 0;
-      for (const job of pending) {
-        const first = job.items[0];
-        if (job.split && first) {
-          // One text node, several sentences: translate each, rejoin in place.
-          const pieces = job.split.parts.map((part) => cache.get(part) ?? part);
-          apply(first, pieces.join(job.split.gap));
+      let failed = 0;
+      let error: string | null = null;
+      let firstError: unknown = null;
+      let wrote = 0;
+      // One request at a time, writing after each: a page of thirty paragraphs
+      // would otherwise stay in the source language until the last answer.
+      for (const chunk of chunkByChars(unique, batchChars)) {
+        if (shouldAbort?.() === true) break;
+        try {
+          await request(chunk);
+        } catch (caught: unknown) {
+          // A refused chunk must not discard the ones that already landed.
+          failed += 1;
+          firstError ??= caught;
+          error ??= String((caught as { message?: unknown })?.message ?? caught);
           continue;
         }
-        if (job.items.length === 1 && first) {
-          apply(first, cache.get(job.keys[0] ?? '') ?? job.keys[0]);
-          continue;
-        }
-        const key = job.keys[0] ?? '';
-        const parts = distributeRun(job.items, cache.get(key) ?? key);
-        mergedRuns += 1;
-        job.items.forEach((item, index) => {
-          const piece = parts[index] ?? '';
-          // A node that received no words must not keep its source text: the
-          // sentence moved out of it.
-          if (piece) apply(item, piece);
-          else clear(item);
-        });
+        wrote += applyReady();
+        if (wrote > 0) onApply?.(originals.size);
       }
-      return { requested: unique.length, translated: originals.size, runs: mergedRuns };
+      if (shouldAbort?.() !== true) wrote += applyReady();
+      // Nothing got through at all: the caller has to see the failure, not an
+      // empty success.
+      if (failed > 0 && wrote === 0) throw firstError ?? new Error(error ?? 'translation failed');
+      return { requested: unique.length, translated: originals.size, runs: mergedRuns, failed, error };
     }
 
     return {
@@ -394,10 +459,16 @@ namespace AT.dom {
           // Nodes outside the subtree keep their record: a later full restore
           // must still be able to put their text back.
           if (root && !root.contains(node)) continue;
-          node.nodeValue = entry.text;
+          // The page rewrote this node after we did: it owns the text now.
+          if (entry.applied === node.nodeValue) {
+            node.nodeValue = entry.text;
+            restored += 1;
+          }
           originals.delete(node);
-          restored += 1;
         }
+        // Keyed by source text alone, so it cannot survive a restore: the next
+        // pass may be translating into a different language.
+        cache.clear();
         runs.clear();
         runOf.clear();
         return { restored };

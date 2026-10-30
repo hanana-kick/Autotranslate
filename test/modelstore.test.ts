@@ -239,7 +239,7 @@ test('a download is rejected before the network for a bad url', async () => {
   assert.deepEqual(calls, []);
 });
 
-test('a download sends the token as a bearer credential', async () => {
+test('a download sends the token as a bearer credential to Hugging Face', async () => {
   const seen: { url: string; init: { headers: Record<string, string> } }[] = [];
   active.use({
     fetchImpl: async (url: string, init: { headers: Record<string, string> }) => {
@@ -247,11 +247,31 @@ test('a download sends the token as a bearer credential', async () => {
       return response(200, bodyOf(...big()), length);
     }
   });
-  const result = await modelstore.download({ url: 'https://a.test/model.task', token: 'hf_secret' });
+  const result = await modelstore.download({
+    url: 'https://huggingface.co/litert-community/model/resolve/main/model.task',
+    token: 'hf_secret'
+  });
   assert.equal(result.ok, true);
-  assert.equal(seen[0]!.url, 'https://a.test/model.task');
+  assert.equal(
+    seen[0]!.url,
+    'https://huggingface.co/litert-community/model/resolve/main/model.task'
+  );
   assert.equal(seen[0]!.init.headers.Authorization, 'Bearer hf_secret');
   assert.equal(seen[0]!.init.headers.Accept, 'application/octet-stream');
+});
+
+test('the token never travels to a host that is not Hugging Face', async () => {
+  // The URL field takes any https address; the credential belongs to one host.
+  const seen: Record<string, string>[] = [];
+  active.use({
+    fetchImpl: async (_url: string, init: { headers: Record<string, string> }) => {
+      seen.push(init.headers);
+      return response(200, bodyOf(...big()), length);
+    }
+  });
+  const result = await modelstore.download({ url: 'https://a.test/model.task', token: 'hf_secret' });
+  assert.equal(result.ok, true);
+  assert.equal(seen[0]!.Authorization, undefined, 'no credential leaves for an unknown host');
 });
 
 test('an existing Bearer prefix is not doubled', async () => {
@@ -262,7 +282,7 @@ test('an existing Bearer prefix is not doubled', async () => {
       return response(200, bodyOf(...big()), length);
     }
   });
-  await modelstore.download({ url: 'https://a.test/model.task', token: 'Bearer hf_secret' });
+  await modelstore.download({ url: 'https://huggingface.co/model.task', token: 'Bearer hf_secret' });
   assert.equal(seen[0]!.Authorization, 'Bearer hf_secret');
 });
 

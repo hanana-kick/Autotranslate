@@ -144,19 +144,23 @@ namespace AT.modelstore {
             const chunk = await reader.read();
             if (chunk.done) break;
             if (!chunk.value) continue;
-            await writable.write(chunk.value as unknown as BufferSource);
             written += chunk.value.byteLength;
+            // A response without a length is still bounded: this is the only
+            // artefact the extension executes, and the quota is the user's disk.
+            if (written > L.MAX_MODEL_BYTES) throw new Error('model-too-large');
+            await writable.write(chunk.value as unknown as BufferSource);
           }
         } catch (error: unknown) {
-          await writable.abort?.(error as Error);
-          throw error;
-        } finally {
           try {
-            await writable.close();
+            await writable.abort?.(error as Error);
           } catch {
-            // An aborted stream cannot be closed; removeEntry below cleans up.
+            // An already-dead stream cannot be aborted; the throw below stands.
           }
+          throw error;
         }
+        // `close()` is where OPFS commits the swap file: a failure here means
+        // nothing was stored, so it must reach `ingest` and clean up.
+        await writable.close();
         return written;
       },
       async read(id) {
@@ -245,7 +249,14 @@ namespace AT.modelstore {
     expectedBytes?: number | undefined;
   };
 
-  export type IngestResult = { ok: boolean; record: ModelRecord | null; error: string | null; bytes: number };
+  export type IngestResult = {
+    ok: boolean;
+    record: ModelRecord | null;
+    error: string | null;
+    bytes: number;
+    /** Ids of earlier copies this one replaced; the selection may point at one. */
+    retired?: string[];
+  };
 
   /** Wraps a stream so every consumer sees the same bytes and can be counted. */
   function countingStream(
@@ -317,17 +328,31 @@ namespace AT.modelstore {
     }
     // Registration is the last step, and it retires the copy this one replaces,
     // so a failed transfer above can never touch a working model.
-    await putRecord(record);
-    await replaceExisting(record);
-    return { ok: true, record, error: null, bytes };
+    try {
+      await putRecord(record);
+    } catch (error: unknown) {
+      // Two gigabytes are already on disk: do not leave them behind without a
+      // record, where nothing can list or delete them.
+      await files().remove(id);
+      return { ok: false, record: null, error: 'store-failed', bytes };
+    }
+    const retired = await replaceExisting(record).catch((error: unknown) => {
+      AT.warn('retiring the replaced model failed', error);
+      return [] as string[];
+    });
+    return { ok: true, record, error: null, bytes, retired };
   }
 
-  /** Deletes a previous copy of the same file before replacing it. */
-  async function replaceExisting(record: ModelRecord): Promise<void> {
+  /** Deletes previous copies of the same file; answers the ids it retired. */
+  async function replaceExisting(record: ModelRecord): Promise<string[]> {
     const records = await list();
+    const retired: string[] = [];
     for (const existing of records) {
-      if (existing.name === record.name && existing.id !== record.id) await remove(existing.id);
+      if (existing.name === record.name && existing.id !== record.id && (await remove(existing.id))) {
+        retired.push(existing.id);
+      }
     }
+    return retired;
   }
 
   export type DownloadRequest = {
@@ -348,7 +373,11 @@ namespace AT.modelstore {
 
     const headers: Record<string, string> = { Accept: 'application/octet-stream' };
     const token = typeof request.token === 'string' ? request.token.trim() : '';
-    if (token) headers.Authorization = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
+    // The token is the user's Hugging Face credential: it rides on requests to
+    // that host only, never on whatever URL happens to be in the field.
+    const host = new URL(url).hostname.toLowerCase();
+    const trusted = host === 'huggingface.co' || host.endsWith('.huggingface.co');
+    if (token && trusted) headers.Authorization = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
 
     let response: StreamResponse;
     try {

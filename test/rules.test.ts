@@ -70,8 +70,14 @@ test('resolve names the stored pattern, not an internal parse field', () => {
   assert.deepEqual(rule, { action: 'never', pattern: 'example.com/news/*' });
 });
 
-test('canonical folds case, wildcards and leading www', () => {
-  assert.equal(rules.canonical('  *.Example.com/News/*  '), 'example.com/news/*');
+test('canonical folds case in the host only, keeps the path verbatim', () => {
+  // A host is case-insensitive, a path is not: folding the path made a rule
+  // like `example.com/Docs/*` unmatchable on a server that spells it `Docs`.
+  assert.equal(rules.canonical('  *.Example.com/News/*  '), 'example.com/News/*');
+  assert.equal(rules.canonical('Example.com/Docs/*'), 'example.com/Docs/*');
+  const pattern = rules.parse('example.com/Docs/*');
+  assert.equal(rules.matches(pattern, 'https://example.com/Docs/page'), true);
+  assert.equal(rules.matches(pattern, 'https://example.com/docs/page'), false, 'path matching stays case-sensitive');
   assert.equal(rules.canonical('www.example.com'), 'example.com');
   assert.equal(rules.canonical('www.Example.com/'), 'example.com', 'a bare trailing slash is not part of the rule');
   assert.equal(rules.canonical('https://example.com'), 'https://example.com');
