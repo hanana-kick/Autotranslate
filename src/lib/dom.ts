@@ -22,7 +22,7 @@ namespace AT.dom {
     STYLE: true, TEMPLATE: true, TEXTAREA: true, TRACK: true, VIDEO: true
   };
 
-  export type Provider = (texts: string[]) => Promise<string[]>;
+  export type Provider = (texts: string[], hint?: string | undefined) => Promise<string[]>;
 
   /** Only what the engine touches; tests inject a duck-typed document. */
   export type DocumentRoot = { nodeType: number; documentElement: Element | null };
@@ -32,6 +32,8 @@ namespace AT.dom {
     split: (text: string) => string[];
     /** A text shorter than this is sent whole: one sentence is not a batch. */
     maxChars: number;
+    /** Split every multi-sentence text, however short: one answer per sentence. */
+    always?: boolean;
   };
 
   export type Options = {
@@ -301,9 +303,9 @@ namespace AT.dom {
       return nodes;
     }
 
-    async function request(keys: readonly string[]): Promise<void> {
+    async function request(keys: readonly string[], hint?: string | undefined): Promise<void> {
       for (const chunk of chunkByChars(keys, batchChars)) {
-        const result = await translate(chunk);
+        const result = await translate(chunk, hint);
         if (!Array.isArray(result) || result.length !== chunk.length) {
           throw new Error('the model returned an unexpected number of results');
         }
@@ -316,21 +318,29 @@ namespace AT.dom {
       }
     }
 
-    /** Sentences of one text node, or null when it is short enough to send whole. */
-    function sentenceJob(item: Item): { item: Item; parts: string[]; gap: string } | null {
-      if (!sentences || item.core.length <= sentences.maxChars) return null;
+    /**
+     * Sentences of one text node, or null when it is sent whole. `always` splits
+     * short paragraphs too, which trades a little prompt overhead per sentence
+     * for an answer that can be written back as soon as it lands.
+     */
+    function sentenceJob(item: Item): { item: Item; parts: string[]; gap: string; hint: string } | null {
+      if (!sentences) return null;
+      if (!sentences.always && item.core.length <= sentences.maxChars) return null;
       const parts = sentences.split(item.core);
       if (parts.length < 2) return null;
       // Japanese and Chinese do not put a space between sentences; keep the
       // page's own habit instead of inventing one.
       const gap = /\s/.test(item.core) ? ' ' : '';
-      return { item, parts, gap };
+      // The paragraph travels with every sentence: pronouns and terminology read
+      // the same way in all of them.
+      const hint = item.core.length > 160 ? item.core.slice(0, 160) : item.core;
+      return { item, parts, gap, hint };
     }
 
     async function run(nodes: readonly Text[]): Promise<Result> {
       const incoming = new Set(nodes);
       const claimed = new Set<Text>();
-      const jobs: { items: Item[]; keys: string[]; split?: { parts: string[]; gap: string } }[] = [];
+      const jobs: { items: Item[]; keys: string[]; hint?: string; split?: { parts: string[]; gap: string; hint: string } }[] = [];
       for (const node of nodes) {
         if (claimed.has(node)) continue;
         const id = mergeInline ? runOf.get(node) : undefined;
@@ -350,7 +360,11 @@ namespace AT.dom {
         claimed.add(node);
         const item = itemFor(node);
         const split = sentenceJob(item);
-        jobs.push(split ? { items: [item], keys: split.parts, split } : { items: [item], keys: [item.core] });
+        jobs.push(
+          split
+            ? { items: [item], keys: split.parts, hint: split.hint, split }
+            : { items: [item], keys: [item.core], hint: item.core.length > 160 ? item.core.slice(0, 160) : item.core }
+        );
       }
 
       // Every job is applied, including the ones answered from the cache: a page
@@ -383,9 +397,12 @@ namespace AT.dom {
           if (job.split && first) {
             const parts = job.split.parts;
             const pieces = parts.map((part) => cache.get(part));
-            // A missing part has no answer yet: leave the node for the next pass.
-            if (pieces.some((piece) => piece === undefined)) continue;
-            apply(first, pieces.join(job.split.gap));
+            const answered = pieces.filter((piece) => piece !== undefined).length;
+            if (answered === 0) continue;
+            // Write what has an answer and keep the rest in the source language:
+            // the page reads better sentence by sentence than blank until the end.
+            apply(first, pieces.map((piece, index) => piece ?? parts[index] ?? '').join(job.split.gap));
+            if (answered < parts.length) continue;
           } else if (job.items.length === 1 && first) {
             const answer = cache.get(job.keys[0] ?? '');
             if (answer === undefined) continue;

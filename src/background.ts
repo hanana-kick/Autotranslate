@@ -37,6 +37,8 @@ namespace AT.background {
     context?: unknown;
     /** Which region of the page the batch came from. */
     role?: unknown;
+    /** The block a sentence came from, sent along as context. */
+    hint?: unknown;
   };
 
   /** at/test-engine; every override is optional so stored settings win. */
@@ -328,6 +330,7 @@ if (typeof self.importScripts === 'function') {
       // is the only thing that decides what it means.
       context: AT.pagecontext.normalize(message.context),
       role: AT.targets.normalizeRole(message.role),
+      hint: typeof message.hint === 'string' ? message.hint.slice(0, 200) : undefined,
       localModelId: settings.localModelId,
       localMaxTokens: settings.localMaxTokens
     };

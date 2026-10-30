@@ -235,7 +235,10 @@ namespace AT.local {
     hint?: string | null
   ): string {
     const first = texts[0] ?? '';
-    if (texts.length === 1) {
+    // One text with no context is the model's own single-text shape; with a
+    // paragraph around it, the numbered shape is what keeps the context line
+    // from being translated as if it were the text.
+    if (texts.length === 1 && !hint) {
       return source ? buildTranslatePrompt(source, target, first) : buildAutoPrompt(target, first);
     }
     const to = AT.gemma.nameOf(target);

@@ -44,6 +44,8 @@ namespace AT.localhost {
     maxTokens?: unknown;
     /** One line of page context, already rendered and bounded by the engine. */
     context?: unknown;
+    /** The block a sentence came from, so one sentence is read in its paragraph. */
+    hint?: unknown;
   };
 
   /** at/local-load and at/local-unload. */
@@ -366,7 +368,7 @@ namespace AT.localhost {
     // Context only travels in the numbered batch prompt: measured, the
     // single-text shape answers with the context line translated instead of the
     // text, and the auto shape has no room for metadata at all.
-    const batch = L.buildBatchPrompt(source, target, texts, texts.length > 1 ? hint : null);
+    const batch = L.buildBatchPrompt(source, target, texts, hint && hint.length > 0 ? hint : null);
     if (texts.length > 1 && !fits(batch, texts)) {
       // Halve the batch and pay for a second generation rather than let the
       // model silently drop the end of the prompt.
@@ -377,7 +379,12 @@ namespace AT.localhost {
       return [...head, ...tail];
     }
     const reply = await generate(batch);
-    if (texts.length === 1) return [reply.trim() || texts[0]!];
+    if (texts.length === 1) {
+      // A single sentence with a context line comes back numbered, like a batch.
+      const numberedSingle = L.parseNumbered(reply, 1);
+      const single = numberedSingle?.[0] ?? reply.trim();
+      return [single || texts[0]!];
+    }
     const parsed = L.parseNumbered(reply, texts.length);
     if (parsed) return parsed;
     AT.warn('on-device split mismatch, retrying per text', texts.length);
@@ -424,7 +431,12 @@ namespace AT.localhost {
     const askedSource = typeof request.source === 'string' ? request.source : '';
     const askedTarget = typeof request.target === 'string' ? request.target : '';
     const maxTokens = Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS;
-    const hint = typeof request.context === 'string' ? request.context.slice(0, 200) : null;
+    // A sentence-level request carries its paragraph. The page line only joins a
+    // prompt that already has several segments: the single-text shape ignores it
+    // (measured: the model translates the context line instead of the text).
+    const paragraph = typeof request.hint === 'string' && request.hint.trim() ? request.hint.trim().slice(0, 200) : null;
+    const pageLine = typeof request.context === 'string' ? request.context.slice(0, 200) : null;
+    const hint = paragraph ?? (texts.length > 1 ? pageLine : null);
     if (texts.length === 0) return { translations: [], engine: 'local' };
     // The message boundary is untrusted: only a code from the model's own table
     // may reach a prompt, and only a known one may claim to be the source.

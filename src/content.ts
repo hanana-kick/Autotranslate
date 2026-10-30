@@ -151,7 +151,10 @@ declare var __autotranslate: AT.content.Boot | undefined;
         // A long paragraph is several sentences; sending it whole either
         // overflows the model's context or gets cut mid-clause by the char
         // chunker. Split first, rejoin in place.
-        sentences: { split: AT.targets.sentences, maxChars: C.SENTENCE_MAX_CHARS },
+        // Every multi-sentence paragraph is translated sentence by sentence:
+        // each answer is written as it lands, and the paragraph rides along as
+        // the hint so the sentences read as one text.
+        sentences: { split: AT.targets.sentences, maxChars: C.SENTENCE_MAX_CHARS, always: true },
         // A restore in another task owns the page: stop writing.
         shouldAbort: () => state.stopped,
         // A pass over a long page takes a minute; say so while it works.

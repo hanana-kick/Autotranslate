@@ -22,6 +22,8 @@ namespace AT.pipeline {
     texts: string[];
     role: AT.targets.TextRole;
     context: AT.pagecontext.PageContext | null;
+    /** The block the texts came from, for sentence-level translation. */
+    hint?: string | undefined;
   };
 
   export type Request = {
@@ -157,11 +159,11 @@ namespace AT.pipeline {
         sentences: request.sentences,
         shouldAbort: request.shouldAbort,
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
-        translate: async (texts) => {
+        translate: async (texts, hint) => {
           batches += 1;
           // The region is set per group by the plan below; a batch that arrives
           // outside a pass is a selection or a retry and has no region.
-          return await request.translate({ texts, role: role ?? 'unknown', context });
+          return await request.translate({ texts, role: role ?? 'unknown', context, hint });
         }
       });
       return translator;
