@@ -140,9 +140,11 @@ declare var __autotranslate: AT.content.Boot | undefined;
     if (!state.pipeline) {
       state.pipeline = AT.pipeline.create({
         doc: document,
-        // The model is bounded by tokens, so the DOM layer may hand over a wide
-        // run; `AT.engines` packs it by counting tokens against the model.
-        settings: () => ({ maxNodes: (state.settings ?? settings).maxNodes, batchChars: C.DEFAULT_BATCH_CHARS }),
+        // One text per request. The host answers one prompt at a time anyway,
+        // so a wider chunk only delays what is written back: with a chunk of
+        // seven paragraphs a ten-second generation looks like seven silent ones.
+        // Long paragraphs are still split into sentences upstream.
+        settings: () => ({ maxNodes: (state.settings ?? settings).maxNodes, batchChars: 1 }),
         // Read settings from state so a later target-language change applies
         // without re-injecting the script.
         translate: (batch) => requestBatch(batch, state.settings ?? settings),
