@@ -328,14 +328,20 @@ form labels gets one extra line in the on-device prompt (`These are navigation l
 top of the page context. Article prose gets no line — the page context already says what it is.
 That line costs 6–10 tokens (measured), which is why it is per batch and not per text.
 
-**Sentence splitting.** A text node longer than `SENTENCE_MAX_CHARS` (320 characters) is
-split into sentences before it is sent: each sentence is its own key, the translations are
-joined back into the same node, and the separator is the page's own habit — a space when the
-source used spaces, nothing between CJK sentences. That is what keeps a long paragraph from
-being cut mid-clause by the character chunker, and it means one paragraph can span several
-prompts without losing its place. `targets.sentences()` uses `Intl.Segmenter` with a
-punctuation fallback; it is not abbreviation-aware (`Dr.` splits), which is pinned in the
-tests rather than papered over.
+**Sentence splitting.** A multi-sentence text node is split into sentences before it is sent:
+each sentence is its own key, the translations are joined back into the same node, and the
+separator is the page's own habit — a space when the source used spaces, nothing between CJK
+sentences. That is what keeps a long paragraph from being cut mid-clause, and it means one
+paragraph can span several prompts without losing its place. `targets.sentences()` uses
+`Intl.Segmenter` with a punctuation fallback; it is not abbreviation-aware (`Dr.` splits),
+which is pinned in the tests rather than papered over.
+
+**One request per text.** A paragraph's sentences travel in one request: the numbered prompt
+holds them in order, so each sentence is translated with the others as its context — that is
+the paragraph, and no separate hint line is sent. Requests are not batched across texts:
+measured on the same four sentences, four singles took 3.4 s and one packed request 3.5 s,
+because a generation costs ~40 ms per output token and only ~0.15 s per request. Packing also
+costs progressive writes, so the engine keeps one request per text.
 
 **What context is sent (decided).** One line per batch, composed in this order and capped at
 `targets.CONTEXT_MAX_CHARS` = 240 characters (~40 tokens):
@@ -484,6 +490,31 @@ codes of this revision:
 | Same three after a refused numbered reply (4 generations) | 2.5 s |
 | French → Korean with `auto` source | 0.8 s |
 | Offscreen document JS heap | 137 MB (the model lives in the WASM/GPU heap) |
+| Four-sentence paragraph, one request for its sentences | 3.3–3.5 s |
+| Same paragraph, one request per sentence | 5.5 s |
+| Ten-paragraph page, two sentences each (11 nodes) | 15.0 s |
+| Eight one-sentence nodes | 6.9 s |
+
+**Where the time goes (measured, so it is not guessed at).** A generation costs about 40 ms per
+output token, which is the whole of a page's time: a request's fixed cost — template prefill,
+host round trip — is 0.1–0.2 s, so packing four texts into one request removes three of those
+and nothing else. Three routes to a 2× were measured and none of them works here:
+
+- **GPU delegate.** `@mediapipe/tasks-genai` 1.2.1-rc accepts `delegate: 'GPU'` and loads this
+  (int8, `-int8-web`) model through it — load goes 5.4 s → 16 s — and then decodes at the same
+  ~40 ms/token as the CPU build.
+- **Two instances.** Two browser processes, each with its own copy of the model, decode a
+  sentence in 1.6–2.2 s while one alone takes 0.95 s: the machine is bandwidth-bound, so a
+  second model buys nothing and costs 3.6 GiB.
+- **Bigger batches.** Four sentences as one generation: 3.5 s against 3.8 s for four singles.
+
+So the ceiling is the model itself: halving a page needs a runtime that decodes the same
+weights faster, or a smaller model. TranslateGemma ships only 4B, 12B and 27B, and the
+LiteRT 270M/1B web builds are gated behind a Hugging Face access request (this account was
+refused), so the honest answer is that this revision is 1.1–1.3× faster than the sentence-per-
+request one it replaces — not 2×. The next real step is the same weights in a WebGPU runtime
+(ONNX Runtime Web): the model would have to be converted to ONNX first, which is a project of
+its own.
 
 **What the budget is counted in.** Tokens, not characters — the model's own tokenizer counts
 them. Before packing, the engine asks the host (`at/local-count`) for the token count of every

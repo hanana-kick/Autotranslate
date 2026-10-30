@@ -42,7 +42,6 @@ namespace AT {
     STORAGE_KEY: string;
     BADGE_TEXT: string;
     BADGE_COLOR: string;
-    DEFAULT_BATCH_CHARS: number;
     DEFAULT_MAX_NODES: number;
     OBSERVER_BATCH_NODES: number;
     SENTENCE_MAX_CHARS: number;
@@ -61,9 +60,6 @@ namespace AT {
     STORAGE_KEY: 'settings',
     BADGE_TEXT: '文A',
     BADGE_COLOR: '#1a73e8',
-    // One request to the model is packed by tokens; this is only the ceiling
-    // the DOM layer uses when it has to split a long page run.
-    DEFAULT_BATCH_CHARS: 1200,
     // Hard ceiling on DOM text nodes touched per run; keeps huge feeds cheap.
     DEFAULT_MAX_NODES: 600,
     // Ceiling for nodes translated by the MutationObserver in one tick.

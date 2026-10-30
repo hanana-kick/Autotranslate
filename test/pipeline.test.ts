@@ -68,14 +68,14 @@ function page(entries: Entry[]) {
 
 function engine(
   entries: Entry[],
-  settings: { maxNodes?: number; batchChars?: number; failRole?: string } = {}
+  settings: { maxNodes?: number; failRole?: string } = {}
 ) {
   let failedOnce = false;
   const { document, body, texts } = page(entries);
   const batches: { texts: string[]; role: string; context: unknown }[] = [];
   const translator = pipeline.create({
     doc: document,
-    settings: () => ({ maxNodes: settings.maxNodes ?? 600, batchChars: settings.batchChars ?? 1200 }),
+    settings: () => ({ maxNodes: settings.maxNodes ?? 600 }),
     viewportHeight: () => 800,
     translate: async (batch: never) => {
       const value = batch as unknown as { texts: string[]; role: string; context: unknown };
@@ -163,7 +163,7 @@ test('a node the provider answered with nothing is retried, not marked done', as
   let emptyFor: string | null = 'Subspecies';
   const translator = pipeline.create({
     doc: document,
-    settings: () => ({ maxNodes: 600, batchChars: 1200 }),
+    settings: () => ({ maxNodes: 600 }),
     viewportHeight: () => 800,
     translate: async (batch: never) => {
       const value = batch as unknown as { texts: string[] };
@@ -179,7 +179,8 @@ test('a node the provider answered with nothing is retried, not marked done', as
   emptyFor = null;
   const second = await translator.refresh();
   assert.equal(second.requested, 1, 'the heading is asked again');
-  assert.deepEqual(asked[1], ['Subspecies'], 'and only the heading');
+  assert.deepEqual(asked.at(-1), ['Subspecies'], 'and only the heading');
+  assert.deepEqual(asked[1], ['The body'], 'the paragraph travelled in its own request');
   assert.equal(texts[0]!.nodeValue, '»Subspecies«');
   assert.equal(texts[1]!.nodeValue, '»The body«', 'the paragraph was not asked twice');
 });
@@ -248,7 +249,7 @@ test('background passes advance through the page instead of re-translating the t
 
   const first = await translator.refresh(null, 2);
   assert.equal(first.requested, 2);
-  assert.deepEqual(batches.map((batch) => batch.texts), [['Headline', 'Second line']]);
+  assert.deepEqual(batches.map((batch) => batch.texts), [['Headline'], ['Second line']], 'one request per text');
 
   // The page rewrites the first heading: it is eligible again, but the cursor
   // has moved past it.
@@ -257,7 +258,7 @@ test('background passes advance through the page instead of re-translating the t
   const second = await translator.refresh(null, 2);
   assert.deepEqual(
     batches.map((batch) => batch.texts),
-    [['Headline', 'Second line'], ['A comment', 'Another comment']],
+    [['Headline'], ['Second line'], ['A comment'], ['Another comment']],
     'the pass took the text it had not reached yet'
   );
   assert.equal(second.requested, 2);
@@ -265,6 +266,7 @@ test('background passes advance through the page instead of re-translating the t
   // The round is done; the next pass wraps and picks the rewritten heading up.
   // The page rewrote the heading; the next round reaches it again (from the
   // cache, so the provider is not asked a second time).
+  const before = batches.length;
   const third = await translator.refresh(null, 2);
   assert.deepEqual(texts.map((node) => node.nodeValue), [
     '»Headline«',
@@ -273,5 +275,5 @@ test('background passes advance through the page instead of re-translating the t
     '»Another comment«'
   ]);
   assert.equal(third.failed, 0);
-  assert.equal(batches.length, 2, 'a rewritten node is answered from the cache');
+  assert.equal(batches.length, before, 'a rewritten node is answered from the cache');
 });

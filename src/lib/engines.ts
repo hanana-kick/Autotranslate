@@ -110,8 +110,6 @@ namespace AT.engines {
     context?: AT.pagecontext.PageContext | null;
     /** Which part of the page these texts came from. */
     role?: AT.targets.TextRole | null;
-    /** The surrounding block, when the texts are sentences of one. */
-    hint?: string | undefined;
     texts?: unknown[];
     /** 'auto' or a C.LANGS code */
     source?: string;
@@ -159,13 +157,10 @@ namespace AT.engines {
       // says what the site is; the region says what this batch is (a menu, a
       // comment), which is what decides register. The budget is fixed in
       // `AT.targets.composeContext`: above it, the line is cut, not grown.
-      // The page/role line stays one line; the block a sentence came from is
-      // its own instruction line in the prompt.
       context: AT.targets.composeContext(
         AT.pagecontext.hint(args.context ?? null),
         AT.targets.roleHint(args.role ?? null)
-      ),
-      hint: args.hint ?? ''
+      )
     });
     if (!reply?.ok) {
       const code = LOCAL_CODES[String(reply?.code)] ?? 'provider';

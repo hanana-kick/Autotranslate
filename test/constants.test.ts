@@ -122,7 +122,6 @@ test('RTL_LANGS is only safe when read with === true', () => {
 test('numeric defaults sit inside the ceilings they feed', () => {
   const C = constants().C;
   const positiveIntegers: string[] = [
-    'DEFAULT_BATCH_CHARS',
     'DEFAULT_MAX_NODES',
     'OBSERVER_BATCH_NODES',
     'SENTENCE_MAX_CHARS',
@@ -134,10 +133,6 @@ test('numeric defaults sit inside the ceilings they feed', () => {
   }
 
   assert.ok(C.OBSERVER_BATCH_NODES <= C.DEFAULT_MAX_NODES, 'one observer tick cannot exceed a run budget');
-  assert.ok(
-    C.SENTENCE_MAX_CHARS <= C.DEFAULT_BATCH_CHARS,
-    'a sentence is split before it can exceed the chunk ceiling'
-  );
   assert.ok(C.OBSERVER_BATCH_NODES > 0 && C.OBSERVER_BATCH_NODES <= C.DEFAULT_MAX_NODES);
 });
 
@@ -163,8 +158,7 @@ test('the picker language list is complete enough to render', () => {
 
 test('the constants carry no provider catalogue', () => {
   // The on-device model is the only engine now; a leftover engine table would
-  // suggest a provider path that no longer exists. DEFAULT_BATCH_CHARS stays
-  // because it is the DOM chunk ceiling, not a provider batch size.
+  // suggest a provider path that no longer exists.
   const C = constants().C;
   for (const key of [
     'ENGINES',

@@ -166,8 +166,8 @@ test('a block element or a line break ends a run', async () => {
 
   await translator.translateRoot(body);
 
-  assert.equal(calls[0]!.length, 3, 'each visual line is its own request string');
-  assert.ok(!calls[0]!.some((key) => key.includes('other paragraph') && key.includes('first half')), 'paragraphs are never glued');
+  assert.deepEqual(calls, [['first half'], ['second half'], ['other paragraph']], 'each visual line is its own request');
+  assert.ok(!calls.some((keys) => keys.length > 1), 'paragraphs are never glued');
   assert.equal(textContent(first), 'FIRST HALFSECOND HALF');
   assert.equal(textContent(second), 'OTHER PARAGRAPH');
 });
@@ -291,7 +291,7 @@ test('mergeInline can be turned off', async () => {
 
   await translator.translateRoot(body);
 
-  assert.deepEqual(calls[0], ['one', 'two'], 'each text node asked separately');
+  assert.deepEqual(calls, [['one'], ['two']], 'each text node asked separately');
   assert.equal(translator.stats().runs, 0);
 });
 

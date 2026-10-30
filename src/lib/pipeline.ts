@@ -14,7 +14,6 @@ namespace AT.pipeline {
   /** The settings the engine needs; the rest belong to the UI. */
   export type Settings = {
     maxNodes: number;
-    batchChars: number;
   };
 
   /** One request to the translation layer: texts, the region, the page. */
@@ -22,8 +21,6 @@ namespace AT.pipeline {
     texts: string[];
     role: AT.targets.TextRole;
     context: AT.pagecontext.PageContext | null;
-    /** The block the texts came from, for sentence-level translation. */
-    hint?: string | undefined;
   };
 
   export type Request = {
@@ -155,15 +152,14 @@ namespace AT.pipeline {
       translator = AT.dom.createTranslator({
         doc: request.doc,
         maxNodes: settings.maxNodes,
-        batchChars: settings.batchChars,
         sentences: request.sentences,
         shouldAbort: request.shouldAbort,
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
-        translate: async (texts, hint) => {
+        translate: async (texts) => {
           batches += 1;
           // The region is set per group by the plan below; a batch that arrives
           // outside a pass is a selection or a retry and has no region.
-          return await request.translate({ texts, role: role ?? 'unknown', context, hint });
+          return await request.translate({ texts, role: role ?? 'unknown', context });
         }
       });
       return translator;

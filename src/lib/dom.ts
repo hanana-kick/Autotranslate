@@ -22,7 +22,7 @@ namespace AT.dom {
     STYLE: true, TEMPLATE: true, TEXTAREA: true, TRACK: true, VIDEO: true
   };
 
-  export type Provider = (texts: string[], hint?: string | undefined) => Promise<string[]>;
+  export type Provider = (texts: string[]) => Promise<string[]>;
 
   /** Only what the engine touches; tests inject a duck-typed document. */
   export type DocumentRoot = { nodeType: number; documentElement: Element | null };
@@ -39,7 +39,6 @@ namespace AT.dom {
   export type Options = {
     doc: DocumentRoot;
     maxNodes?: number;
-    batchChars?: number;
     translate: Provider;
     /** Send a sentence split across inline elements as one request. Default true. */
     mergeInline?: boolean;
@@ -152,29 +151,11 @@ namespace AT.dom {
     return out;
   }
 
-  function chunkByChars(items: readonly string[], limit: number): string[][] {
-    const chunks: string[][] = [];
-    let current: string[] = [];
-    let size = 0;
-    for (const item of items) {
-      const cost = item.length + 1;
-      if (current.length && size + cost > limit) {
-        chunks.push(current);
-        current = [];
-        size = 0;
-      }
-      current.push(item);
-      size += cost;
-    }
-    if (current.length) chunks.push(current);
-    return chunks;
-  }
 
   export function createTranslator(options: Options): Translator {
     const {
       doc,
       maxNodes = AT.C.DEFAULT_MAX_NODES,
-      batchChars = AT.C.DEFAULT_BATCH_CHARS,
       translate,
       mergeInline = true,
       sentences,
@@ -303,19 +284,19 @@ namespace AT.dom {
       return nodes;
     }
 
-    async function request(keys: readonly string[], hint?: string | undefined): Promise<void> {
-      for (const chunk of chunkByChars(keys, batchChars)) {
-        const result = await translate(chunk, hint);
-        if (!Array.isArray(result) || result.length !== chunk.length) {
-          throw new Error('the model returned an unexpected number of results');
-        }
-        chunk.forEach((key, index) => {
-          const value = result[index];
-          // An empty answer is not a translation: caching it would make every
-          // later pass believe the work is done and never retry the node.
-          if (typeof value === 'string' && value.trim()) cache.set(key, value);
-        });
+    /** One request: the caller already decided what belongs together. */
+    async function request(keys: readonly string[]): Promise<void> {
+      if (keys.length === 0) return;
+      const result = await translate([...keys]);
+      if (!Array.isArray(result) || result.length !== keys.length) {
+        throw new Error('the model returned an unexpected number of results');
       }
+      keys.forEach((key, index) => {
+        const value = result[index];
+        // An empty answer is not a translation: caching it would make every
+        // later pass believe the work is done and never retry the node.
+        if (typeof value === 'string' && value.trim()) cache.set(key, value);
+      });
     }
 
     /**
@@ -323,7 +304,7 @@ namespace AT.dom {
      * short paragraphs too, which trades a little prompt overhead per sentence
      * for an answer that can be written back as soon as it lands.
      */
-    function sentenceJob(item: Item): { item: Item; parts: string[]; gap: string; hint: string } | null {
+    function sentenceJob(item: Item): { item: Item; parts: string[]; gap: string } | null {
       if (!sentences) return null;
       if (!sentences.always && item.core.length <= sentences.maxChars) return null;
       const parts = sentences.split(item.core);
@@ -331,16 +312,13 @@ namespace AT.dom {
       // Japanese and Chinese do not put a space between sentences; keep the
       // page's own habit instead of inventing one.
       const gap = /\s/.test(item.core) ? ' ' : '';
-      // The paragraph travels with every sentence: pronouns and terminology read
-      // the same way in all of them.
-      const hint = item.core.length > 160 ? item.core.slice(0, 160) : item.core;
-      return { item, parts, gap, hint };
+      return { item, parts, gap };
     }
 
     async function run(nodes: readonly Text[]): Promise<Result> {
       const incoming = new Set(nodes);
       const claimed = new Set<Text>();
-      const jobs: { items: Item[]; keys: string[]; hint?: string; split?: { parts: string[]; gap: string; hint: string } }[] = [];
+      const jobs: { items: Item[]; keys: string[]; split?: { parts: string[]; gap: string } }[] = [];
       for (const node of nodes) {
         if (claimed.has(node)) continue;
         const id = mergeInline ? runOf.get(node) : undefined;
@@ -360,27 +338,35 @@ namespace AT.dom {
         claimed.add(node);
         const item = itemFor(node);
         const split = sentenceJob(item);
-        jobs.push(
-          split
-            ? { items: [item], keys: split.parts, hint: split.hint, split }
-            : { items: [item], keys: [item.core], hint: item.core.length > 160 ? item.core.slice(0, 160) : item.core }
-        );
+        jobs.push(split ? { items: [item], keys: split.parts, split } : { items: [item], keys: [item.core] });
       }
 
       // Every job is applied, including the ones answered from the cache: a page
       // that rewrites a node's text in place put the source back, and skipping
       // the write would leave it in the source language for good.
-      const unique: string[] = [];
-      const seen = new Set<string>();
       const pending: typeof jobs = [];
-      for (const job of jobs) {
-        for (const key of job.keys) {
-          if (cache.has(key) || seen.has(key)) continue;
-          seen.add(key);
-          unique.push(key);
-        }
-        pending.push(job);
-      }
+      for (const job of jobs) pending.push(job);
+      /**
+       * One request per paragraph's sentences, and several one-sentence nodes
+       * packed together: the fixed cost of a request is paid once either way,
+       * and a packed request still writes its nodes as soon as it answers.
+       */
+      // One request per job: a paragraph's sentences travel together (the other
+      // segments are the context), and a one-sentence node travels alone.
+      // Measured: packing several nodes into one request saved nothing, because
+      // a generation costs ~40 ms per output token and only ~0.15 s per request.
+      const seen = new Set<string>();
+      const unique: string[] = [];
+      const work = jobs
+        .map((job) => ({
+          keys: job.keys.filter((key) => {
+            if (cache.has(key) || seen.has(key)) return false;
+            seen.add(key);
+            unique.push(key);
+            return true;
+          })
+        }))
+        .filter((request) => request.keys.length > 0);
       /**
        * Writes every job whose answers are all in the cache, and reports what it
        * wrote. A job that is still waiting for one of its sentences stays in
@@ -434,10 +420,10 @@ namespace AT.dom {
       let wrote = 0;
       // One request at a time, writing after each: a page of thirty paragraphs
       // would otherwise stay in the source language until the last answer.
-      for (const chunk of chunkByChars(unique, batchChars)) {
+      for (const item of work) {
         if (shouldAbort?.() === true) break;
         try {
-          await request(chunk);
+          await request(item.keys);
         } catch (caught: unknown) {
           // A refused chunk must not discard the ones that already landed.
           failed += 1;

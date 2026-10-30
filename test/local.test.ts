@@ -55,14 +55,8 @@ test('page context travels only in the numbered batch prompt', () => {
     1,
     'the marker is never doubled'
   );
-  // A single *sentence* with its paragraph still needs the numbered shape: the
-  // plain shape drops the context, and the plain shape with a context line is
-  // what returned the context translated. Measured: the numbered answer is the
-  // sentence alone.
   const one = local.buildBatchPrompt('en', 'ko', ['only'], hint);
-  assert.match(one, /Background, do not translate: This is a product page/, 'the sentence keeps its paragraph');
-  assert.match(one, /Segments:\n1\. only/, 'and travels as one numbered segment');
-  assert.equal(one.split('Background, do not translate:').length - 1, 1, 'the marker is never doubled');
+  assert.equal(one, local.buildTranslatePrompt('en', 'ko', 'only'), 'a one-text batch stays the plain shape');
 });
 
 test('a regional code is passed through as the model spells it', () => {

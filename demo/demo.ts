@@ -150,7 +150,6 @@ namespace AT.demoPage {
       doc: document,
       mergeInline: els.merge.checked,
       maxNodes: 600,
-      batchChars: 900,
       translate: async (texts) => {
         const started = performance.now();
         const out = await AT.demo.translate(texts, {
