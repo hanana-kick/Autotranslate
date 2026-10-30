@@ -39,7 +39,7 @@
             <label for="engine" data-i18n="options_engine"></label>
             <select id="engine"></select>
           </div>
-          <div class="field">
+          <div class="field" id="endpointField">
             <label for="endpoint" data-i18n="options_endpoint"></label>
             <input type="url" id="endpoint" spellcheck="false" autocomplete="off" />
           </div>
@@ -52,6 +52,45 @@
             <button id="testEngine" type="button" data-i18n="options_test"></button>
             <p class="status" id="testStatus" role="status"></p>
           </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="options_local"></h2>
+        <div class="grid">
+          <p class="hint" id="localSupport" data-i18n="options_localHint"></p>
+          <div class="field">
+            <label for="localModel" data-i18n="options_localModel"></label>
+            <select id="localModel"></select>
+          </div>
+          <div class="field">
+            <label for="localMaxTokens" data-i18n="options_localMaxTokens"></label>
+            <input type="number" id="localMaxTokens" min="128" max="8192" step="128" />
+          </div>
+          <div class="field">
+            <label for="fallbackEngine" data-i18n="options_fallbackEngine"></label>
+            <select id="fallbackEngine"></select>
+          </div>
+          <p class="hint" id="localUsage"></p>
+          <ul class="rules" id="modelList"></ul>
+          <div class="field">
+            <label for="modelUrl" data-i18n="options_modelUrl"></label>
+            <input type="url" id="modelUrl" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="modelToken" data-i18n="options_modelToken"></label>
+            <input type="password" id="modelToken" spellcheck="false" autocomplete="off" />
+          </div>
+          <p class="hint" data-i18n="options_modelTokenHint"></p>
+          <div class="row wrap">
+            <button id="downloadModel" type="button" data-i18n="options_download"></button>
+            <button id="cancelDownload" type="button" class="secondary" data-i18n="options_cancel" hidden></button>
+            <input type="file" id="modelFile" accept=".task,application/octet-stream" hidden />
+            <button id="pickModel" type="button" class="secondary" data-i18n="options_pickFile"></button>
+            <button id="prepareModel" type="button" class="secondary" data-i18n="options_prepare"></button>
+          </div>
+          <progress id="modelProgress" max="100" value="0" hidden></progress>
+          <p class="status" id="modelStatus" role="status"></p>
         </div>
       </section>
 
@@ -113,6 +152,8 @@
     <script src="lib/constants.js"></script>
     <script src="lib/browser.js"></script>
     <script src="lib/rules.js"></script>
+    <script src="lib/local.js"></script>
+    <script src="lib/modelstore.js"></script>
     <script src="lib/settings.js"></script>
     <script src="options.js"></script>
   </body>

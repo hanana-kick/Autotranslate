@@ -2,7 +2,7 @@
   "extensionName": { "message": "Autotranslate" },
   "shortName": { "message": "Autotranslate" },
   "description": {
-    "message": "Automatically translates web pages using Google or a LibreTranslate instance."
+    "message": "Translates web pages with Google, a LibreTranslate instance, or a model that runs on this computer."
   },
   "actionTitle": { "message": "Autotranslate this page" },
   "menuTranslatePage": { "message": "Translate this page" },
@@ -23,6 +23,7 @@
   "popup_restore": { "message": "Restore" },
   "popup_options": { "message": "Options" },
   "popup_idle": { "message": "Not translated yet." },
+  "popup_localUnverified": { "message": "This language pair has not been checked with the on-device model." },
   "popup_translated": {
     "message": "Translated $1$ text segments.",
     "placeholders": { "1": { "content": "$1" } }
@@ -67,5 +68,162 @@
   "options_saved": { "message": "Saved." },
   "options_resetDone": { "message": "Defaults restored." },
   "options_noRules": { "message": "No site rules yet." },
-  "options_badRule": { "message": "Enter a valid host or URL pattern." }
+  "options_badRule": { "message": "Enter a valid host or URL pattern." },
+  "options_local": {
+    "message": "On-device translation"
+  },
+  "options_localHint": {
+    "message": "With the on-device engine selected, page text is translated by a model running in this browser: nothing is uploaded."
+  },
+  "options_localModel": {
+    "message": "Model"
+  },
+  "options_localNone": {
+    "message": "No model selected"
+  },
+  "options_localMaxTokens": {
+    "message": "Token budget per generation"
+  },
+  "options_fallbackEngine": {
+    "message": "Fallback provider"
+  },
+  "options_fallbackNone": {
+    "message": "None — report the failure instead"
+  },
+  "options_modelUrl": {
+    "message": "Model URL"
+  },
+  "options_modelToken": {
+    "message": "Hugging Face token (optional)"
+  },
+  "options_modelTokenHint": {
+    "message": "TranslateGemma is published in a gated repository: sign in at huggingface.co, accept the terms and paste a read token, or download the .task file yourself and use the file picker."
+  },
+  "options_download": {
+    "message": "Download model"
+  },
+  "options_cancel": {
+    "message": "Cancel"
+  },
+  "options_pickFile": {
+    "message": "Use a local file"
+  },
+  "options_prepare": {
+    "message": "Load now"
+  },
+  "options_noModels": {
+    "message": "No model has been downloaded yet."
+  },
+  "options_usage": {
+    "message": "$1$ used of $2$ · $3$ model(s), $4$ of model files",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      },
+      "3": {
+        "content": "$3"
+      },
+      "4": {
+        "content": "$4"
+      }
+    }
+  },
+  "options_notPersisted": { "message": "storage is not pinned, so the browser may evict the model" },
+  "options_deleted": {
+    "message": "Deleted $1$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_alreadyGone": {
+    "message": "$1$ was already gone",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_deleteFailed": {
+    "message": "Could not delete the model"
+  },
+  "options_downloading": {
+    "message": "Downloading $1$ of $2$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "options_cancelled": {
+    "message": "Download cancelled"
+  },
+  "options_needsToken": {
+    "message": "The server refused the request: this repository is gated, so a valid token is required."
+  },
+  "options_downloadFailed": {
+    "message": "Download failed"
+  },
+  "options_downloadDone": {
+    "message": "$1$ ($2$) stored in $3$ s",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      },
+      "3": {
+        "content": "$3"
+      }
+    }
+  },
+  "options_badUrl": {
+    "message": "Enter an https:// model URL."
+  },
+  "options_noSpace": {
+    "message": "Not enough room: $1$ would be needed.",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_pickOne": {
+    "message": "Choose a model first."
+  },
+  "options_preparing": {
+    "message": "Loading the model…"
+  },
+  "options_prepared": {
+    "message": "The model is resident and warm."
+  },
+  "options_prepareFailed": {
+    "message": "Could not load the model"
+  },
+  "options_localUnsupported": {
+    "message": "This browser cannot run the model: WebGPU is missing or has no adapter."
+  },
+  "options_stateUnloaded": {
+    "message": "Model not loaded"
+  },
+  "options_stateLoading": {
+    "message": "Loading the model…"
+  },
+  "options_stateReady": {
+    "message": "Model resident"
+  },
+  "options_stateBusy": {
+    "message": "Translating on-device…"
+  },
+  "options_stateError": {
+    "message": "On-device engine failed"
+  }
 }

@@ -1,0 +1,488 @@
+// The on-device host: every part that touches MediaPipe, written without any
+// assumption about where it runs. One instance, one queue, because MediaPipe
+// allows a single generation at a time and the model holds gigabytes.
+//
+// Chrome's service worker cannot hold WebAssembly plus WebGPU, so the
+// background puts this module in an offscreen document and talks to it over
+// runtime messages. A Firefox background page is a document already, so the
+// same module runs in place and the background calls it directly. Both
+// placements install a reporter for the status, so the rest of the extension
+// sees one shape.
+//
+// Load after lib/constants.js, lib/browser.js, lib/local.js and
+// lib/modelstore.js; the MediaPipe module itself arrives at runtime.
+namespace AT.localhost {
+  const C = AT.C;
+  const L = AT.local;
+
+  /** The members of @mediapipe/tasks-genai this file touches. */
+  type WasmFileset = { wasmLoaderPath: string; wasmBinaryPath: string };
+
+  type GenaiModule = {
+    FilesetResolver: { forGenAiTasks: (path: string) => Promise<WasmFileset> };
+    LlmInference: {
+      createFromOptions: (fileset: WasmFileset, options: Record<string, unknown>) => Promise<LlmInstance>;
+    };
+  };
+
+  type LlmInstance = {
+    generateResponse: (prompt: string, listener?: (partial: string, done: boolean) => void) => Promise<string>;
+    /** The model's own tokenizer; the ground truth the chunker only estimates. */
+    sizeInTokens?: (query: string) => number | undefined;
+    cancelProcessing?: () => void;
+    delete?: () => void;
+    clear?: () => void;
+    isIdle?: boolean;
+  };
+
+  /** at/local-translate as the background sends it. */
+  export type TranslateRequest = {
+    modelId?: unknown;
+    texts?: unknown;
+    source?: unknown;
+    target?: unknown;
+    maxTokens?: unknown;
+    /** One line of page context, already rendered and bounded by the engine. */
+    context?: unknown;
+  };
+
+  /** at/local-load and at/local-unload. */
+  type LoadRequest = { modelId?: unknown; maxTokens?: unknown };
+
+  /** at/local-count: how many tokens the model's own tokenizer sees. */
+  type CountRequest = {
+    modelId?: unknown;
+    maxTokens?: unknown;
+    texts?: unknown;
+    source?: unknown;
+    target?: unknown;
+    context?: unknown;
+  };
+
+  /** The answer at/local-count gives: per-text counts and the instruction. */
+  export type TokenCounts = { counts: number[]; overhead: number };
+
+  /** What one host call answers with; `callHost` adds `ok` around it. */
+  export type HostReply = {
+    status?: AT.local.LocalStatus;
+    translations?: string[];
+    engine?: string;
+    counts?: number[];
+    overhead?: number;
+  };
+
+  /** Where the host is running, for the status the UI reads. */
+  export type Placement = 'offscreen' | 'background';
+
+  let module: GenaiModule | null = null;
+  let fileset: WasmFileset | null = null;
+  let llm: LlmInstance | null = null;
+  let loadedId: string | null = null;
+  let loadedMaxTokens = 0;
+  let loadedBytes = 0;
+  let loadMs: number | null = null;
+  let generations = 0;
+  let queue: Promise<unknown> = Promise.resolve();
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let loading: Promise<void> | null = null;
+  let reporter: ((status: AT.local.LocalStatus) => void) | null = null;
+
+  const state: AT.local.LocalStatus = {
+    target: L.TARGET_OFFSCREEN,
+    supported: false,
+    reason: null,
+    state: 'unloaded',
+    modelId: null,
+    modelName: null,
+    loadedBytes: 0,
+    loadMs: null,
+    generations: 0,
+    lastError: null
+  };
+
+  /** The one thing a placement supplies: where a status change goes. */
+  export function install(place: Placement, report: (status: AT.local.LocalStatus) => void): AT.local.LocalStatus {
+    state.target = place;
+    reporter = report;
+    return state;
+  }
+
+  function publish(): void {
+    state.loadedBytes = loadedBytes;
+    state.loadMs = loadMs;
+    state.generations = generations;
+    AT.log('on-device host', state.target, state.state, state.modelId, state.reason);
+    reporter?.(state);
+  }
+
+  function fail(reason: string, detail: unknown): never {
+    state.state = 'error';
+    state.reason = reason;
+    state.lastError = String((detail as { message?: unknown })?.message ?? detail ?? reason).slice(0, 300);
+    publish();
+    // `code` is what the caller turns into an engine error, and the engine
+    // layer decides on retry and messaging from it.
+    const error = new Error(state.lastError) as Error & { reason: string; code: string };
+    error.reason = reason;
+    error.code = L.codeForReason(reason);
+    throw error;
+  }
+
+  /** Runs one job after everything queued before it. */
+  function enqueue<T>(job: () => Promise<T>): Promise<T> {
+    const run = queue.then(job, job);
+    queue = run.catch(() => undefined);
+    return run;
+  }
+
+  function touchIdleTimer(): void {
+    if (idleTimer) clearTimeout(idleTimer);
+    if (!llm) return;
+    idleTimer = setTimeout(() => {
+      idleTimer = null;
+      teardown('idle');
+    }, L.IDLE_UNLOAD_MS);
+  }
+
+  function teardown(cause: string): void {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    if (llm) {
+      try {
+        llm.cancelProcessing?.();
+      } catch {
+        // A dead runtime cannot cancel; nothing to recover.
+      }
+      try {
+        llm.delete?.();
+      } catch {
+        // delete() and clear() are both best-effort.
+      }
+      try {
+        llm.clear?.();
+      } catch {
+        // ditto
+      }
+    }
+    llm = null;
+    loadedId = null;
+    loadedMaxTokens = 0;
+    loadedBytes = 0;
+    loadMs = null;
+    loading = null;
+    state.state = 'unloaded';
+    state.modelId = null;
+    state.modelName = null;
+    // A reason belongs to a state, not to the host: the next load starts with
+    // a clean sheet even when the previous one ended in a failure.
+    state.reason = null;
+    AT.log('on-device host unloaded model', cause);
+    publish();
+  }
+
+  /** WebGPU is required: a 4B int8 model on CPU is not a usable experience. */
+  async function checkSupport(): Promise<void> {
+    if (state.supported) return;
+    const gpu = (globalThis.navigator as { gpu?: { requestAdapter?: () => Promise<unknown> } } | undefined)?.gpu;
+    if (!gpu?.requestAdapter) fail('no-webgpu', 'WebGPU is not available');
+    const adapter = await gpu.requestAdapter();
+    if (!adapter) fail('no-webgpu', 'no WebGPU adapter was found');
+    state.supported = true;
+    state.reason = null;
+  }
+
+  async function loadRuntime(): Promise<GenaiModule> {
+    if (module && fileset) return module;
+    await checkSupport();
+    let imported: unknown;
+    try {
+      const url = AT.getURL(L.VENDOR.bundle);
+      // A static import cannot work here: the project compiles to classic
+      // scripts (`module: none`), while the vendored MediaPipe build is an ES
+      // module whose specifier is only known through runtime.getURL().
+      imported = await import(url);
+    } catch (error: unknown) {
+      fail('runtime-load-failed', error);
+    }
+    const candidate = imported as Partial<GenaiModule> | undefined;
+    if (!candidate?.FilesetResolver?.forGenAiTasks || !candidate.LlmInference) {
+      fail('runtime-load-failed', 'the bundled MediaPipe module is incomplete');
+    }
+    module = candidate as GenaiModule;
+    try {
+      fileset = await module.FilesetResolver.forGenAiTasks(AT.getURL(L.VENDOR.wasmDir));
+    } catch (error: unknown) {
+      module = null;
+      fail('runtime-load-failed', error);
+    }
+    return module;
+  }
+
+  /** First generation on a freshly loaded model is ~8x slower; pay it here. */
+  async function warmup(instance: LlmInstance): Promise<void> {
+    try {
+      await instance.generateResponse(L.wrapChatPrompt('Translate to Korean: Good morning.'));
+    } catch (error: unknown) {
+      AT.warn('on-device warmup failed', error);
+    }
+  }
+
+  async function instantiate(record: AT.modelstore.ModelRecord, maxTokens: number): Promise<LlmInstance> {
+    const active = module as GenaiModule;
+    const assets = fileset as WasmFileset;
+    const blob = await AT.modelstore.read(record.id);
+    if (!blob) fail('model-missing', `no stored file for model ${record.id}`);
+    const options = (baseOptions: Record<string, unknown>): Record<string, unknown> => ({
+      baseOptions,
+      // maxTokens covers input plus output, so the chunker budgets both.
+      maxTokens: Math.max(L.MIN_MAX_TOKENS, Math.min(maxTokens, L.MAX_MAX_TOKENS)),
+      topK: 1,
+      temperature: 0,
+      randomSeed: 42,
+      numResponses: 1
+    });
+    // The stored file is streamed into the runtime: a 3.6 GiB model must not
+    // be copied into the JS heap, and reading it by URL would fetch it again.
+    return await active.LlmInference.createFromOptions(
+      assets,
+      options({ modelAssetBuffer: blob.stream().getReader() })
+    );
+  }
+
+  async function ensureLoaded(modelId: string, maxTokens: number): Promise<void> {
+    if (llm && loadedId === modelId) {
+      touchIdleTimer();
+      return;
+    }
+    if (loading) {
+      await loading;
+      if (llm && loadedId === modelId) return;
+    }
+    // Whether this browser can run a model at all is the more fundamental
+    // answer, and reading the store first would mask it behind a store error.
+    await checkSupport();
+    const record = await AT.modelstore.get(modelId);
+    if (!record) fail('model-missing', `model ${modelId} is not stored`);
+    state.state = 'loading';
+    state.modelId = record.id;
+    state.modelName = record.name;
+    state.lastError = null;
+    publish();
+    const started = Date.now();
+    loading = (async () => {
+      await loadRuntime();
+      if (llm) teardown('switch');
+      const instance = await instantiate(record as AT.modelstore.ModelRecord, maxTokens);
+      await warmup(instance);
+      llm = instance;
+      loadedId = record.id;
+      loadedMaxTokens = Math.max(L.MIN_MAX_TOKENS, Math.min(maxTokens, L.MAX_MAX_TOKENS));
+      loadedBytes = record.size;
+      loadMs = Date.now() - started;
+      state.state = 'ready';
+      state.modelId = record.id;
+      state.modelName = record.name;
+      state.lastError = null;
+      state.reason = null;
+    })();
+    try {
+      await loading;
+    } catch (error: unknown) {
+      // Keep the specific reason the loader failed with: `model-load-failed`
+      // would hide whether WebGPU, the runtime or the file was at fault.
+      const reason = (error as { reason?: string })?.reason ?? 'model-load-failed';
+      teardown('load-failed');
+      fail(reason, error);
+    } finally {
+      loading = null;
+    }
+    touchIdleTimer();
+    publish();
+  }
+
+  /** Tokens as the model's tokenizer counts them; the estimate only stands in
+   *  when the runtime exposes no tokenizer. */
+  function tokenCount(text: string): number {
+    const counted = llm?.sizeInTokens?.(text);
+    return typeof counted === 'number' && Number.isFinite(counted) && counted >= 0
+      ? Math.round(counted)
+      : L.estimateTokens(text);
+  }
+
+  /** One generation, bounded: MediaPipe never aborts on its own. */
+  async function generate(prompt: string): Promise<string> {
+    const instance = llm;
+    if (!instance) fail('no-model', 'no model is loaded');
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const guarded = new Promise<string>((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error('generation timeout')), L.GENERATION_TIMEOUT_MS);
+      instance.generateResponse(prompt).then(resolve, reject);
+    }).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+    try {
+      const reply = await guarded;
+      generations += 1;
+      touchIdleTimer();
+      return reply;
+    } catch (error: unknown) {
+      try {
+        instance.cancelProcessing?.();
+      } catch {
+        // cancellation is best-effort
+      }
+      const message = String((error as { message?: unknown })?.message ?? error);
+      fail(message.includes('timeout') ? 'generation-timeout' : 'generation-failed', error);
+    }
+  }
+
+  /** One generation for a group of texts, retreating to one text per
+   *  generation when the numbered reply cannot be split back reliably. */
+  /**
+   * Does this prompt fit the context the model was created with? The chunker
+   * only estimates — one number cannot cover every script — so the finished
+   * prompt is measured with the model's own tokenizer, leaving room for the
+   * answer. When no tokenizer is exposed, the estimate is all there is.
+   */
+  function fits(prompt: string, texts: string[]): boolean {
+    const count = llm?.sizeInTokens?.(prompt);
+    if (typeof count !== 'number' || !Number.isFinite(count)) return true;
+    const answer = texts.reduce((sum, text) => sum + L.estimateTokens(text), 0);
+    return count + answer <= loadedMaxTokens;
+  }
+
+  async function translateChunk(
+    source: AT.gemma.GemmaLang | null,
+    target: AT.gemma.GemmaLang,
+    texts: string[],
+    hint: string | null
+  ): Promise<string[]> {
+    // Context only travels in the numbered batch prompt: measured, the
+    // single-text shape answers with the context line translated instead of the
+    // text, and the auto shape has no room for metadata at all.
+    const batch = L.buildBatchPrompt(source, target, texts, texts.length > 1 ? hint : null);
+    if (texts.length > 1 && !fits(batch, texts)) {
+      // Halve the batch and pay for a second generation rather than let the
+      // model silently drop the end of the prompt.
+      const middle = Math.ceil(texts.length / 2);
+      AT.log('on-device prompt over the context, splitting', texts.length, middle);
+      const head = await translateChunk(source, target, texts.slice(0, middle), hint);
+      const tail = await translateChunk(source, target, texts.slice(middle), hint);
+      return [...head, ...tail];
+    }
+    const reply = await generate(batch);
+    if (texts.length === 1) return [reply.trim() || texts[0]!];
+    const parsed = L.parseNumbered(reply, texts.length);
+    if (parsed) return parsed;
+    AT.warn('on-device split mismatch, retrying per text', texts.length);
+    const out: string[] = [];
+    for (const text of texts) {
+      const single = await generate(
+        source ? L.buildTranslatePrompt(source, target, text) : L.buildAutoPrompt(target, text)
+      );
+      out.push(single.trim() || text);
+    }
+    return out;
+  }
+
+  /** Keeps the model warm and answers what the UI asks about it. Never throws:
+   *  "this browser cannot run the model" is a status, not an exception. */
+  export async function status(): Promise<AT.local.LocalStatus> {
+    try {
+      await checkSupport();
+    } catch {
+      // checkSupport recorded the reason before it threw.
+    }
+    publish();
+    return state;
+  }
+
+  export async function load(modelId: string, maxTokens: number): Promise<AT.local.LocalStatus> {
+    await ensureLoaded(modelId, maxTokens);
+    return state;
+  }
+
+  export function unload(cause = 'requested'): AT.local.LocalStatus {
+    teardown(cause);
+    return state;
+  }
+
+  export async function translate(request: TranslateRequest): Promise<HostReply> {
+    return await enqueue(() => translateNow(request));
+  }
+
+  async function translateNow(request: TranslateRequest): Promise<HostReply> {
+    const texts = Array.isArray(request.texts)
+      ? request.texts.filter((text): text is string => typeof text === 'string')
+      : [];
+    const askedSource = typeof request.source === 'string' ? request.source : '';
+    const askedTarget = typeof request.target === 'string' ? request.target : '';
+    const maxTokens = Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS;
+    const hint = typeof request.context === 'string' ? request.context.slice(0, 200) : null;
+    if (texts.length === 0) return { translations: [], engine: 'local' };
+    // The message boundary is untrusted: only a code from the model's own table
+    // may reach a prompt, and only a known one may claim to be the source.
+    if (!AT.gemma.isLang(askedTarget)) fail('no-target', `the model has no code for ${askedTarget || 'that target'}`);
+    const target = askedTarget;
+    const source = AT.gemma.isLang(askedSource) ? askedSource : null;
+    const modelId = typeof request.modelId === 'string' && request.modelId ? request.modelId : '';
+    if (!modelId) fail('no-model', 'no model is selected');
+
+    state.state = 'busy';
+    publish();
+    try {
+      await ensureLoaded(modelId, maxTokens);
+      const translations = await translateChunk(source, target, texts, hint);
+      state.state = 'ready';
+      publish();
+      return { translations, engine: 'local' };
+    } catch (error: unknown) {
+      const reason = (error as { reason?: string })?.reason ?? 'generation-failed';
+      fail(reason, error);
+    }
+  }
+
+  /** One entry point for both placements: the offscreen document's message
+   *  handlers and the background's direct calls dispatch through here. */
+  export async function handle(message: AT.Message): Promise<HostReply> {
+    switch (message?.type) {
+      case C.MSG.LOCAL_TRANSLATE:
+        return await translate(message as TranslateRequest);
+      case C.MSG.LOCAL_LOAD: {
+        const request = message as LoadRequest;
+        const modelId = typeof request.modelId === 'string' ? request.modelId : '';
+        if (!modelId) fail('no-model', 'no model is selected');
+        return { status: await enqueue(() => load(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS)) };
+      }
+      case C.MSG.LOCAL_UNLOAD:
+        await enqueue(() => Promise.resolve());
+        return { status: unload('requested') };
+      case C.MSG.LOCAL_COUNT: {
+        // Counting uses the same tokenizer as generation, so it queues like one.
+        const request = message as CountRequest;
+        return await enqueue(() => countNow(request));
+      }
+      case C.MSG.LOCAL_STATUS:
+        return { status: await status() };
+      default:
+        return {};
+    }
+  }
+
+  async function countNow(request: CountRequest): Promise<HostReply> {
+    const modelId = typeof request.modelId === 'string' ? request.modelId : '';
+    if (!modelId) fail('no-model', 'no model is selected');
+    const texts = Array.isArray(request.texts)
+      ? request.texts.filter((text): text is string => typeof text === 'string').slice(0, 200)
+      : [];
+    // Counting needs the tokenizer, and the tokenizer arrives with the model.
+    await ensureLoaded(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS);
+    const target = AT.gemma.isLang(request.target) ? request.target : 'en';
+    const source = AT.gemma.isLang(request.source) ? request.source : null;
+    // The measured cost of the instruction without any text, for packing.
+    const empty = source ? L.buildTranslatePrompt(source, target, '') : L.buildAutoPrompt(target, '');
+    return { counts: texts.map((text) => tokenCount(text)), overhead: tokenCount(empty) };
+  }
+}

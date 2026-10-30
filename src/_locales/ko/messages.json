@@ -2,7 +2,7 @@
   "extensionName": { "message": "Autotranslate 자동 번역" },
   "shortName": { "message": "Autotranslate" },
   "description": {
-    "message": "Google 또는 LibreTranslate 인스턴스로 웹 페이지를 자동으로 번역합니다."
+    "message": "Google, LibreTranslate 인스턴스, 또는 이 컴퓨터에서 실행되는 모델로 웹 페이지를 번역합니다."
   },
   "actionTitle": { "message": "이 페이지 자동 번역" },
   "menuTranslatePage": { "message": "이 페이지 번역" },
@@ -23,6 +23,7 @@
   "popup_restore": { "message": "원문 복원" },
   "popup_options": { "message": "설정" },
   "popup_idle": { "message": "아직 번역되지 않았습니다." },
+  "popup_localUnverified": { "message": "이 언어 쌍은 온디바이스 모델로 검증하지 않았습니다." },
   "popup_translated": {
     "message": "$1$개 구간을 번역했습니다.",
     "placeholders": { "1": { "content": "$1" } }
@@ -67,5 +68,162 @@
   "options_saved": { "message": "저장했습니다." },
   "options_resetDone": { "message": "기본값을 복원했습니다." },
   "options_noRules": { "message": "사이트 규칙이 없습니다." },
-  "options_badRule": { "message": "올바른 호스트 또는 URL 패턴을 입력하세요." }
+  "options_badRule": { "message": "올바른 호스트 또는 URL 패턴을 입력하세요." },
+  "options_local": {
+    "message": "온디바이스 번역"
+  },
+  "options_localHint": {
+    "message": "온디바이스 엔진을 선택하면 페이지 텍스트를 이 브라우저에서 모델을 돌려 번역합니다. 외부로 전송되지 않습니다."
+  },
+  "options_localModel": {
+    "message": "모델"
+  },
+  "options_localNone": {
+    "message": "모델 선택 안 함"
+  },
+  "options_localMaxTokens": {
+    "message": "생성당 토큰 예산"
+  },
+  "options_fallbackEngine": {
+    "message": "폴백 제공자"
+  },
+  "options_fallbackNone": {
+    "message": "없음 — 실패를 그대로 표시"
+  },
+  "options_modelUrl": {
+    "message": "모델 URL"
+  },
+  "options_modelToken": {
+    "message": "Hugging Face 토큰 (선택)"
+  },
+  "options_modelTokenHint": {
+    "message": "TranslateGemma는 접근 제한 저장소에 있습니다. huggingface.co에 로그인해 약관에 동의하고 읽기 토큰을 붙여넣거나, .task 파일을 직접 내려받아 아래 파일 선택기로 지정하세요."
+  },
+  "options_download": {
+    "message": "모델 다운로드"
+  },
+  "options_cancel": {
+    "message": "취소"
+  },
+  "options_pickFile": {
+    "message": "이미 받은 파일 사용"
+  },
+  "options_prepare": {
+    "message": "지금 불러오기"
+  },
+  "options_noModels": {
+    "message": "아직 다운로드한 모델이 없습니다."
+  },
+  "options_usage": {
+    "message": "$2$ 중 $1$ 사용 · 모델 $3$개, 파일 $4$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      },
+      "3": {
+        "content": "$3"
+      },
+      "4": {
+        "content": "$4"
+      }
+    }
+  },
+  "options_notPersisted": { "message": "저장소가 고정되지 않아 브라우저가 모델을 지울 수 있습니다" },
+  "options_deleted": {
+    "message": "$1$ 삭제 완료",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_alreadyGone": {
+    "message": "$1$ 은(는) 이미 없습니다",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_deleteFailed": {
+    "message": "모델을 삭제하지 못했습니다"
+  },
+  "options_downloading": {
+    "message": "$2$ 중 $1$ 다운로드 중",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
+  },
+  "options_cancelled": {
+    "message": "다운로드를 취소했습니다"
+  },
+  "options_needsToken": {
+    "message": "서버가 요청을 거부했습니다. 접근 제한 저장소는 유효한 토큰이 필요합니다."
+  },
+  "options_downloadFailed": {
+    "message": "다운로드 실패"
+  },
+  "options_downloadDone": {
+    "message": "$1$ ($2$)을 $3$초에 저장했습니다",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      },
+      "3": {
+        "content": "$3"
+      }
+    }
+  },
+  "options_badUrl": {
+    "message": "https:// 모델 URL을 입력하세요."
+  },
+  "options_noSpace": {
+    "message": "여유 공간이 부족합니다. $1$이 필요합니다.",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_pickOne": {
+    "message": "먼저 모델을 선택하세요."
+  },
+  "options_preparing": {
+    "message": "모델을 불러오는 중…"
+  },
+  "options_prepared": {
+    "message": "모델이 메모리에 준비되었습니다."
+  },
+  "options_prepareFailed": {
+    "message": "모델을 불러오지 못했습니다"
+  },
+  "options_localUnsupported": {
+    "message": "이 브라우저는 모델을 실행할 수 없습니다. WebGPU가 없거나 사용 가능한 어댑터가 없습니다."
+  },
+  "options_stateUnloaded": {
+    "message": "모델 미로드"
+  },
+  "options_stateLoading": {
+    "message": "모델 로드 중…"
+  },
+  "options_stateReady": {
+    "message": "모델 상주 중"
+  },
+  "options_stateBusy": {
+    "message": "온디바이스 번역 중…"
+  },
+  "options_stateError": {
+    "message": "온디바이스 엔진 오류"
+  }
 }

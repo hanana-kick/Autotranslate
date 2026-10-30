@@ -1,0 +1,55 @@
+name: Build and verify the extension
+description: >-
+  Installs the toolchain, type-checks, tests, builds the chrome and firefox
+  bundles and verifies the packaged archives. Leaves build/ and dist/ in the
+  workspace for the caller to upload or publish.
+inputs:
+  node-version:
+    description: Node version the toolchain runs on (the suites need type stripping)
+    required: false
+    default: '24'
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+
+    - name: Install dependencies
+      shell: bash
+      run: npm ci --no-audit --no-fund
+
+    - name: Type-check sources and tooling
+      shell: bash
+      run: npm run typecheck
+
+    - name: Validate the source tree
+      shell: bash
+      run: npm run lint
+
+    - name: Test
+      shell: bash
+      run: npm test
+
+    - name: Build chrome and firefox
+      shell: bash
+      run: npm run build
+
+    - name: Verify the packaged archives
+      shell: bash
+      run: npm run verify
+
+    - name: Archives are reproducible
+      shell: bash
+      run: |
+        set -euo pipefail
+        sha256sum dist/*.zip > "$RUNNER_TEMP/archives-a.txt"
+        rm -rf build dist
+        npm run build
+        sha256sum dist/*.zip > "$RUNNER_TEMP/archives-b.txt"
+        if ! diff -u "$RUNNER_TEMP/archives-a.txt" "$RUNNER_TEMP/archives-b.txt"; then
+          echo "rebuilding produced different bytes" >&2
+          exit 1
+        fi
+        cat "$RUNNER_TEMP/archives-b.txt"

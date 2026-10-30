@@ -5,18 +5,27 @@
   "description": "Automatic page translation extension for Chrome and Firefox (Manifest V3).",
   "type": "module",
   "scripts": {
-    "build": "node scripts/build.mjs",
-    "build:chrome": "node scripts/build.mjs --target=chrome",
-    "build:firefox": "node scripts/build.mjs --target=firefox",
-    "watch": "node scripts/build.mjs --watch",
-    "icons": "node scripts/make-icons.mjs",
-    "lint": "node scripts/build.mjs --check",
-    "test": "node --test test/*.test.mjs"
+    "build": "node scripts/build.ts",
+    "build:chrome": "node scripts/build.ts --target=chrome",
+    "build:firefox": "node scripts/build.ts --target=firefox",
+    "watch": "node scripts/build.ts --watch",
+    "icons": "node scripts/make-icons.ts",
+    "predemo": "tsc -p tsconfig.json",
+    "demo": "node scripts/serve-demo.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tools.json",
+    "lint": "node scripts/build.ts --check",
+    "verify": "node scripts/verify-package.ts",
+    "pretest": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "ci": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify"
   },
   "devDependencies": {
+    "@mediapipe/tasks-genai": "0.10.30",
+    "@types/node": "^26.6.5",
+    "typescript": "^5.9.3",
     "webextension-polyfill": "0.12.0"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   }
 }

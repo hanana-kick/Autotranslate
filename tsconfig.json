@@ -1,0 +1,25 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "ES2024.Promise", "DOM", "DOM.Iterable"],
+    "module": "none",
+    // Emitted files are loaded as classic scripts side by side; "use strict" would
+    // turn each file's `var AT` into a per-script binding and hide the shared global.
+    "alwaysStrict": false,
+    "rootDir": ".",
+    "outDir": "build/ts",
+    "types": [],
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "newLine": "lf",
+    "removeComments": false,
+    "skipLibCheck": false
+  },
+  "include": ["src/**/*.ts", "demo/**/*.ts"]
+}

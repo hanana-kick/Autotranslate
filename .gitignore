@@ -6,3 +6,5 @@ dist/
 .DS_Store
 .npm-cache/
 .tmp/
+# Agent runtime state, not part of the project
+.omp/

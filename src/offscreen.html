@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Autotranslate on-device host</title>
+  </head>
+  <body>
+    <!-- Created by the background context through chrome.offscreen. Only Chrome
+         needs it: the runtime lives in lib/localhost.js, which a Firefox
+         background page loads itself, so the model stays resident while a
+         service worker comes and goes. -->
+    <script src="vendor/browser-polyfill.js"></script>
+    <script src="lib/constants.js"></script>
+    <script src="lib/browser.js"></script>
+    <script src="lib/gemma.js"></script>
+    <script src="lib/local.js"></script>
+    <script src="lib/modelstore.js"></script>
+    <script src="lib/localhost.js"></script>
+    <script src="offscreen.js"></script>
+  </body>
+</html>

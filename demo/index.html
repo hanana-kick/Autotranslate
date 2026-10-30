@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Autotranslate — 텍스트 변환 엔진 샘플</title>
+    <link rel="stylesheet" href="demo.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="title">
+        <img src="../src/icons/icon-32.png" alt="" width="32" height="32" />
+        <h1>Autotranslate <span class="tag">text engine sample</span></h1>
+      </div>
+      <div class="controls">
+        <button id="toggle" class="primary" type="button">번역하기</button>
+        <button id="probe" type="button">스타일·원문 검증</button>
+        <label class="check"><input id="merge" type="checkbox" checked /> 인라인 문장 병합</label>
+        <label class="field">
+          provider 시뮬레이션
+          <select id="provider">
+            <option value="faithful">마커 보존</option>
+            <option value="lossy">마커 유실 (폴백 확인)</option>
+          </select>
+        </label>
+      </div>
+    </header>
+
+    <p id="status" class="status" role="status">대기 중 — 아래 샘플은 실제 페이지를 흉내 낸 문서입니다.</p>
+    <p id="verdict" class="verdict" role="status" hidden></p>
+
+    <main class="layout">
+      <article id="sample" class="sample">
+        <h2 class="headline">Autotranslate keeps the page, replaces the words</h2>
+
+        <p class="lede">
+          Today only: <strong>free shipping</strong> on every order,
+          <em>returns within 30 days</em>, and <a href="#warranty">two-year warranty</a>.
+        </p>
+
+        <p><span class="hours">Open&#160;daily&#160;9–18.</span> Ask the <a href="#team">team</a> for details.</p>
+
+        <ul class="features">
+          <li>Batched requests per screen</li>
+          <li>Original text stays in memory</li>
+          <li>Editable fields are never touched</li>
+        </ul>
+
+        <p>Run <code>npm run demo</code> to serve this page, then press <kbd>F5</kbd> to reload.</p>
+
+        <pre><code>const at = AT.dom.createTranslator({ doc, translate });
+await at.translateRoot(document.body);</code></pre>
+
+        <table>
+          <caption>Plan comparison</caption>
+          <thead>
+            <tr>
+              <th scope="col">Plan</th>
+              <th scope="col">Price</th>
+              <th scope="col">Support</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Free</td>
+              <td>0 USD</td>
+              <td>Community</td>
+            </tr>
+            <tr>
+              <td>Team</td>
+              <td>12 USD</td>
+              <td>Next business day</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <address>
+          Autotranslate GmbH<br />
+          Hauptstraße 1<br />
+          10115 Berlin
+        </address>
+
+        <p class="footnote">
+          <span class="notranslate">NOTRANSLATE class marker</span> and
+          <span translate="no">translate="no" marker</span> must stay in English, and so must the
+          editable draft below.
+        </p>
+
+        <div class="draft" contenteditable="true" aria-label="Editable draft">
+          Editable draft text — type here, the translator must leave it alone.
+        </div>
+
+        <div class="actions">
+          <button type="button" class="primary">Add to cart</button>
+          <input id="search" type="search" placeholder="Search products" />
+          <span class="ellipsis">…</span>
+        </div>
+      </article>
+
+      <aside class="panel">
+        <h2>provider 요청</h2>
+        <p class="hint">
+          병합을 끄면 같은 문장이 조각으로 나뉘어 각각 요청됩니다. 마커는
+          <code>⟦n⟧</code> 로 표시했습니다.
+        </p>
+        <ol id="calls" class="calls"></ol>
+        <h2>노드 매핑</h2>
+        <p class="hint">텍스트 노드 하나씩만 바뀌었는지 확인합니다. 요소는 만들거나 지우지 않습니다.</p>
+        <ul id="mapping" class="mapping"></ul>
+      </aside>
+    </main>
+
+    <!-- The engine runs from the compiled output, so the sample proves the
+         shipped JS rather than a parallel copy of it. -->
+    <script src="../build/ts/src/lib/constants.js"></script>
+    <script src="../build/ts/src/lib/dom.js"></script>
+    <script src="../build/ts/demo/glossary.js"></script>
+    <script src="../build/ts/demo/demo.js"></script>

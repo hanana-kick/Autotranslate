@@ -27,9 +27,15 @@
       "vendor/browser-polyfill.js",
       "lib/constants.js",
       "lib/browser.js",
+      "lib/gemma.js",
+      "lib/pagecontext.js",
+      "lib/targets.js",
       "lib/rules.js",
+      "lib/local.js",
+      "lib/modelstore.js",
       "lib/settings.js",
       "lib/engines.js",
+      "lib/localhost.js",
       "background.js"
     ]
   },
@@ -37,9 +43,9 @@
     "page": "options.html",
     "open_in_tab": true
   },
-  "permissions": ["storage", "scripting", "contextMenus"],
+  "permissions": ["storage", "scripting", "contextMenus", "offscreen"],
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'"
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }
 }
