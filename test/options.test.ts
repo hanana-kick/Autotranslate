@@ -5,14 +5,15 @@ import { join } from 'node:path';
 import { SRC, load, resetGlobals, deferred, type ATNamespace } from './helpers.ts';
 
 // The options page is a plain script page: constants + browser + rules +
-// local + modelstore + settings first (the order options.html uses), then the
-// controller itself.
+// local + modelstore + modelflow + settings first (the order options.html
+// uses), then the controller itself.
 const LIBS = [
   'lib/constants.js',
   'lib/browser.js',
   'lib/rules.js',
   'lib/local.js',
   'lib/modelstore.js',
+  'lib/modelflow.js',
   'lib/settings.js'
 ];
 
@@ -176,7 +177,6 @@ type StubDocument = {
 // id, tag and the data-i18n key options.html puts on the button.
 const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['enabled', 'input'],
-  ['autoDetect', 'input'],
   ['showBadge', 'input'],
   ['debug', 'input'],
   ['testEngine', 'button', 'options_test'],
@@ -497,6 +497,14 @@ async function boot(options: BootOptions = {}) {
     model.calls.downloads.push(request);
     return download(request);
   };
+  // The page hands the transfer to `AT.modelflow`; the real module still runs,
+  // so this only records what the page asked it to do.
+  const installs: ATNamespace[] = [];
+  const installFromUrl = AT.modelflow.installFromUrl as (install: ATNamespace) => Promise<unknown>;
+  AT.modelflow.installFromUrl = async (install: ATNamespace) => {
+    installs.push(install);
+    return installFromUrl(install);
+  };
 
   for (const fn of [...(doc.listeners.DOMContentLoaded ?? [])]) await fn({ type: 'DOMContentLoaded' });
   await settle();
@@ -510,6 +518,7 @@ async function boot(options: BootOptions = {}) {
     runtimeMessages,
     replies,
     model: model.calls,
+    installs,
     progress,
     /** Make the next storage write fail, the way a full/quota'd store does. */
     failWrites: (message = 'quota exceeded') => {
@@ -525,7 +534,6 @@ function storedSettings(overrides: ATNamespace = {}): ATNamespace {
   return {
     version: 1,
     enabled: true,
-    autoDetect: true,
     targetLang: 'en',
     sourceLang: 'auto',
     localModelId: '',
@@ -554,7 +562,6 @@ test('boot fills the selects, every field and the button labels from storage', a
   const env = await boot({
     stored: storedSettings({
       enabled: false,
-      autoDetect: false,
       showBadge: false,
       debug: true,
       targetLang: 'ko',
@@ -570,7 +577,6 @@ test('boot fills the selects, every field and the button labels from storage', a
   const { AT, field } = env;
 
   assert.equal(field('enabled').checked, false);
-  assert.equal(field('autoDetect').checked, false);
   assert.equal(field('showBadge').checked, false);
   assert.equal(field('debug').checked, true);
   assert.equal(field('targetLang').value, 'ko');
@@ -645,7 +651,7 @@ test('junk in storage renders a coerced form, never a half-filled one', async ()
   assert.equal(field('localModel').value, '', 'a non-string model id is dropped');
   assert.equal(field('localMaxTokens').value, '1024', 'a non-numeric budget falls back');
   assert.equal(field('maxNodes').value, '600');
-  assert.equal(field('enabled').checked, true);
+  assert.equal(field('enabled').checked, false, 'enabled is strictly true, a junk value means off');
   assert.equal(field('showBadge').checked, true);
   assert.equal(field('debug').checked, false, 'debug is strictly true');
 
@@ -665,7 +671,7 @@ test('an empty store boots the defaults and the empty rule row', async () => {
   assert.equal(field('localModel').children.length, 1);
   assert.equal(field('localMaxTokens').value, '1024');
   assert.equal(field('maxNodes').value, '600');
-  assert.deepEqual([field('enabled').checked, field('autoDetect').checked, field('showBadge').checked, field('debug').checked], [true, true, true, false]);
+  assert.deepEqual([field('enabled').checked, field('showBadge').checked, field('debug').checked], [false, true, false], 'nothing translates until onboarding finishes');
 
   const list = field('ruleList');
   assert.equal(list.children.length, 1);
@@ -678,7 +684,6 @@ test('saving writes one record with the typed values, coerced', async () => {
   const { AT, field } = env;
 
   field('enabled').checked = true;
-  field('autoDetect').checked = false;
   field('showBadge').checked = false;
   field('debug').checked = true;
   field('targetLang').value = 'ja';
@@ -696,7 +701,7 @@ test('saving writes one record with the typed values, coerced', async () => {
   const saved = savedSettings(env);
   assert.equal(saved.targetLang, 'ja');
   assert.equal(saved.sourceLang, 'ko');
-  assert.equal(saved.autoDetect, false);
+  assert.equal(saved.enabled, true);
   assert.equal(saved.showBadge, false);
   assert.equal(saved.debug, true);
   assert.equal(saved.version, 1);
@@ -966,7 +971,6 @@ test('reset writes the defaults and repaints the form', async () => {
       localMaxTokens: 2048,
       maxNodes: 900,
       enabled: false,
-      autoDetect: false,
       showBadge: false,
       debug: true,
       siteRules: [{ pattern: 'news.example.com', action: 'never' }]
@@ -991,7 +995,7 @@ test('reset writes the defaults and repaints the form', async () => {
   assert.deepEqual(saved.siteRules, []);
   assert.equal('engine' in saved, false, 'the defaults carry no provider settings');
   assert.equal('endpoints' in saved, false);
-  assert.deepEqual([field('enabled').checked, field('autoDetect').checked, field('showBadge').checked, field('debug').checked], [true, true, true, false]);
+  assert.deepEqual([field('enabled').checked, field('showBadge').checked, field('debug').checked], [false, true, false], 'nothing translates until onboarding finishes');
   assert.equal(field('localModel').value, '');
   assert.equal(field('localMaxTokens').value, '1024');
   assert.equal(field('maxNodes').value, '600');
@@ -1153,18 +1157,29 @@ test('deleting an unselected model leaves the settings and the host alone', asyn
 test('downloading a model streams its progress and then registers it', async () => {
   const env = await boot({
     stored: storedSettings({ localModelId: '' }),
-    models: { token: 'hf-secret' }
+    models: { token: 'hf-secret' },
+    // The install loads the model once before calling itself finished.
+    replies: { 'at/local-prepare': { ok: true } }
   });
   const { AT, field } = env;
 
   assert.equal(field('modelUrl').value, AT.local.MODEL_SOURCES[0].url, 'the catalogue url is prefilled');
   assert.equal(field('modelProgress').hidden, true, 'nothing is in flight before the click');
+  assert.equal(env.installs.length, 0, 'boot never downloads');
   assert.equal(env.model.downloads.length, 0, 'boot never downloads');
 
   await click(field('downloadModel'));
   await idle();
 
-  assert.equal(env.model.downloads.length, 1, 'one click is one download');
+  assert.equal(env.installs.length, 1, 'one click is one install');
+  const install = env.installs[0]!;
+  assert.equal(install.url, AT.local.MODEL_SOURCES[0].url);
+  assert.equal(install.token, 'hf-secret', 'the typed token travels with the install');
+  assert.ok(install.signal instanceof AbortSignal, 'the install gets a signal the cancel button can abort');
+  assert.equal(install.signal.aborted, false);
+  assert.equal(typeof install.onProgress, 'function', 'the page draws the progress');
+
+  assert.equal(env.model.downloads.length, 1, 'the install asks the store for one transfer');
   const request = env.model.downloads[0]!;
   assert.equal(request.url, AT.local.MODEL_SOURCES[0].url);
   assert.equal(request.token, 'hf-secret', 'the typed token travels with the request');

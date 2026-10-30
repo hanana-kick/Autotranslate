@@ -19,6 +19,7 @@ namespace AT {
   };
 
   export type TabsApi = {
+    create: (properties: { url: string; active?: boolean }) => Promise<Tab | undefined>;
     get: (tabId: number) => Promise<Tab | undefined>;
     query: (queryInfo: { active?: boolean; currentWindow?: boolean }) => Promise<(Tab | undefined)[]>;
     sendMessage: (tabId: number, message: unknown) => Promise<unknown>;

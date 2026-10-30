@@ -15,27 +15,19 @@
   "popup_enabled": { "message": "Auto-translate" },
   "popup_enabledTitle": { "message": "Translate pages automatically" },
   "popup_targetLanguage": { "message": "Translate to" },
-  "popup_siteRule": { "message": "For this site" },
-  "popup_ruleInherit": { "message": "Follow global setting" },
-  "popup_ruleAlways": { "message": "Always translate" },
-  "popup_ruleNever": { "message": "Never translate" },
-  "popup_translate": { "message": "Translate page" },
-  "popup_restore": { "message": "Restore" },
   "popup_options": { "message": "Options" },
   "popup_idle": { "message": "Not translated yet." },
   "popup_localUnverified": { "message": "This language pair has not been checked with the on-device model." },
-  "popup_localNoModel": { "message": "No model yet — download one in Options" },
+  "popup_localNoModel": { "message": "No model yet — install it in Settings" },
   "popup_translated": {
     "message": "Translated $1$ text segments.",
     "placeholders": { "1": { "content": "$1" } }
   },
   "popup_unavailable": { "message": "This page cannot be translated." },
   "popup_disabled": { "message": "Autotranslate is turned off." },
-  "popup_working": { "message": "Translating…" },
   "options_title": { "message": "Autotranslate options" },
   "options_behavior": { "message": "Behavior" },
   "options_enabled": { "message": "Enable translation" },
-  "options_autoDetect": { "message": "Translate foreign pages automatically" },
   "options_showBadge": { "message": "Show badge on translated pages" },
   "options_debug": { "message": "Verbose logging" },
   "options_test": { "message": "Test provider" },
@@ -215,5 +207,20 @@
   },
   "options_stateError": {
     "message": "On-device engine failed"
-  }
+  },
+  "welcome_intro": { "message": "Install the model once. After that, every page you open is translated into your language, in this browser." },
+  "welcome_language": { "message": "Your language" },
+  "welcome_model": { "message": "Model" },
+  "welcome_modelHint": { "message": "Download the model once, or pick a model file you already have. It is stored on this device; pages never leave the browser." },
+  "welcome_haveFile": { "message": "Choose a file I already have" },
+  "welcome_modelReady": {
+    "message": "Ready: $1$ ($2$)",
+    "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } }
+  },
+  "welcome_importFailed": { "message": "That file cannot be used: $1$", "placeholders": { "1": { "content": "$1" } } },
+  "welcome_needModel": { "message": "No model yet. Download it or pick a file to continue." },
+  "welcome_readyExisting": { "message": "The model is already installed. Press Start to turn translation on." },
+  "welcome_start": { "message": "Start translating" },
+  "welcome_starting": { "message": "Starting the download…" },
+  "welcome_done": { "message": "Done. Pages are translated automatically from now on." }
 }

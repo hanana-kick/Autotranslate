@@ -45,8 +45,6 @@ namespace AT.content {
     scrollBound: boolean;
     /** Debounce for the scroll pass, apart from the mutation one. */
     scrollTimer: number;
-    /** A scheduled re-check for a page whose content had not rendered yet. */
-    pendingCheck: number;
     /** Mutations arrived while a pass was already running. */
     dirty: boolean;
     /** Regions the last mutations touched, waiting for the next tick. */
@@ -82,7 +80,6 @@ declare var __autotranslate: AT.content.Boot | undefined;
     settings: null,
     scrollBound: false,
     scrollTimer: 0,
-    pendingCheck: 0,
     dirty: false,
     roots: [],
     full: false,
@@ -140,96 +137,6 @@ declare var __autotranslate: AT.content.Boot | undefined;
       });
     }
     return state.pipeline;
-  }
-
-  // 'translate' always, 'skip' never, 'detect' compares the declared page
-  // language with the target language.
-  /**
-   * The page's own words, for the detector: title, headings and the first
-   * paragraphs of the main content. `html[lang]` alone is not enough — YouTube
-   * serves a localised shell around a foreign title, description and comments.
-   */
-  function contentSample(): string {
-    const pick = (selector: string, limit: number): string[] => {
-      const out: string[] = [];
-      for (const node of Array.from(document.querySelectorAll(selector))) {
-        const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim();
-        if (text.length >= 20) out.push(text);
-        if (out.length >= limit) break;
-      }
-      return out;
-    };
-    const chosen = [
-      document.title,
-      ...pick('h1, h2', 3),
-      ...pick('#description-inline-expander, article p, main p, [itemprop="description"], p', 3)
-    ].filter((part) => typeof part === 'string' && part.trim().length > 0);
-    // Nothing content-bearing yet. The shell of a localised site is in the
-    // target language while the article is not, so this is the last resort,
-    // never a substitute for text the page actually offers.
-    if (chosen.length === 0) {
-      const body = (document.body?.textContent ?? '').replace(/\s+/g, ' ').trim();
-      if (body) chosen.push(body.slice(0, 200));
-    }
-    return chosen.join(' ').slice(0, 400);
-  }
-
-  /**
-   * Translate, skip, or wait for the page to render.
-   *
-   * `wait` exists because of single-page apps: YouTube is already `complete` and
-   * claims `ko-KR` before its video title, description and comments exist. Judging
-   * an empty page says "already in the target language", and nothing ever
-   * translates afterwards. Waiting for actual content is the difference between
-   * "not translated" and "translated once the page is there".
-   */
-  type Verdict = 'translate' | 'skip' | 'wait';
-
-  async function decideTranslation(
-    decision: AT.background.Plan,
-    settings: AT.settings.ContentSnapshot
-  ): Promise<Verdict> {
-    if (!settings.enabled) return 'skip';
-    if (decision.action === 'translate') return 'translate';
-    if (decision.action === 'skip') return 'skip';
-    if (settings.sourceLang && settings.sourceLang !== 'auto') return 'translate';
-    const declared = (document.documentElement?.lang ?? '').trim();
-    if (declared && !C.sameLanguage(declared, settings.targetLang)) return 'translate';
-    const sample = contentSample();
-    // Nothing to judge yet: the app has not rendered its content.
-    if (sample.replace(/\s+/g, '').length < 12) return 'wait';
-    // The page claims to be in the target language. Ask the browser's detector
-    // about the content itself before believing it.
-    const detected = await AT.detectLanguage(sample);
-    if (!detected) {
-      // No detector answer: trust a declaration, and translate when there is
-      // none, because an untagged page is the one most likely to need it.
-      return declared ? 'skip' : 'translate';
-    }
-    return C.sameLanguage(detected.code, settings.targetLang) ? 'skip' : 'translate';
-  }
-
-  /** How often and how long to wait for a page that renders after load. */
-  const CONTENT_RETRY_DELAYS = [400, 1200, 3000, 6000];
-
-  function scheduleContentCheck(settings: AT.settings.ContentSnapshot): void {
-    const attempt = (index: number): void => {
-      if (index >= CONTENT_RETRY_DELAYS.length) {
-        state.pendingCheck = 0;
-        // Still nothing to judge: leave the page alone rather than guess.
-        return;
-      }
-      state.pendingCheck = globalThis.setTimeout(() => {
-        state.pendingCheck = 0;
-        decideTranslation({ action: 'detect', reason: 'auto' }, state.settings ?? settings)
-          .then((verdict) => {
-            if (verdict === 'translate') return runTranslation(state.settings ?? settings);
-            if (verdict === 'wait') attempt(index + 1);
-          })
-          .catch((error) => AT.warn('content check failed', error));
-      }, CONTENT_RETRY_DELAYS[index] ?? 1000);
-    };
-    attempt(0);
   }
 
   function report(patch: AT.content.Patch): Promise<AT.Response | void> {
@@ -479,22 +386,19 @@ declare var __autotranslate: AT.content.Boot | undefined;
     };
   }
 
+  /**
+   * The switch is the whole policy: on translates this page into the target
+   * language, off leaves it alone. A page already in the target language comes
+   * back from the model unchanged and nothing is written.
+   */
   async function translate(message: AT.content.TranslateRequest): Promise<AT.MessageResult> {
     const settings = message.settings;
     if (!settings) throw new Error('translate request without settings');
     state.settings = settings;
     const decision = message.decision ?? { action: 'translate' };
-    const verdict = await decideTranslation(decision, settings);
-    if (verdict === 'wait') {
-      // A single-page app has not rendered its content yet. Do not answer "skip"
-      // and forget: look again when the page has something to judge.
-      scheduleContentCheck(settings);
+    if (!settings.enabled || decision.action === 'skip') {
       await report({ status: 'idle' });
-      return { status: 'idle', reason: 'waiting-for-content' };
-    }
-    if (verdict === 'skip') {
-      await report({ status: 'idle' });
-      return { status: 'idle', reason: decision.reason ?? 'language-matches-target' };
+      return { status: 'idle', reason: decision.reason ?? 'disabled' };
     }
     try {
       return await runTranslation(settings);

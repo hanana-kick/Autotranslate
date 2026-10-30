@@ -15,27 +15,19 @@
   "popup_enabled": { "message": "자동 번역" },
   "popup_enabledTitle": { "message": "페이지를 자동으로 번역합니다" },
   "popup_targetLanguage": { "message": "번역 언어" },
-  "popup_siteRule": { "message": "이 사이트 설정" },
-  "popup_ruleInherit": { "message": "전체 설정 따르기" },
-  "popup_ruleAlways": { "message": "항상 번역" },
-  "popup_ruleNever": { "message": "번역 안 함" },
-  "popup_translate": { "message": "페이지 번역" },
-  "popup_restore": { "message": "원문 복원" },
   "popup_options": { "message": "설정" },
   "popup_idle": { "message": "아직 번역되지 않았습니다." },
   "popup_localUnverified": { "message": "이 언어 쌍은 온디바이스 모델로 검증하지 않았습니다." },
-  "popup_localNoModel": { "message": "모델이 없습니다 — Options에서 내려받으세요" },
+  "popup_localNoModel": { "message": "모델이 없습니다 — 설정에서 설치하세요" },
   "popup_translated": {
     "message": "$1$개 구간을 번역했습니다.",
     "placeholders": { "1": { "content": "$1" } }
   },
   "popup_unavailable": { "message": "이 페이지는 번역할 수 없습니다." },
   "popup_disabled": { "message": "자동 번역이 꺼져 있습니다." },
-  "popup_working": { "message": "번역 중…" },
   "options_title": { "message": "Autotranslate 설정" },
   "options_behavior": { "message": "동작" },
   "options_enabled": { "message": "번역 사용" },
-  "options_autoDetect": { "message": "외국어 페이지 자동 번역" },
   "options_showBadge": { "message": "번역된 페이지에 배지 표시" },
   "options_debug": { "message": "상세 로그" },
   "options_test": { "message": "서비스 테스트" },
@@ -215,5 +207,20 @@
   },
   "options_stateError": {
     "message": "온디바이스 엔진 오류"
-  }
+  },
+  "welcome_intro": { "message": "모델을 한 번만 설치하면, 그 뒤로 열리는 페이지가 이 브라우저 안에서 목표 언어로 번역됩니다." },
+  "welcome_language": { "message": "번역할 언어" },
+  "welcome_model": { "message": "모델" },
+  "welcome_modelHint": { "message": "모델을 내려받거나, 이미 가지고 있는 모델 파일을 고르세요. 파일은 이 기기에 저장되고 페이지는 브라우저 밖으로 나가지 않습니다." },
+  "welcome_haveFile": { "message": "가지고 있는 파일 선택" },
+  "welcome_modelReady": {
+    "message": "준비됨: $1$ ($2$)",
+    "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } }
+  },
+  "welcome_importFailed": { "message": "파일을 사용할 수 없습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
+  "welcome_needModel": { "message": "모델이 없습니다. 내려받거나 파일을 골라야 시작할 수 있습니다." },
+  "welcome_readyExisting": { "message": "모델이 이미 설치되어 있습니다. 시작을 누르면 번역이 켜집니다." },
+  "welcome_start": { "message": "번역 시작" },
+  "welcome_starting": { "message": "내려받기를 시작합니다…" },
+  "welcome_done": { "message": "완료되었습니다. 이제 페이지가 자동으로 번역됩니다." }
 }

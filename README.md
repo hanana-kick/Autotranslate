@@ -43,9 +43,33 @@ pick `build/chrome`.
 pick `build/firefox/manifest.json`. Unsigned add-ons can only be loaded temporarily;
 `web-ext sign` (not bundled) is needed for a permanent install.
 
+Either way the first thing that opens is the onboarding page (see [First run](#first-run)).
+
+
 The shipped files are plain classic scripts: `tsc` compiles and type-checks, there is no
 bundler, no polyfill beyond the vendored `webextension-polyfill`, and no runtime
 dependency ends up in the package.
+
+## First run
+
+Translation is off and there is no model until the user finishes onboarding, which is the
+only thing a fresh install shows:
+
+| Step | What happens | Where |
+| --- | --- | --- |
+| 1 | Choose the language pages are translated into (defaults to the browser's UI language) | `welcome.html` |
+| 2 | Install the model: **download** it (progress, cancel) or **pick a file** already on disk. Either route writes the file into OPFS, then asks the host to load it — a file that does not load is not "installed" | `welcome.html` → `AT.modelflow` |
+| 3 | Press *Start translating*: `enabled: true`, the model id and the language are stored, and the page closes | `welcome.html` |
+
+`runtime.onInstalled` (reason `install`) opens this page and stores `enabled: false`. If the
+profile already holds a working model (a reinstall, a second browser), the page says so and
+only asks for the language and the *Start* click.
+
+After that there is one control: the popup's switch. On translates every page into the target
+language and applies at once to the tab in front of the user; off puts the page back and stops
+translating new ones. A per-site rule (`never`/`always`, set in Options or from the page's
+context menu) is the only exception. The popup also carries the target language; everything
+else lives in Options, which stays an ordinary settings page rather than part of the flow.
 
 ## Scripts
 
@@ -74,9 +98,10 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
   manifest.json          single source; the build rewrites it per target
   background.ts          menus, badge, tab state, message router, auto-translate
   content.ts             injected on demand: translate / restore / selection card
-  popup.{html,ts}        per-tab controls
-  options.{html,ts}      language, limits, site rules, model store
-  styles.css             shared by popup and options
+  welcome.{html,ts}      first run: language, model install, switch on
+  popup.{html,ts}        the on/off switch and the target language
+  options.{html,ts}      model store, limits, site rules, debug
+  styles.css             shared by welcome, popup and options
   offscreen.html         the Chrome placement of the on-device host, opened by URL
   offscreen.ts           message plumbing for that document; the host itself is a lib
   lib/
@@ -84,6 +109,7 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
     browser.ts           the only file that names the host global; AT.api, capabilities, i18n, onMessage
     local.ts             prompts, token budgets, model records, host status, storage keys
     modelstore.ts        model bytes in OPFS + metadata in IndexedDB (seams for tests)
+    modelflow.ts         one install path (download or file) + prepare, shared by welcome and options
     gemma.ts             TranslateGemma's language table and the GemmaLang type (581 codes)
     pagecontext.ts       what kind of page this is, from its own metadata (collect / analyze / hint)
     targets.ts           which region a text is in, how visible it is, and what to translate first

@@ -12,9 +12,6 @@ namespace AT.popup {
     status: HTMLParagraphElement;
     localStatus: HTMLParagraphElement;
     targetLang: HTMLSelectElement;
-    siteRule: HTMLSelectElement;
-    translate: HTMLButtonElement;
-    restore: HTMLButtonElement;
     options: HTMLButtonElement;
   };
 
@@ -93,11 +90,7 @@ namespace AT.popup {
   function render(): void {
     el('enabled').checked = view.settings!.enabled;
     fillLanguages(view.settings!.targetLang);
-    el('siteRule').value = view.rule ?? '';
-    const usable = view.canTranslate && view.settings!.enabled;
-    for (const id of ['translate', 'restore', 'siteRule'] as const) {
-      el(id).disabled = !usable;
-    }
+    el('targetLang').disabled = !view.canTranslate;
     el('host').textContent = view.tab?.host ?? view.tab?.url ?? '';
     if (!view.tab || !String(view.tab.url ?? '').startsWith('http')) {
       setStatus(AT.i18n.msg('popup_unavailable'), 'warn');
@@ -186,7 +179,11 @@ namespace AT.popup {
 
   function wire(): void {
     el('enabled').addEventListener('change', async (event) => {
-      await patchSettings({ enabled: sourceOf<HTMLInputElement>(event).checked });
+      const enabled = sourceOf<HTMLInputElement>(event).checked;
+      await patchSettings({ enabled });
+      // The switch is the whole policy, so it applies to this page at once:
+      // on translates it, off puts it back.
+      if (view.canTranslate) await send(enabled ? C.MSG.TRANSLATE_TAB : C.MSG.RESTORE_TAB);
       await refresh();
     });
 
@@ -194,34 +191,6 @@ namespace AT.popup {
       await patchSettings({ targetLang: sourceOf<HTMLSelectElement>(event).value });
       const wasTranslated = view.tabState?.status === 'translated';
       if (wasTranslated) await send(C.MSG.TRANSLATE_TAB);
-      await refresh();
-    });
-
-    el('siteRule').addEventListener('change', async (event) => {
-      const action = sourceOf<HTMLSelectElement>(event).value || null;
-      const response = (await AT.sendMessage({
-        type: action ? C.MSG.SET_SITE_RULE : C.MSG.REMOVE_SITE_RULE,
-        tabId: view.tab?.id,
-        pattern: view.tab?.host,
-        action
-      })) as Reply;
-      if (!response?.ok) {
-        setStatus(response?.error ?? 'error', 'error');
-        return;
-      }
-      if (action === 'never') await send(C.MSG.RESTORE_TAB);
-      if (action === 'always') await send(C.MSG.TRANSLATE_TAB);
-      await refresh();
-    });
-
-    el('translate').addEventListener('click', async () => {
-      setStatus(AT.i18n.msg('popup_working'), 'info');
-      await send(C.MSG.TRANSLATE_TAB);
-      await refresh();
-    });
-
-    el('restore').addEventListener('click', async () => {
-      await send(C.MSG.RESTORE_TAB);
       await refresh();
     });
 

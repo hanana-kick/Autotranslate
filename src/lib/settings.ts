@@ -6,7 +6,6 @@ namespace AT.settings {
   export type Settings = {
     version: number;
     enabled: boolean;
-    autoDetect: boolean;
     targetLang: string;
     sourceLang: string;
     /** Model id the on-device engine loads; empty means none selected. */
@@ -22,7 +21,6 @@ namespace AT.settings {
   /** What a content script may see: no site rules, no debug flag. */
   export type ContentSnapshot = {
     enabled: boolean;
-    autoDetect: boolean;
     targetLang: string;
     sourceLang: string;
     maxNodes: number;
@@ -33,7 +31,6 @@ namespace AT.settings {
   type RawSettings = {
     version?: unknown;
     enabled?: unknown;
-    autoDetect?: unknown;
     targetLang?: unknown;
     sourceLang?: unknown;
     localModelId?: unknown;
@@ -47,8 +44,9 @@ namespace AT.settings {
   export function defaults(): Settings {
     return {
       version: 1,
-      enabled: true,
-      autoDetect: true,
+      // Nothing translates until onboarding finishes: there is no model yet,
+      // and the user has not chosen a target language.
+      enabled: false,
       targetLang: uiLang(),
       sourceLang: 'auto',
       localModelId: '',
@@ -105,8 +103,7 @@ namespace AT.settings {
     }
     return {
       version: 1,
-      enabled: input.enabled !== false,
-      autoDetect: input.autoDetect !== false,
+      enabled: input.enabled === true,
       targetLang:
         typeof input.targetLang === 'string' && C.isSupportedLang(input.targetLang) ? input.targetLang : base.targetLang,
       sourceLang:
@@ -132,7 +129,6 @@ namespace AT.settings {
     const s = normalized ?? defaults();
     return {
       enabled: s.enabled,
-      autoDetect: s.autoDetect,
       targetLang: s.targetLang,
       sourceLang: s.sourceLang,
       maxNodes: s.maxNodes,

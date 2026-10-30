@@ -214,14 +214,15 @@ if (typeof self.importScripts === 'function') {
   }
 
   // Whether a page should be translated, decided centrally so the content
-  // script never has to read settings or site rules.
+  // script never has to read settings or site rules. The switch is the whole
+  // policy: on means every page is translated into the target language, with a
+  // per-site rule able to say otherwise.
   function decide(href: unknown, settings: AT.settings.Settings): AT.background.Plan {
     if (!settings.enabled) return { action: 'skip', reason: 'disabled' };
     const rule = AT.rules.resolve(settings.siteRules, href);
     if (rule?.action === 'never') return { action: 'skip', reason: 'site-never', pattern: rule.pattern };
     if (rule?.action === 'always') return { action: 'translate', reason: 'site-always', pattern: rule.pattern };
-    if (!settings.autoDetect) return { action: 'skip', reason: 'auto-off' };
-    return { action: 'detect', reason: 'auto' };
+    return { action: 'translate', reason: 'auto' };
   }
 
   async function activeTab(tabId?: number): Promise<AT.Tab | null | undefined> {
@@ -504,8 +505,22 @@ if (typeof self.importScripts === 'function') {
     return await localState(true);
   }
 
+  /** The first run is a setup flow, not a settings page: this opens it. */
+  function openWelcome(): void {
+    const open = api.tabs?.create;
+    if (typeof open !== 'function') return;
+    Promise.resolve(open({ url: api.runtime.getURL('welcome.html'), active: true })).catch((error: unknown) =>
+      AT.warn('opening the welcome page failed', error)
+    );
+  }
+
   api.runtime.onInstalled.addListener(async (details) => {
-    if (details.reason === 'install') await AT.settings.save({});
+    if (details.reason === 'install') {
+      // Nothing translates until the model is installed: the welcome page turns
+      // it on as its last step.
+      await AT.settings.save({ enabled: false });
+      openWelcome();
+    }
     settingsCache = null;
     await setupMenus();
   });

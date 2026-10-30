@@ -122,7 +122,8 @@ function makeElement(tag: string, props: StubProps, removed: StubElement[]): Stu
     type: ''
   } as unknown as StubElement;
   // A real element derives textContent from its children until someone assigns
-  // it. The detector samples `document.body.textContent`, so the stub has to.
+  // it. The card assigns its own body, and page context reads headings through
+  // it, so the stub has to behave the same way.
   let ownText: string | null = null;
   Object.defineProperty(node, 'textContent', {
     get: () => {
@@ -453,7 +454,6 @@ function environment(options: Options = {}) {
 
 const snapshot = (overrides: ATNamespace = {}): ATNamespace => ({
   enabled: true,
-  autoDetect: true,
   targetLang: 'en',
   sourceLang: 'auto',
   maxNodes: 600,
@@ -635,56 +635,22 @@ test('a repeated translate pass asks the provider nothing new', async () => {
 
 // --- decisions that must not translate -------------------------------------
 
-test('a skip decision leaves the page alone and reports idle', async () => {
+test('a skip decision on an enabled page reports idle and sends no batch', async () => {
   const env = environment();
-  const reply = await env.send(translateMessage(snapshot(), { action: 'skip', reason: 'never-site' }));
+  const reply = await env.send(translateMessage(snapshot(), { action: 'skip', reason: 'site-never' }));
 
-  assert.deepEqual(reply, { ok: true, status: 'idle', reason: 'never-site' });
+  assert.deepEqual(reply, { ok: true, status: 'idle', reason: 'site-never' });
   assert.equal(env.recorded.batch.length, 0, 'a skipped page never reaches the provider');
   assert.deepEqual(pageTexts(env.page.documentElement), DEFAULT_TEXTS, 'the DOM is untouched');
   assert.deepEqual(env.recorded.state, [{ type: 'at/state-changed', status: 'idle', translated: 0, error: null }]);
   assert.deepEqual(env.observers, [], 'a skipped page starts no observer');
 });
 
-test('detect compares the declared page language with the target', async () => {
-  const same = environment({ lang: 'en', title: 'Some English page title' });
-  assert.deepEqual(await same.send(translateMessage(snapshot(), { action: 'detect' })), {
-    ok: true,
-    status: 'idle',
-    reason: 'language-matches-target'
-  });
-  assert.equal(same.recorded.batch.length, 0);
-  assert.deepEqual(pageTexts(same.page.documentElement), DEFAULT_TEXTS);
-
-  // A regional variant of the target still counts as the same language.
-  const regional = environment({ lang: 'en-GB', title: 'Some English page title' });
-  assert.equal((await regional.send(translateMessage(snapshot(), { action: 'detect' }))).status, 'idle');
-  assert.equal(regional.recorded.batch.length, 0);
-
-  const foreign = environment({ lang: 'de' });
-  assert.equal((await foreign.send(translateMessage(snapshot(), { action: 'detect' }))).status, 'translated');
-  assert.equal(foreign.recorded.batch.length, 1);
-  assert.deepEqual(pageTexts(foreign.page.documentElement), wrap(DEFAULT_TEXTS));
-
-  // Nothing declared: the script cannot tell, so it translates.
-  const undeclared = environment({ lang: '   ', title: 'Some English page title' });
-  assert.equal((await undeclared.send(translateMessage(snapshot(), { action: 'detect' }))).status, 'translated');
-  assert.equal(undeclared.recorded.batch.length, 1);
-});
-
-test('an explicit source language outranks the declared page language', async () => {
-  const env = environment({ lang: 'en' });
-  const settings = snapshot({ sourceLang: 'de' });
-  const reply = await env.send(translateMessage(settings, { action: 'detect' }));
-  assert.equal(reply.status, 'translated', 'the user-told-us source wins over <html lang>');
-  assert.equal(env.recorded.batch.length, 1);
-  assert.equal(env.recorded.batch[0]?.sourceLang, 'de');
-});
-
-test('the master switch outranks a translate decision', async () => {
+test('the master switch reports idle without a batch', async () => {
   const env = environment();
   const reply = await env.send(translateMessage(snapshot({ enabled: false })));
-  assert.equal(reply.status, 'idle');
+
+  assert.deepEqual(reply, { ok: true, status: 'idle', reason: 'disabled' });
   assert.equal(env.recorded.batch.length, 0, 'a disabled extension never calls the provider');
   assert.deepEqual(pageTexts(env.page.documentElement), DEFAULT_TEXTS);
   assert.deepEqual(env.recorded.state, [{ type: 'at/state-changed', status: 'idle', translated: 0, error: null }]);
@@ -1115,63 +1081,6 @@ test('a stopped observer ignores later mutations', async () => {
     assert.equal(env.recorded.batch.length, 1, 'no provider call after a restore');
     assert.equal(env.recorded.state.length, 2);
     assert.deepEqual(pageTexts(env.page.body), [...DEFAULT_TEXTS, 'Late content']);
-  } finally {
-    clock.restore();
-  }
-});
-
-test('a page that claims the target language is still translated when its content is foreign', async () => {
-  // YouTube: html[lang] is ko-KR (the shell is localised) while the title,
-  // description and comments are English. Without asking the detector the page
-  // is skipped and nothing is translated.
-  resetGlobals();
-  const env = environment({ lang: 'ko-KR', title: 'Some English page title', texts: ['Some English body text here'] });
-  const detected: string[] = [];
-  (env.AT as ATNamespace).detectLanguage = async (sample: string) => {
-    detected.push(sample);
-    return { code: 'en', reliable: true };
-  };
-
-  const reply = await env.send(
-    translateMessage(snapshot({ targetLang: 'ko', sourceLang: 'auto' }), { action: 'detect' })
-  );
-  assert.equal(reply.status, 'translated', 'the foreign content is translated');
-  assert.equal(detected.length, 1, 'the detector was asked once');
-});
-
-test('a page whose content is already in the target language is left alone', async () => {
-  resetGlobals();
-  const env = environment({ lang: 'ko-KR', title: '이미 한국어로 쓰인 제목', texts: ['이미 한국어로 쓰인 본문입니다'] });
-  (env.AT as ATNamespace).detectLanguage = async () => ({ code: 'ko', reliable: true });
-
-  const reply = await env.send(
-    translateMessage(snapshot({ targetLang: 'ko', sourceLang: 'auto' }), { action: 'detect' })
-  );
-  assert.equal(reply.status, 'idle', 'nothing to do');
-  assert.equal(env.recorded.batch.length, 0, 'the provider was never asked');
-});
-
-test('a page that has not rendered yet is translated once its content arrives', async () => {
-  // YouTube reports `complete` with an empty body and lang=ko-KR; deciding then
-  // would answer "already Korean" and nothing would ever translate. The script
-  // waits, then looks again.
-  const clock = installClock();
-  try {
-    const env = environment({ lang: 'ko-KR', texts: [] });
-    (env.AT as ATNamespace).detectLanguage = async () => ({ code: 'en', reliable: true });
-
-    const reply = await env.send(translateMessage(snapshot({ targetLang: 'ko' }), { action: 'detect' }));
-    assert.equal(reply.status, 'idle');
-    assert.equal(reply.reason, 'waiting-for-content', 'the empty page is not judged yet');
-    assert.equal(env.recorded.batch.length, 0);
-
-    // The app renders.
-    env.page.body.append(env.page.make('p', {}, [t('The video title is here')]));
-    env.page.document.title = 'The video title is here';
-    await clock.run();
-
-    assert.equal(env.recorded.batch.length, 1, 'the retry found the content and translated it');
-    assert.deepEqual(pageTexts(env.page.body), ['»The video title is here«']);
   } finally {
     clock.restore();
   }

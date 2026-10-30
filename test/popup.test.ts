@@ -8,7 +8,7 @@ import { load, resetGlobals, type ATNamespace } from './helpers.ts';
 const LIBS = ['lib/constants.js', 'lib/rules.js', 'lib/browser.js', 'lib/local.js', 'lib/settings.js'];
 
 // The ids in popup.html; the stub hands one element back per id.
-const FIELD_IDS = ['enabled', 'host', 'status', 'localStatus', 'targetLang', 'siteRule', 'translate', 'restore', 'options'] as const;
+const FIELD_IDS = ['enabled', 'host', 'status', 'localStatus', 'targetLang', 'options'] as const;
 type FieldId = (typeof FIELD_IDS)[number];
 
 /** The popup only ever reads `target` off an event. */
@@ -90,8 +90,6 @@ function environment({ state, script = {}, stored = null, storageFails = false }
   // The background answers the action messages unless a test scripts them;
   // an unscripted type answers nothing, the way a dead channel does.
   const replies: Script = {
-    'at/set-site-rule': { ok: true },
-    'at/remove-site-rule': { ok: true },
     'at/translate-tab': { ok: true },
     'at/restore-tab': { ok: true },
     ...script
@@ -167,9 +165,6 @@ const makeField = (tagName: string, hidden = false): StubField => {
     // popup.html ships #localStatus with the `hidden` attribute on.
     localStatus: makeField('p', true),
     targetLang: makeField('select'),
-    siteRule: makeField('select'),
-    translate: makeField('button'),
-    restore: makeField('button'),
     options: makeField('button')
   };
 
@@ -232,11 +227,11 @@ const makeField = (tagName: string, hidden = false): StubField => {
       fields.enabled.checked = checked;
       return run('enabled', 'change');
     },
-    choose: (id: 'targetLang' | 'siteRule', value: string) => {
+    choose: (id: 'targetLang', value: string) => {
       fields[id].value = value;
       return run(id, 'change');
     },
-    click: (id: 'translate' | 'restore' | 'options') => run(id, 'click'),
+    click: (id: 'options') => run(id, 'click'),
     fire: dispatch
   };
 }
@@ -281,28 +276,24 @@ test('boot asks the background once for state and renders a translated tab', asy
   assert.deepEqual(h.status(), { text: 'popup_translated:12', kind: 'ok' });
   assert.equal(h.fields.host.textContent, 'example.com');
   assert.equal(h.fields.enabled.checked, true);
-  assert.equal(h.fields.translate.disabled, false);
-  assert.equal(h.fields.restore.disabled, false);
-  assert.equal(h.fields.siteRule.disabled, false);
-  assert.equal(h.fields.siteRule.value, '');
+  assert.equal(h.fields.targetLang.disabled, false);
   // The language list comes from the constants, with the stored code selected.
   assert.equal(h.fields.targetLang.value, 'ko');
   assert.equal(h.fields.targetLang.options.length, h.AT.C.LANGS.length);
   assert.deepEqual(h.fields.targetLang.options[0], { tagName: 'option', value: 'en', textContent: 'English (en)' });
 });
 
-test('an idle tab renders the idle status with both actions enabled', async () => {
+test('an idle tab renders the idle status with the switch on and the language select live', async () => {
   const h = environment({ stored: { enabled: true, targetLang: 'de' } });
   await h.boot();
 
   assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
-  assert.equal(h.fields.translate.disabled, false);
-  assert.equal(h.fields.restore.disabled, false);
   assert.equal(h.fields.enabled.checked, true);
+  assert.equal(h.fields.targetLang.disabled, false);
   assert.equal(h.fields.targetLang.value, 'de');
 });
 
-test('a tab the background cannot inject into disables every action', async () => {
+test('a tab the background cannot inject into disables the language select but not the switch', async () => {
   const h = environment({
     state: stateOf({
       tab: { id: 3, url: 'chrome://extensions', title: null, host: null },
@@ -312,9 +303,9 @@ test('a tab the background cannot inject into disables every action', async () =
   await h.boot();
 
   assert.deepEqual(h.status(), { text: 'popup_unavailable', kind: 'warn' });
-  assert.equal(h.fields.translate.disabled, true);
-  assert.equal(h.fields.restore.disabled, true);
-  assert.equal(h.fields.siteRule.disabled, true);
+  assert.equal(h.fields.targetLang.disabled, true);
+  // The switch is the global setting, so it stays operable on any tab.
+  assert.equal(h.fields.enabled.disabled, false);
   // No host was derived, so the line falls back to the raw url.
   assert.equal(h.fields.host.textContent, 'chrome://extensions');
 });
@@ -325,30 +316,33 @@ test('no active tab at all leaves the popup unavailable', async () => {
 
   assert.deepEqual(h.status(), { text: 'popup_unavailable', kind: 'warn' });
   assert.equal(h.fields.host.textContent, '');
-  assert.equal(h.fields.translate.disabled, true);
-  assert.equal(h.fields.restore.disabled, true);
+  assert.equal(h.fields.targetLang.disabled, true);
 });
 
-test('a master switch of off disables the actions and names the reason', async () => {
+test('a master switch of off names the reason nothing translates', async () => {
   const h = environment({ stored: { enabled: false } });
   await h.boot();
 
   assert.deepEqual(h.status(), { text: 'popup_disabled', kind: 'warn' });
   assert.equal(h.fields.enabled.checked, false);
-  assert.equal(h.fields.translate.disabled, true);
-  assert.equal(h.fields.restore.disabled, true);
-  assert.equal(h.fields.siteRule.disabled, true);
+});
+
+test('a fresh profile starts switched off', async () => {
+  const h = environment();
+  await h.boot();
+
+  assert.equal(h.fields.enabled.checked, false);
+  assert.deepEqual(h.status(), { text: 'popup_disabled', kind: 'warn' });
 });
 
 test('a content-script error is shown verbatim as the status', async () => {
   const h = environment({
+    stored: { enabled: true },
     state: stateOf({ state: { status: 'error', translated: 0, error: 'provider quota exceeded', targetLang: null } })
   });
   await h.boot();
 
   assert.deepEqual(h.status(), { text: 'provider quota exceeded', kind: 'error' });
-  // Retrying is still offered, so the buttons stay live.
-  assert.equal(h.fields.translate.disabled, false);
 });
 
 test('a refused get-state leaves the fields untouched and names the error', async () => {
@@ -433,64 +427,61 @@ test('an unsupported browser gets one problem, not two', async () => {
   assert.deepEqual(h.localStatus(), { text: 'options_localUnsupported', kind: 'warn', hidden: false });
 });
 
-// --- translate / restore -----------------------------------------------------
+// --- the switch acts on the active tab ---------------------------------------
 
-test('the translate button asks the background to translate the active tab', async () => {
-  const h = environment({
-    stored: { enabled: true, targetLang: 'ja' },
-    state: stateOf({ state: { status: 'translated', translated: 4, error: null, targetLang: 'ja' } })
-  });
+test('switching on saves enabled and translates the active tab', async () => {
+  const h = environment({ stored: { enabled: false, targetLang: 'ja' } });
   await h.boot();
-  await h.click('translate');
+  await h.flip(true);
 
-  assert.deepEqual(h.types(), ['at/get-state', 'at/translate-tab', 'at/get-state']);
-  assert.equal(h.sends[1]?.type, 'at/translate-tab');
-  assert.equal(h.sends[1]?.tabId, TAB.id);
-  // One more state read after the action, so the buttons follow the result.
-  assert.equal(h.statesSent.length, 2);
+  assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: true } });
+  assert.deepEqual(h.sends[2], { type: 'at/translate-tab', tabId: TAB.id });
+  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/translate-tab', 'at/get-state']);
+  assert.equal(h.stored?.enabled, true);
+  assert.equal(h.fields.enabled.checked, true);
 });
 
-test('the translate button says it is working while the request is in flight', async () => {
-  let inFlight: string | undefined;
+test('switching off saves enabled and restores the active tab', async () => {
   const h = environment({
-    script: {
-      'at/translate-tab': () => {
-        inFlight = `${h.fields.status.textContent}|${h.fields.status.dataset.kind}`;
-        return { ok: true };
-      }
-    }
-  });
-  await h.boot();
-  await h.click('translate');
-
-  assert.equal(inFlight, 'popup_working|info');
-});
-
-test('the restore button asks the background to restore the active tab', async () => {
-  const h = environment({
+    stored: { enabled: true, targetLang: 'ko' },
     state: stateOf({ state: { status: 'translated', translated: 9, error: null, targetLang: 'ko' } })
   });
   await h.boot();
-  await h.click('restore');
+  await h.flip(false);
 
-  assert.deepEqual(h.types(), ['at/get-state', 'at/restore-tab', 'at/get-state']);
-  assert.equal(h.sends[1]?.type, 'at/restore-tab');
-  assert.equal(h.sends[1]?.tabId, TAB.id);
-  // The re-render reports what the background still says about the tab.
-  assert.deepEqual(h.status(), { text: 'popup_translated:9', kind: 'ok' });
+  assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: false } });
+  assert.deepEqual(h.sends[2], { type: 'at/restore-tab', tabId: TAB.id });
+  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/restore-tab', 'at/get-state']);
+  assert.equal(h.stored?.enabled, false);
+  // The re-render reports the stored setting, not the page state.
+  assert.deepEqual(h.status(), { text: 'popup_disabled', kind: 'warn' });
+});
+
+test('the switch sends no action when the tab cannot be injected into', async () => {
+  const h = environment({
+    stored: { enabled: false, targetLang: 'ko' },
+    state: stateOf({ tab: { id: 3, url: 'chrome://extensions', title: null, host: null }, canTranslate: false })
+  });
+  await h.boot();
+  await h.flip(true);
+
+  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/get-state']);
+  assert.ok(!h.types().includes('at/translate-tab'));
+  // The setting is global, so it is still saved.
+  assert.equal(h.stored?.enabled, true);
 });
 
 test('an action for a tab the background did not identify omits its id', async () => {
   const h = environment({
+    stored: { enabled: false, targetLang: 'ko' },
     state: stateOf({ tab: { url: 'https://example.com/plain', title: null, host: 'example.com' } })
   });
   await h.boot();
-  await h.click('restore');
+  await h.flip(true);
 
-  const message = h.sends[1];
-  assert.equal(message?.type, 'at/restore-tab');
+  const message = h.sends[2];
+  assert.equal(message?.type, 'at/translate-tab');
   assert.ok(!('tabId' in (message ?? {})) || message.tabId === undefined);
-  assert.equal(h.fields.translate.disabled, false);
 });
 
 // --- master switch -----------------------------------------------------------
@@ -504,11 +495,11 @@ test('the master switch patches the settings it read and re-renders from them', 
   await h.flip(false);
 
   assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: false } });
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/get-state']);
+  assert.deepEqual(h.sends[2], { type: 'at/restore-tab', tabId: TAB.id });
+  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/restore-tab', 'at/get-state']);
   assert.equal(h.stored?.enabled, false);
   // The render after the patch reflects the settings the background kept.
   assert.equal(h.fields.enabled.checked, false);
-  assert.equal(h.fields.translate.disabled, true);
   assert.deepEqual(h.status(), { text: 'popup_disabled', kind: 'warn' });
 });
 
@@ -525,8 +516,9 @@ test('the checkbox follows the background snapshot, not the value the control ho
   await h.flip(true);
 
   assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: true } });
+  // The action still follows the switch that was flipped.
+  assert.deepEqual(h.sends[2], { type: 'at/translate-tab', tabId: TAB.id });
   assert.equal(h.fields.enabled.checked, false);
-  assert.equal(h.fields.translate.disabled, true);
   assert.deepEqual(h.status(), { text: 'popup_disabled', kind: 'warn' });
 });
 
@@ -539,7 +531,8 @@ test('a refused settings patch is re-rendered over by the following state', asyn
   await h.flip(false);
 
   assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: false } });
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/get-state']);
+  assert.deepEqual(h.sends[2], { type: 'at/restore-tab', tabId: TAB.id });
+  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/restore-tab', 'at/get-state']);
   // patchSettings() reported the refusal, then the handler re-rendered and
   // render() overwrote the status with what storage still says: enabled.
   assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
@@ -589,62 +582,6 @@ test('a tab reported translated with nothing translated is still re-translated',
   assert.ok(h.types().includes('at/translate-tab'));
 });
 
-// --- per-site rule -----------------------------------------------------------
-
-test('the site rule control sends set or remove according to the chosen action', async () => {
-  const added = environment({ state: stateOf({ rule: null }) });
-  await added.boot();
-  await added.choose('siteRule', 'always');
-  assert.deepEqual(added.sends[1], {
-    type: 'at/set-site-rule',
-    tabId: TAB.id,
-    pattern: 'example.com',
-    action: 'always'
-  });
-
-  const cleared = environment({ state: stateOf({ rule: 'never' }) });
-  await cleared.boot();
-  assert.equal(cleared.fields.siteRule.value, 'never');
-  await cleared.choose('siteRule', '');
-  assert.deepEqual(cleared.sends[1], {
-    type: 'at/remove-site-rule',
-    tabId: TAB.id,
-    pattern: 'example.com',
-    action: null
-  });
-  assert.deepEqual(cleared.types(), ['at/get-state', 'at/remove-site-rule', 'at/get-state']);
-});
-
-test('a never rule restores the page and an always rule translates it', async () => {
-  const never = environment({ state: stateOf({ rule: null }) });
-  await never.boot();
-  await never.choose('siteRule', 'never');
-  assert.deepEqual(never.types(), ['at/get-state', 'at/set-site-rule', 'at/restore-tab', 'at/get-state']);
-
-  const always = environment({ state: stateOf({ rule: null }) });
-  await always.boot();
-  await always.choose('siteRule', 'always');
-  assert.deepEqual(always.types(), ['at/get-state', 'at/set-site-rule', 'at/translate-tab', 'at/get-state']);
-
-  // Inheriting (the empty choice) touches neither action.
-  const inherit = environment({ state: stateOf({ rule: 'always' }) });
-  await inherit.boot();
-  await inherit.choose('siteRule', '');
-  assert.deepEqual(inherit.types(), ['at/get-state', 'at/remove-site-rule', 'at/get-state']);
-});
-
-test('a refused site-rule change reports the error and does nothing else', async () => {
-  const h = environment({
-    state: stateOf({ rule: null }),
-    script: { 'at/set-site-rule': { ok: false, error: 'no tab to act on' } }
-  });
-  await h.boot();
-  await h.choose('siteRule', 'never');
-
-  assert.deepEqual(h.status(), { text: 'no tab to act on', kind: 'error' });
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-site-rule']);
-});
-
 // --- options button ----------------------------------------------------------
 
 test('the options button opens the options page without messaging the background', async () => {
@@ -683,7 +620,7 @@ test('a failing action is reported before the following render replaces it', asy
   });
   await h.boot();
   const rejections = await watchingRejections(async () => {
-    await h.click('translate');
+    await h.flip(true);
   });
 
   // The failure reaches the status line...

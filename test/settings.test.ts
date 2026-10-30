@@ -8,8 +8,7 @@ const { settings } = AT;
 test('defaults are a complete, normalised object', () => {
   const base = settings.normalize(undefined);
   assert.equal(base.version, 1);
-  assert.equal(base.enabled, true);
-  assert.equal(base.autoDetect, true);
+  assert.equal(base.enabled, false, 'nothing translates until onboarding turns it on');
   assert.equal(base.targetLang, 'en');
   assert.equal(base.sourceLang, 'auto');
   assert.equal(base.localModelId, '', 'nothing is downloaded out of the box');
@@ -18,7 +17,6 @@ test('defaults are a complete, normalised object', () => {
   assert.deepEqual(base.siteRules, []);
   // The whole stored blob: an extra field here would be persisted forever.
   assert.deepEqual(Object.keys(base).sort(), [
-    'autoDetect',
     'debug',
     'enabled',
     'localMaxTokens',
@@ -53,7 +51,6 @@ test('junk values fall back instead of throwing', () => {
     localMaxTokens: 'nonsense'
   });
   assert.equal(coerced.enabled, false);
-  assert.equal(coerced.autoDetect, false);
   assert.equal(coerced.targetLang, 'en');
   assert.equal(coerced.sourceLang, 'ko');
   assert.equal(coerced.maxNodes, 10);
@@ -61,7 +58,7 @@ test('junk values fall back instead of throwing', () => {
   assert.equal(coerced.debug, false);
   assert.equal(coerced.localModelId, '', 'a model id must be a string to be stored');
   assert.equal(coerced.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS, 'an unparseable budget falls back');
-  for (const gone of ['engine', 'endpoints', 'apiKey', 'batchChars', 'fallbackEngine', 'unknownKey']) {
+  for (const gone of ['engine', 'endpoints', 'apiKey', 'batchChars', 'fallbackEngine', 'autoDetect', 'unknownKey']) {
     assert.equal(gone in coerced, false, `${gone} is not a setting any more`);
   }
 });
@@ -102,7 +99,6 @@ test('site rules are canonicalised and deduplicated', () => {
 test('the content snapshot carries only what a page needs', () => {
   const snapshot = settings.contentSnapshot(settings.normalize({ maxNodes: 400 }));
   assert.deepEqual(Object.keys(snapshot).sort(), [
-    'autoDetect',
     'enabled',
     'maxNodes',
     'showBadge',

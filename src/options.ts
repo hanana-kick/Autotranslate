@@ -9,7 +9,6 @@ namespace AT.options {
   // the call sites stay as short as the untyped version was.
   type Fields = {
     enabled: HTMLInputElement;
-    autoDetect: HTMLInputElement;
     showBadge: HTMLInputElement;
     debug: HTMLInputElement;
     testEngine: HTMLButtonElement;
@@ -116,7 +115,6 @@ namespace AT.options {
 
   function render(): void {
     el('enabled').checked = settings!.enabled;
-    el('autoDetect').checked = settings!.autoDetect;
     el('showBadge').checked = settings!.showBadge;
     el('debug').checked = settings!.debug;
     el('targetLang').value = settings!.targetLang;
@@ -132,7 +130,6 @@ namespace AT.options {
   function collect(): FormValues {
     return {
       enabled: el('enabled').checked,
-      autoDetect: el('autoDetect').checked,
       showBadge: el('showBadge').checked,
       debug: el('debug').checked,
       targetLang: el('targetLang').value,
@@ -289,26 +286,17 @@ namespace AT.options {
     el('cancelDownload').hidden = !busy;
   }
 
-  /** Eviction would cost the user a 3.6 GiB download, so ask for an exemption. */
-  async function keepStorage(): Promise<void> {
-    try {
-      await AT.modelstore.requestPersistence();
-    } catch (error: unknown) {
-      AT.warn('asking for persistent storage failed', reason(error));
-    }
-  }
-
-  /** Shared tail of the two ways a model arrives: report and re-list. */
-  async function afterIngest(result: AT.modelstore.IngestResult, started: number): Promise<void> {
+  /** Report one finished transfer; the transfer itself is `AT.modelflow`. */
+  async function settle(outcome: AT.modelflow.Outcome): Promise<void> {
     el('modelProgress').hidden = true;
     setBusy(false);
-    if (!result.ok || !result.record) {
-      const detail = result.error === 'needs-token' ? '' : `: ${result.error ?? 'unknown'}`;
+    if (!outcome.ok) {
+      const detail = outcome.error === 'needs-token' ? '' : `: ${outcome.error ?? 'unknown'}`;
       setStatus(
         el('modelStatus'),
-        result.error === 'cancelled'
+        outcome.error === 'cancelled'
           ? AT.i18n.msg('options_cancelled')
-          : result.error === 'needs-token'
+          : outcome.error === 'needs-token'
             ? AT.i18n.msg('options_needsToken')
             : AT.i18n.msg('options_downloadFailed') + detail,
         'error'
@@ -317,19 +305,20 @@ namespace AT.options {
       return;
     }
     if (!settings!.localModelId) {
-      settings = await AT.settings.save({ ...settings!, localModelId: result.record.id });
+      settings = await AT.settings.save({ ...settings!, localModelId: outcome.modelId });
     }
     setStatus(
       el('modelStatus'),
       AT.i18n.msg('options_downloadDone', [
-        result.record.name,
-        AT.local.formatBytes(result.bytes),
-        String(Math.max(1, Math.round((Date.now() - started) / 1000)))
+        outcome.name,
+        AT.local.formatBytes(outcome.bytes),
+        String(outcome.seconds)
       ]),
       'ok'
     );
     await refreshModels();
     render();
+    await refreshLocalStatus();
   }
 
   async function startDownload(): Promise<void> {
@@ -340,45 +329,30 @@ namespace AT.options {
     }
     const token = el('modelToken').value.trim();
     const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
-    try {
-      await AT.modelstore.setToken(token);
-      if (expected && !(await AT.modelstore.fits(expected))) {
-        setStatus(el('modelStatus'), AT.i18n.msg('options_noSpace', AT.local.formatBytes(expected)), 'error');
-        return;
-      }
-    } catch (error: unknown) {
-      setStatus(el('modelStatus'), reason(error), 'error');
-      return;
-    }
+    await AT.modelstore.setToken(token).catch((error: unknown) => setStatus(el('modelStatus'), reason(error), 'error'));
     const controller = new AbortController();
     inflight = controller;
     setBusy(true);
-    await keepStorage();
     showProgress(0, expected ?? null);
-    const started = Date.now();
-    const result = await AT.modelstore.download({
-      url,
-      token,
-      expectedSize: expected,
-      signal: controller.signal,
-      onProgress: (received, total) => showProgress(received, total)
-    });
-    if (inflight === controller) inflight = null;
-    await afterIngest(result, started);
+    try {
+      await settle(
+        await AT.modelflow.installFromUrl({ url, token, signal: controller.signal, onProgress: showProgress })
+      );
+    } finally {
+      if (inflight === controller) inflight = null;
+    }
   }
 
   async function importPickedFile(): Promise<void> {
     const file = el('modelFile').files?.[0];
     if (!file) return;
     setBusy(true);
-    await keepStorage();
     showProgress(0, file.size > 0 ? file.size : null);
-    const started = Date.now();
-    const result = await AT.modelstore.importFile(file, {
-      onProgress: (received, total) => showProgress(received, total)
-    });
-    el('modelFile').value = '';
-    await afterIngest(result, started);
+    try {
+      await settle(await AT.modelflow.installFromFile(file));
+    } finally {
+      el('modelFile').value = '';
+    }
   }
 
   async function prepareLocal(): Promise<void> {
@@ -388,9 +362,9 @@ namespace AT.options {
       return;
     }
     setStatus(el('modelStatus'), AT.i18n.msg('options_preparing'), 'info');
-    const reply = await AT.sendMessage({ type: C.MSG.LOCAL_PREPARE, modelId });
-    if (!reply?.ok) {
-      setStatus(el('modelStatus'), String(reply?.error ?? AT.i18n.msg('options_prepareFailed')), 'error');
+    const prepared = await AT.modelflow.prepare(modelId);
+    if (!prepared.ok) {
+      setStatus(el('modelStatus'), prepared.error ?? AT.i18n.msg('options_prepareFailed'), 'error');
       return;
     }
     await refreshLocalStatus();
@@ -460,7 +434,7 @@ namespace AT.options {
     wire();
     // Ask first, then report: the usage line is only meaningful once the
     // browser has answered whether it will keep the bytes.
-    await keepStorage();
+    await AT.modelflow.keepStorage();
     // The model list decides what the model select can show, so the form is
     // painted once the store has answered rather than from settings alone.
     await Promise.all([refreshModels(), refreshLocalStatus()]);

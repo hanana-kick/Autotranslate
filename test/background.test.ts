@@ -48,6 +48,8 @@ type Recorded = {
   /** Calls the background made straight into the host module in this page. */
   inline: { place: string | null; handled: string[]; messages: ATNamespace[] };
   optionsOpened: number;
+  /** `tabs.create` calls, e.g. the onboarding tab. */
+  created: ATNamespace[];
   storage: ATNamespace;
 };
 
@@ -186,6 +188,7 @@ function environment({
     offscreen: [],
     inline: { place: null, handled: [], messages: [] },
     optionsOpened: 0,
+    created: [],
     storage: settings ? { settings } : {}
   };
 
@@ -255,6 +258,10 @@ function environment({
     tabs: {
       query: async () => tabs ?? (tab ? [tab] : []),
       get: async (tabId: number) => (tab && tab.id === tabId ? tab : null),
+      create: async (details: ATNamespace) => {
+        recorded.created.push(details);
+        return { id: 99 };
+      },
       update: async () => {},
       onUpdated: { addListener: (fn: Listener) => events.updated.push(fn) },
       onRemoved: { addListener: (fn: Listener) => events.removed.push(fn) },
@@ -375,10 +382,10 @@ test('the event page boots without importScripts (Firefox)', () => {
   assert.equal(typeof AT.engines.translate, 'function');
 });
 
-test('install seeds settings and registers the context menu', async () => {
+test('install seeds settings, opens onboarding and registers the context menu', async () => {
   const { AT, events, recorded } = environment();
   await fire(events.installed, { reason: 'install' });
-  assert.equal(recorded.storage.settings.enabled, true, 'an install starts enabled');
+  assert.equal(recorded.storage.settings.enabled, false, 'nothing translates until onboarding finishes');
   assert.equal(recorded.storage.settings.localModelId, '', 'and with no on-device model selected');
   assert.equal(
     recorded.storage.settings.localMaxTokens,
@@ -386,6 +393,7 @@ test('install seeds settings and registers the context menu', async () => {
     'the token budget starts at the model default'
   );
   assert.deepEqual(recorded.storage.settings.siteRules, []);
+  assert.deepEqual(recorded.created, [{ url: 'welcome.html', active: true }], 'the first run opens the setup page');
   assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS);
   for (const item of recorded.menus) {
     assert.match(item.title, /^\[menu.+\]$/, `menu title must come from i18n: ${item.id}`);
@@ -393,6 +401,11 @@ test('install seeds settings and registers the context menu', async () => {
   }
   await fire(events.startup);
   assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS, 'startup rebuilds the menu');
+  assert.equal(recorded.created.length, 1, 'startup opens no tab');
+
+  await fire(events.installed, { reason: 'update' });
+  assert.equal(recorded.created.length, 1, 'an update opens no tab');
+  assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS, 'an update rebuilds the menu');
 });
 
 test('content batches reach the host once per unique text', async () => {
@@ -426,19 +439,18 @@ test('host failures reach the content script as an error, not a half translation
 
 test('navigation injects the content script and asks it to translate', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', title: 'News', ping: false, translated: 3 };
-  const { AT, events, recorded, types } = environment({ tab });
+  const { AT, events, recorded, types } = environment({ tab, settings: { enabled: true } });
   await fire(events.updated, 7, { status: 'complete' }, tab);
 
   assert.equal(recorded.injected.length, 1);
   assert.deepEqual(recorded.injected[0], { target: { tabId: 7 }, files: CONTENT_FILES });
   const translate = recorded.tabMessages.find((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE);
   assert.equal(translate!.tabId, 7);
-  assert.equal(translate!.message.decision.action, 'detect', 'no rule means language detection');
+  assert.deepEqual(translate!.message.decision, { action: 'translate', reason: 'auto' }, 'the switch alone means translate');
   assert.deepEqual(
     translate!.message.settings,
     {
       enabled: true,
-      autoDetect: true,
       targetLang: 'en',
       sourceLang: 'auto',
       maxNodes: AT.C.DEFAULT_MAX_NODES,
@@ -455,18 +467,17 @@ test('navigation injects the content script and asks it to translate', async () 
 
 test('an existing content script is not injected twice', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', translated: 2 };
-  const { events, recorded, types } = environment({ tab });
+  const { events, recorded, types } = environment({ tab, settings: { enabled: true } });
   await fire(events.updated, 7, { status: 'complete' }, tab);
   assert.deepEqual(recorded.injected, [], 'the ping answered, so no injection');
   assert.deepEqual(types(), ['at/content-ping', 'at/content-translate']);
 });
 
-test('the master switch, auto-detect and site rules suppress translation', async () => {
+test('the master switch and site rules suppress translation', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article' };
   const cases: [ATNamespace, string][] = [
     [{ enabled: false }, 'disabled'],
-    [{ autoDetect: false }, 'auto-off'],
-    [{ siteRules: [{ pattern: 'news.example.com', action: 'never' }] }, 'site-never']
+    [{ enabled: true, siteRules: [{ pattern: 'news.example.com', action: 'never' }] }, 'site-never']
   ];
   for (const [settings, reason] of cases) {
     const { events, recorded } = environment({ tab, settings });
@@ -480,12 +491,15 @@ test('a site rule of always forces translation without detection', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', ping: false };
   const { AT, events, recorded } = environment({
     tab,
-    settings: { autoDetect: false, siteRules: [{ pattern: 'news.example.com', action: 'always' }] }
+    settings: { enabled: true, siteRules: [{ pattern: 'news.example.com', action: 'always' }] }
   });
   await fire(events.updated, 7, { status: 'complete' }, tab);
   const translate = recorded.tabMessages.find((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE);
-  assert.equal(translate!.message.decision.action, 'translate');
-  assert.equal(translate!.message.decision.pattern, 'news.example.com');
+  assert.deepEqual(translate!.message.decision, {
+    action: 'translate',
+    reason: 'site-always',
+    pattern: 'news.example.com'
+  });
 });
 
 test('browser and translator pages are left alone', async () => {
@@ -924,7 +938,7 @@ test('the resident model is unloaded when the selection changes', async () => {
 
 test('a prepared model stays warm across unrelated settings edits', async () => {
   const { AT, events, recorded, send } = environment({
-    settings: { localModelId: 'model-a', autoDetect: true },
+    settings: { localModelId: 'model-a', showBadge: true },
     withOffscreen: true,
     hostReplies: {
       'at/local-load': () => ({ ok: true, status: readyStatus }),
@@ -945,7 +959,7 @@ test('a prepared model stays warm across unrelated settings edits', async () => 
 
   // Nothing about the resident model changed, so an unrelated edit must not
   // cost the user another huge load.
-  await edit({ autoDetect: false });
+  await edit({ showBadge: false });
   await edit({ targetLang: 'de' });
   assert.equal(unloads(), 0, 'an unrelated edit keeps a prepared model resident');
 

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title data-i18n="extensionName"></title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body class="welcome">
+    <main>
+      <header class="welcome-head">
+        <img src="icons/icon-48.png" alt="" width="40" height="40" />
+        <div>
+          <h1 data-i18n="extensionName"></h1>
+          <p class="hint" data-i18n="welcome_intro"></p>
+        </div>
+      </header>
+
+      <section class="card">
+        <h2 data-i18n="welcome_language"></h2>
+        <div class="field">
+          <label for="targetLang" data-i18n="options_targetLang"></label>
+          <select id="targetLang"></select>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 data-i18n="welcome_model"></h2>
+        <p class="hint" data-i18n="welcome_modelHint"></p>
+        <p class="hint" id="support" hidden></p>
+        <p class="hint" id="installed" hidden></p>
+
+        <div class="row wrap">
+          <button id="download" type="button" data-i18n="options_download"></button>
+          <button id="cancel" type="button" class="secondary" data-i18n="options_cancel" hidden></button>
+          <input type="file" id="modelFile" accept=".task,application/octet-stream" hidden />
+          <button id="pick" type="button" class="secondary" data-i18n="welcome_haveFile"></button>
+        </div>
+
+        <div class="field">
+          <label for="modelToken" data-i18n="options_modelToken"></label>
+          <input type="password" id="modelToken" spellcheck="false" autocomplete="off" />
+        </div>
+        <p class="hint" data-i18n="options_modelTokenHint"></p>
+
+        <progress id="progress" max="100" value="0" hidden></progress>
+        <p class="status" id="status" role="status"></p>
+      </section>
+
+      <footer class="row spread">
+        <button id="start" type="button" disabled data-i18n="welcome_start"></button>
+        <button id="options" type="button" class="ghost" data-i18n="options_title"></button>
+      </footer>
+    </main>
+
+    <script src="vendor/browser-polyfill.js"></script>
+    <script src="lib/constants.js"></script>
+    <script src="lib/browser.js"></script>
+    <script src="lib/local.js"></script>
+    <script src="lib/modelstore.js"></script>
+    <script src="lib/modelflow.js"></script>
+    <script src="lib/settings.js"></script>
+    <script src="welcome.js"></script>
+  </body>
+</html>
