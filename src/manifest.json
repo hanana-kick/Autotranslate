@@ -33,6 +33,7 @@
       "lib/rules.js",
       "lib/local.js",
       "lib/modelstore.js",
+      "lib/ui.js",
       "lib/settings.js",
       "lib/engines.js",
       "lib/localhost.js",
@@ -43,7 +44,8 @@
     "page": "options.html",
     "open_in_tab": true
   },
-  "permissions": ["storage", "scripting", "contextMenus", "offscreen"],
+  "permissions": ["storage", "scripting", "contextMenus", "offscreen", "sidePanel"],
+  "side_panel": { "default_path": "welcome.html" },
   "host_permissions": ["<all_urls>"],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

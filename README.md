@@ -65,6 +65,13 @@ only thing a fresh install shows:
 profile already holds a working model (a reinstall, a second browser), the page says so and
 only asks for the language and the *Start* click.
 
+**Side panel first.** `AT.ui.openPage` docks the page to the side of the window when the
+browser has `chrome.sidePanel` (`side_panel.default_path` is `welcome.html`), and opens a tab
+when it does not. Chrome only allows `sidePanel.open` in response to a user gesture, and an
+install is not one, so the first run after installing still lands in a tab; the popup's
+settings button *is* a gesture, so on a profile without a model it reopens onboarding in the
+panel. Firefox has no side panel: it always gets the tab.
+
 After that there is one control: the popup's switch. On translates every page into the target
 language and applies at once to the tab in front of the user; off puts the page back and stops
 translating new ones. A per-site rule (`never`/`always`, set in Options or from the page's
@@ -110,6 +117,7 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
     local.ts             prompts, token budgets, model records, host status, storage keys
     modelstore.ts        model bytes in OPFS + metadata in IndexedDB (seams for tests)
     modelflow.ts         one install path (download or file) + prepare, shared by welcome and options
+    ui.ts                where an extension page is shown: side panel when the browser has one, else a tab
     gemma.ts             TranslateGemma's language table and the GemmaLang type (581 codes)
     pagecontext.ts       what kind of page this is, from its own metadata (collect / analyze / hint)
     targets.ts           which region a text is in, how visible it is, and what to translate first
@@ -362,6 +370,7 @@ independently.
 | Add-on identity | none | `browser_specific_settings.gecko.id` | injected by `scripts/build.ts` for `--target=firefox` |
 | Chrome-only keys | `minimum_chrome_version` | would be dead weight | stripped for the Firefox bundle |
 | On-device host | offscreen document (`chrome.offscreen`) | the background page itself | one host module, one caller (`AT.local.callHost`); the placement is chosen at runtime |
+| Where a page is docked | `chrome.sidePanel` | no side panel | `AT.ui.openPage` tries the panel, falls back to a tab; `side_panel` and the permission are stripped for Firefox |
 | Unsigned packages | fine | temporary load only | documented above; sign with `web-ext` when publishing |
 
 ## The engine

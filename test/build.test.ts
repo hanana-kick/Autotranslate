@@ -209,7 +209,7 @@ test('both bundles ship the on-device runtime byte for byte from the installed p
   }
 });
 
-test('only the chrome bundle asks for the offscreen permission', () => {
+test('only the chrome bundle asks for the permissions it can use', () => {
   assert.equal(build([]).status, 0);
   const chrome = readJson('build/chrome/manifest.json');
   const firefox = readJson('build/firefox/manifest.json');
@@ -225,16 +225,23 @@ test('only the chrome bundle asks for the offscreen permission', () => {
   }
 
   assert.ok(chrome.permissions.includes('offscreen'), 'the model host needs the permission on chrome');
-  assert.equal(
-    firefox.permissions.includes('offscreen'),
-    false,
-    'Firefox has no chrome.offscreen and refuses unknown permissions'
-  );
+  assert.ok(chrome.permissions.includes('sidePanel'), 'the side panel needs the permission on chrome');
+  for (const permission of ['offscreen', 'sidePanel']) {
+    assert.equal(
+      firefox.permissions.includes(permission),
+      false,
+      `Firefox has no chrome.${permission} and refuses unknown permissions`
+    );
+  }
   assert.deepEqual(
     firefox.permissions,
-    chrome.permissions.filter((permission: string) => permission !== 'offscreen'),
-    'firefox ships the same grant minus the one it cannot use'
+    chrome.permissions.filter((permission: string) => permission !== 'offscreen' && permission !== 'sidePanel'),
+    'firefox ships the same grant minus the ones it cannot use'
   );
+
+  // The panel page itself is a chrome key; Firefox gets the tab fallback.
+  assert.equal(chrome.side_panel?.default_path, 'welcome.html', 'onboarding is what the panel shows');
+  assert.equal('side_panel' in firefox, false, 'there is no side_panel key for firefox');
 });
 
 test('the packaging gate trades the wasm exception for eval only at the cost of failing', () => {

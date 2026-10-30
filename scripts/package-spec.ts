@@ -53,6 +53,7 @@ export const ENTRIES = [
   'lib/local.js',
   'lib/modelstore.js',
   'lib/modelflow.js',
+  'lib/ui.js',
   'lib/localhost.js',
   'offscreen.html',
   'offscreen.js',

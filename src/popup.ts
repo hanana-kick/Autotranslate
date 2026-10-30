@@ -194,7 +194,16 @@ namespace AT.popup {
       await refresh();
     });
 
-    el('options').addEventListener('click', () => void AT.api?.runtime.openOptionsPage());
+    el('options').addEventListener('click', () => {
+      // A click here is a gesture, which is exactly what the side panel needs.
+      // Without a model the onboarding page is the useful destination; a fully
+      // set-up profile wants the settings page.
+      if (!view.settings?.localModelId) {
+        void AT.ui.openPage('welcome.html');
+        return;
+      }
+      void AT.api?.runtime.openOptionsPage();
+    });
   }
 
   document.addEventListener('DOMContentLoaded', () => {

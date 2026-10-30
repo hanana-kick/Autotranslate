@@ -57,6 +57,12 @@ namespace AT {
     closeDocument: () => Promise<void>;
   };
 
+  /** Chrome only: a document docked to the side of the window. */
+  export type SidePanelApi = {
+    open: (options: { windowId?: number; tabId?: number }) => Promise<void>;
+    setOptions: (options: { path?: string; enabled?: boolean; tabId?: number }) => Promise<void>;
+  };
+
   export type ContextMenusApi = {
     removeAll: () => Promise<void>;
     create: (properties: { id?: string; title: string; contexts?: string[] }) => void;
@@ -83,6 +89,7 @@ namespace AT {
     action?: ActionApi;
     scripting?: ScriptingApi;
     offscreen?: OffscreenApi;
+    sidePanel?: SidePanelApi;
     contextMenus?: ContextMenusApi;
     i18n?: I18nApi;
   };
@@ -161,6 +168,8 @@ namespace AT {
   /** The `offscreen` surface; named apart from `AT.offscreen`, which is the
    *  Chrome placement of the on-device host, not the API. */
   export let offscreenApi: OffscreenApi | null | undefined;
+  /** The `sidePanel` surface; null where the browser has no side panel. */
+  export let sidePanelApi: SidePanelApi | null | undefined;
 
   api = extensionApi;
   runtime = extensionApi.runtime ?? null;
@@ -170,6 +179,7 @@ namespace AT {
   scripting = extensionApi.scripting ?? null;
   contextMenus = extensionApi.contextMenus ?? null;
   offscreenApi = extensionApi.offscreen ?? null;
+  sidePanelApi = extensionApi.sidePanel ?? null;
 
   /**
    * The one place that answers whether this browser can host a document of its
@@ -180,6 +190,16 @@ namespace AT {
   export function supportsOffscreen(): boolean {
     const surface = extensionApi.offscreen;
     return typeof surface?.createDocument === 'function' && typeof surface?.hasDocument === 'function';
+  }
+
+  /**
+   * Whether this browser can dock a page to the side of the window. `open` is
+   * gated on a user gesture by the browser, so callers must be ready for it to
+   * fail and fall back to a tab; this only says the API is there.
+   */
+  export function supportsSidePanel(): boolean {
+    const surface = extensionApi.sidePanel;
+    return typeof surface?.open === 'function' && typeof surface?.setOptions === 'function';
   }
 
   export function getURL(path: string): string {

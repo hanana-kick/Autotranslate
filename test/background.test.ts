@@ -15,6 +15,7 @@ const LIBS = [
   'lib/rules.js',
   'lib/local.js',
   'lib/modelstore.js',
+  'lib/ui.js',
   'lib/settings.js',
   'lib/engines.js',
   'lib/localhost.js',

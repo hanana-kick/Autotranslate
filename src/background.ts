@@ -99,6 +99,7 @@ if (typeof self.importScripts === 'function') {
     'lib/rules.js',
     'lib/local.js',
     'lib/modelstore.js',
+    'lib/ui.js',
     'lib/settings.js',
     'lib/engines.js',
     'lib/localhost.js'
@@ -505,13 +506,14 @@ if (typeof self.importScripts === 'function') {
     return await localState(true);
   }
 
-  /** The first run is a setup flow, not a settings page: this opens it. */
+  /**
+   * The first run is a setup flow, not a settings page: this opens it. A side
+   * panel is the better surface and the page is registered as one, but the
+   * browser only lets it open on a user gesture and an install is not one — so
+   * this lands in a tab, which is exactly the fallback the page is built for.
+   */
   function openWelcome(): void {
-    const open = api.tabs?.create;
-    if (typeof open !== 'function') return;
-    Promise.resolve(open({ url: api.runtime.getURL('welcome.html'), active: true })).catch((error: unknown) =>
-      AT.warn('opening the welcome page failed', error)
-    );
+    AT.ui.openPage('welcome.html').catch((error: unknown) => AT.warn('opening the welcome page failed', error));
   }
 
   api.runtime.onInstalled.addListener(async (details) => {

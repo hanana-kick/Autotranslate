@@ -5,7 +5,7 @@ import { load, resetGlobals, type ATNamespace } from './helpers.ts';
 // The popup is a classic script next to popup.html; these are the files the
 // markup loads before it, so `AT.settings.load()`, `AT.i18n` and
 // `AT.local.describeStatus` are the real modules rather than stubs.
-const LIBS = ['lib/constants.js', 'lib/rules.js', 'lib/browser.js', 'lib/local.js', 'lib/settings.js'];
+const LIBS = ['lib/constants.js', 'lib/rules.js', 'lib/browser.js', 'lib/local.js', 'lib/ui.js', 'lib/settings.js'];
 
 // The ids in popup.html; the stub hands one element back per id.
 const FIELD_IDS = ['enabled', 'host', 'status', 'localStatus', 'targetLang', 'options'] as const;
@@ -86,6 +86,9 @@ function environment({ state, script = {}, stored = null, storageFails = false }
   const area: ATNamespace = {};
   let storageFailure: string | null = storageFails ? 'storage is unavailable' : null;
   let optionsOpened = 0;
+  // Tabs the popup opened through `AT.ui` (the side panel is absent here, so
+  // every extension page it asks for lands in one).
+  const createdTabs: ATNamespace[] = [];
 
   // The background answers the action messages unless a test scripts them;
   // an unscripted type answers nothing, the way a dead channel does.
@@ -126,6 +129,12 @@ function environment({ state, script = {}, stored = null, storageFails = false }
           if (storageFailure) throw new Error(storageFailure);
           Object.assign(area, structuredClone(items));
         }
+      }
+    },
+    tabs: {
+      create: async (details: ATNamespace) => {
+        createdTabs.push(details);
+        return { id: 9 };
       }
     },
     i18n: {
@@ -208,6 +217,9 @@ const makeField = (tagName: string, hidden = false): StubField => {
     },
     get optionsOpened(): number {
       return optionsOpened;
+    },
+    get createdTabs(): ATNamespace[] {
+      return createdTabs;
     },
     types: () => sends.map((message) => message.type as string),
     status: () => ({ text: fields.status.textContent, kind: fields.status.dataset.kind }),
@@ -584,13 +596,29 @@ test('a tab reported translated with nothing translated is still re-translated',
 
 // --- options button ----------------------------------------------------------
 
-test('the options button opens the options page without messaging the background', async () => {
-  const h = environment();
+test('the settings button opens the options page on a profile that has a model', async () => {
+  const h = environment({ stored: { enabled: true, localModelId: 'model-a' } });
   await h.boot();
   await h.click('options');
 
   assert.equal(h.optionsOpened, 1);
-  assert.deepEqual(h.types(), ['at/get-state']);
+  assert.deepEqual(h.createdTabs, [], 'a set-up profile goes to the settings page, not the setup flow');
+  assert.deepEqual(h.types(), ['at/get-state'], 'no message is needed for a page that is not the background');
+});
+
+test('the settings button opens the setup flow while no model is installed', async () => {
+  // The onboarding page is the useful destination, and a click is a gesture, so
+  // the browser may dock it as a side panel.
+  const h = environment();
+  await h.boot();
+  await h.click('options');
+
+  assert.equal(h.optionsOpened, 0, 'there is nothing to configure yet');
+  assert.deepEqual(
+    h.createdTabs,
+    [{ url: 'chrome-extension://test/welcome.html', active: true }],
+    'the setup flow opens; without the side panel API it is a tab'
+  );
 });
 
 // --- failure paths -----------------------------------------------------------
