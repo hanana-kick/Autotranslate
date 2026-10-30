@@ -122,16 +122,10 @@ namespace AT.popup {
     setStatus(AT.i18n.msg('popup_idle'), 'info');
   }
 
-  /** One line about the on-device engine, so the user knows whether the page
-   *  they are looking at is being translated locally or not. */
+  /** One line about the model: whether it is there, loaded, and usable for the
+   *  language pair the user picked. */
   function renderLocal(): void {
     const node = el('localStatus');
-    const engine = C.getEngineMeta(view.settings!.engine);
-    if (engine?.kind !== 'local') {
-      node.hidden = true;
-      node.textContent = '';
-      return;
-    }
     const supported = view.local?.supported === true;
     const phrase = AT.local.describeStatus(
       view.local?.status ? AT.local.normalizeStatus(view.local.status) : null,

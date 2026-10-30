@@ -456,8 +456,6 @@ const snapshot = (overrides: ATNamespace = {}): ATNamespace => ({
   autoDetect: true,
   targetLang: 'en',
   sourceLang: 'auto',
-  engine: 'libre',
-  batchChars: 1200,
   maxNodes: 600,
   showBadge: true,
   ...overrides
@@ -711,17 +709,19 @@ test('a rejected batch leaves the page untouched and reaches the background', as
 });
 
 test('a failure in a later chunk never leaves half the page translated', async () => {
-  // Two texts, a chunk budget that fits one of them: the first request succeeds
-  // and is cached, the second one fails before anything is written back.
-  const env = environment({ fail: { error: 'provider exploded', code: null, after: 1 } });
-  const settings = snapshot({ batchChars: 12 });
-  const reply = await env.send(translateMessage(settings));
+  // A run wider than the DOM layer's character budget (1200) is split into one
+  // request per paragraph here: the first request succeeds and is cached, the
+  // second one fails before anything has been written back to the page.
+  const first = 'Hello there '.repeat(60).slice(0, 700);
+  const second = 'Good morning '.repeat(60).slice(0, 700);
+  const env = environment({ texts: [first, second], fail: { error: 'provider exploded', code: null, after: 1 } });
+  const reply = await env.send(translateMessage());
 
-  assert.equal(env.recorded.batch.length, 2, 'the chunk budget really split the request');
-  assert.deepEqual(env.recorded.batch[0]?.texts, ['Hello there']);
-  assert.deepEqual(env.recorded.batch[1]?.texts, ['Good morning']);
+  assert.equal(env.recorded.batch.length, 2, 'the character budget really split the request');
+  assert.deepEqual(env.recorded.batch[0]?.texts, [first]);
+  assert.deepEqual(env.recorded.batch[1]?.texts, [second]);
   assert.deepEqual(reply, { ok: false, error: 'provider exploded', code: null });
-  assert.deepEqual(pageTexts(env.page.documentElement), DEFAULT_TEXTS, 'the answered chunk stays unwritten too');
+  assert.deepEqual(pageTexts(env.page.documentElement), [first, second], 'the answered chunk stays unwritten too');
 });
 
 // --- restore ----------------------------------------------------------------
@@ -907,16 +907,17 @@ test('the card is laid out for the target language and is never translated', asy
 // --- the mutation observer ---------------------------------------------------
 
 test('a page with more text than one tick may take finishes on its own', async () => {
-  // A quiet page after one bounded pass used to stay half translated until
-  // something else moved. The tick that spent its whole budget schedules the
-  // next one instead of waiting for a mutation that may never come.
-  const many = Array.from({ length: 40 }, (_, index) => `Paragraph number ${index}`);
+  // The first pass honours `maxNodes`, so a longer page is left partly
+  // translated. A quiet page has no mutation to wake it, so the pass that spent
+  // its whole budget schedules the next one instead of waiting.
+  const many = Array.from({ length: 120 }, (_, index) => `Paragraph number ${index}`);
   const env = environment({ texts: many });
   const clock = installClock();
   try {
-    await env.send(translateMessage(snapshot({ batchChars: 60 })));
-    const before = env.recorded.batch.length;
-    assert.ok(before > 1, 'the batch budget split the page into several requests');
+    await env.send(translateMessage(snapshot({ maxNodes: 40 })));
+    const translated = pageTexts(env.page.body).filter((text) => text.startsWith('»'));
+    assert.equal(translated.length, 40, 'the first pass is bounded by maxNodes');
+    assert.ok(clock.pending.length > 0, 'the spent budget schedules the next tick without a mutation');
 
     // Nothing new in the DOM: only the self-scheduled ticks can finish it.
     for (let round = 0; round < 400 && clock.pending.length > 0; round += 1) await clock.run();

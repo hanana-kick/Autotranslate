@@ -1,6 +1,6 @@
 // Content script: injected on demand by the background context, never
 // declared in the manifest, so pages pay nothing until a translation is asked
-// for. All provider traffic goes through the background context.
+// for. Every model call goes through the background context.
 
 namespace AT.content {
   /** at/batch's reply. `translations` is what the success path reads; the
@@ -127,18 +127,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     if (!state.pipeline) {
       state.pipeline = AT.pipeline.create({
         doc: document,
-        settings: () => {
-          const current = state.settings ?? settings;
-          // The on-device engine is bounded by tokens, not characters: its
-          // batches should be as large as the model allows, and the engine
-          // packs them by counting tokens. The character budget is what a cloud
-          // provider bills, so it stays for them.
-          const local = current.engine === 'local';
-          return {
-            maxNodes: current.maxNodes,
-            batchChars: local ? Math.max(current.batchChars, C.LOCAL_BATCH_CHARS) : current.batchChars
-          };
-        },
+        // The model is bounded by tokens, so the DOM layer may hand over a wide
+        // run; `AT.engines` packs it by counting tokens against the model.
+        settings: () => ({ maxNodes: (state.settings ?? settings).maxNodes, batchChars: C.DEFAULT_BATCH_CHARS }),
         // Read settings from state so a later target-language change applies
         // without re-injecting the script.
         translate: (batch) => requestBatch(batch, state.settings ?? settings),

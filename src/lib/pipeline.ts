@@ -8,7 +8,7 @@
 // `targets` for a plan (visible regions first, one group per region), and hand
 // each group to the batch callback with the page context and the group's role.
 // The callback is the only thing this module knows about the outside world, so
-// the whole flow is testable without a browser or a provider.
+// the whole flow is testable without a browser or a model.
 // Load after lib/constants.js, lib/pagecontext.js, lib/targets.js and lib/dom.js.
 namespace AT.pipeline {
   /** The settings the engine needs; the rest belong to the UI. */
@@ -236,8 +236,7 @@ namespace AT.pipeline {
             if (budgeted) swept.add(node);
           }
         } catch (caught: unknown) {
-          // A provider that rate-limits or refuses one batch must not take the
-          // rest of the page with it. Those nodes stay eligible; the caller is
+          // A generation that fails must not take the rest of the page with it. Those nodes stay eligible; the caller is
           // told what happened.
           failed += 1;
           if (!firstError) firstError = caught;
@@ -246,8 +245,8 @@ namespace AT.pipeline {
         }
       }
       role = null;
-      // Nothing got through: fail the pass so the caller shows the provider's
-      // own error instead of a silent no-op. A partial pass returns normally.
+      // Nothing got through: fail the pass so the caller shows the host's own
+      // error instead of a silent no-op. A partial pass returns normally.
       if (attempted > 0 && failed === attempted) throw firstError;
       return { requested, translated: dom.stats().translated, runs, batches: batches - before, failed, error };
     }

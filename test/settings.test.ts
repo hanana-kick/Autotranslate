@@ -12,27 +12,15 @@ test('defaults are a complete, normalised object', () => {
   assert.equal(base.autoDetect, true);
   assert.equal(base.targetLang, 'en');
   assert.equal(base.sourceLang, 'auto');
-  assert.equal(base.engine, 'local', 'a fresh install translates on-device, not through a provider');
-  assert.equal(base.apiKey, '');
   assert.equal(base.localModelId, '', 'nothing is downloaded out of the box');
   assert.equal(base.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS, 'the budget starts at the shared default');
-  assert.equal(base.fallbackEngine, '', 'offline stays offline: no provider without an explicit opt-in');
-  assert.equal(base.batchChars, AT.C.DEFAULT_BATCH_CHARS);
   assert.equal(base.maxNodes, AT.C.DEFAULT_MAX_NODES);
   assert.deepEqual(base.siteRules, []);
-  assert.deepEqual(Object.keys(base.endpoints).sort(), ['google', 'libretranslate', 'local']);
-  assert.equal(base.endpoints.local, '', 'the on-device engine has no endpoint to store');
-  assert.equal(base.endpoints.google, 'https://translate.googleapis.com/translate_a/single');
   // The whole stored blob: an extra field here would be persisted forever.
   assert.deepEqual(Object.keys(base).sort(), [
-    'apiKey',
     'autoDetect',
-    'batchChars',
     'debug',
     'enabled',
-    'endpoints',
-    'engine',
-    'fallbackEngine',
     'localMaxTokens',
     'localModelId',
     'maxNodes',
@@ -50,67 +38,41 @@ test('junk values fall back instead of throwing', () => {
     autoDetect: false,
     targetLang: 'klingon',
     sourceLang: 'ko',
-    engine: 'nope',
-    apiKey: '  secret  ',
-    batchChars: '99999',
     maxNodes: -5,
     showBadge: false,
     debug: 'yes',
     unknownKey: 'dropped',
-    endpoints: { google: 'not a url', libretranslate: 'https://lt.example/translate' },
+    // A blob from a version that still had providers: every one of these keys
+    // must be dropped rather than resurrected.
+    engine: 'google',
+    endpoints: { google: 'https://translate.googleapis.com/translate_a/single' },
+    apiKey: '  secret  ',
+    batchChars: '99999',
+    fallbackEngine: 'google',
     localModelId: 42,
-    localMaxTokens: 'nonsense',
-    fallbackEngine: 'local'
+    localMaxTokens: 'nonsense'
   });
   assert.equal(coerced.enabled, false);
   assert.equal(coerced.autoDetect, false);
   assert.equal(coerced.targetLang, 'en');
   assert.equal(coerced.sourceLang, 'ko');
-  assert.equal(coerced.engine, 'local', 'an unknown id falls back to the default engine');
-  assert.equal(coerced.apiKey, 'secret');
-  assert.equal(coerced.batchChars, 8000);
   assert.equal(coerced.maxNodes, 10);
   assert.equal(coerced.showBadge, false);
   assert.equal(coerced.debug, false);
-  assert.equal('unknownKey' in coerced, false);
-  assert.equal(coerced.endpoints.google, 'https://translate.googleapis.com/translate_a/single');
-  assert.equal(coerced.endpoints.libretranslate, 'https://lt.example/translate');
   assert.equal(coerced.localModelId, '', 'a model id must be a string to be stored');
   assert.equal(coerced.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS, 'an unparseable budget falls back');
-  assert.equal(coerced.fallbackEngine, '', 'the on-device engine is never a fallback');
+  for (const gone of ['engine', 'endpoints', 'apiKey', 'batchChars', 'fallbackEngine', 'unknownKey']) {
+    assert.equal(gone in coerced, false, `${gone} is not a setting any more`);
+  }
 });
 
-test('endpoints must be https, except localhost', () => {
-  assert.equal(settings.isValidEndpoint('https://lt.example/translate'), 'https://lt.example/translate');
-  assert.equal(settings.isValidEndpoint('http://127.0.0.1:5000/translate'), 'http://127.0.0.1:5000/translate');
-  assert.equal(settings.isValidEndpoint('http://localhost:5000/translate'), 'http://localhost:5000/translate');
-  assert.equal(settings.isValidEndpoint('http://lt.example/translate'), null);
-  assert.equal(settings.isValidEndpoint('javascript:alert(1)'), null);
-  assert.equal(settings.isValidEndpoint('not a url'), null);
-  assert.equal(settings.isValidEndpoint(undefined), null);
-
-  const saved = settings.normalize({
-    endpoints: { libretranslate: 'http://lt.example/translate', google: 'https://custom.example/translate' }
-  });
-  assert.equal(saved.endpoints.google, 'https://custom.example/translate');
-  assert.equal(
-    saved.endpoints.libretranslate,
-    AT.C.getEngineMeta('libretranslate').endpoint,
-    'an rejected endpoint falls back to the catalogue default'
-  );
-});
-
-test('the on-device fields are clamped and a local fallback is refused', () => {
+test('the on-device fields are clamped', () => {
   const picked = settings.normalize({
-    engine: 'local',
     localModelId: '  translategemma-4b-it-int8-web  ',
-    localMaxTokens: '4096',
-    fallbackEngine: 'libretranslate'
+    localMaxTokens: '4096'
   });
-  assert.equal(picked.engine, 'local', 'the on-device engine is a selectable engine');
   assert.equal(picked.localModelId, 'translategemma-4b-it-int8-web', 'the id is trimmed before it is stored');
   assert.equal(picked.localMaxTokens, 4096, 'a string budget from the form still counts');
-  assert.equal(picked.fallbackEngine, 'libretranslate', 'an explicit remote fallback is kept');
 
   // The budget sizes one generation, so it stays inside the range the host can
   // serve; anything unparseable lands on the default rather than on 0.
@@ -119,14 +81,6 @@ test('the on-device fields are clamped and a local fallback is refused', () => {
   assert.equal(settings.normalize({ localMaxTokens: 99999 }).localMaxTokens, AT.local.MAX_MAX_TOKENS);
   assert.equal(settings.normalize({ localMaxTokens: null }).localMaxTokens, AT.local.DEFAULT_MAX_TOKENS);
   assert.equal(settings.normalize({ localModelId: 'x'.repeat(200) }).localModelId, 'x'.repeat(96));
-
-  // 'local' as a fallback would re-enter the engine that just failed, and an
-  // unknown id would bury the failure the user has to see.
-  for (const junk of ['local', 'LOCAL', 'nope', ' google', 42, null, undefined, {}]) {
-    assert.equal(settings.normalize({ fallbackEngine: junk }).fallbackEngine, '', `${String(junk)} is not a fallback`);
-  }
-  assert.equal(settings.normalize({ fallbackEngine: '' }).fallbackEngine, '', 'the opt-out is preserved');
-  assert.equal(settings.normalize({ fallbackEngine: 'google' }).fallbackEngine, 'google');
 });
 
 test('site rules are canonicalised and deduplicated', () => {
@@ -145,25 +99,17 @@ test('site rules are canonicalised and deduplicated', () => {
   ]);
 });
 
-test('the content snapshot hides provider credentials and clamps the batch', () => {
-  const google = settings.normalize({ engine: 'google', batchChars: 8000, apiKey: 'secret' });
-  const snapshot = settings.contentSnapshot(google);
-  assert.equal('endpoints' in snapshot, false);
-  assert.equal('apiKey' in snapshot, false);
-  assert.equal(snapshot.batchChars, AT.C.getEngineMeta('google').maxChars);
-
-  const libre = settings.normalize({ engine: 'libretranslate', batchChars: 8000 });
-  assert.equal(settings.contentSnapshot(libre).batchChars, AT.C.getEngineMeta('libretranslate').maxChars);
-  assert.deepEqual(Object.keys(settings.contentSnapshot(google)).sort(), [
+test('the content snapshot carries only what a page needs', () => {
+  const snapshot = settings.contentSnapshot(settings.normalize({ maxNodes: 400 }));
+  assert.deepEqual(Object.keys(snapshot).sort(), [
     'autoDetect',
-    'batchChars',
     'enabled',
-    'engine',
     'maxNodes',
     'showBadge',
     'sourceLang',
     'targetLang'
   ]);
+  assert.equal(snapshot.maxNodes, 400);
 });
 
 test('the UI language picks a supported target', () => {
@@ -194,9 +140,8 @@ test('storage round-trips through normalisation', async () => {
 
   assert.deepEqual(await settings.load(), settings.normalize(undefined));
 
-  const saved = await settings.save({ targetLang: 'ko', engine: 'libretranslate' });
+  const saved = await settings.save({ targetLang: 'ko' });
   assert.equal(saved.targetLang, 'ko');
-  assert.equal(saved.engine, 'libretranslate');
   assert.equal(store.settings.targetLang, 'ko');
   const reloaded = await settings.load();
   assert.equal(reloaded.targetLang, 'ko');
@@ -209,21 +154,20 @@ test('storage round-trips through normalisation', async () => {
   assert.equal(repaired.maxNodes, 700);
 
   // The on-device choices are stored like any other setting.
-  const local = await settings.save({
-    engine: 'local',
-    localModelId: 'model-a',
-    localMaxTokens: 2048,
-    fallbackEngine: 'google'
-  });
-  assert.equal(local.engine, 'local', 'the on-device engine survives a save');
+  const local = await settings.save({ localModelId: 'model-a', localMaxTokens: 2048 });
+  assert.equal(local.localModelId, 'model-a');
   assert.equal(store.settings.localModelId, 'model-a', 'the selected model is persisted');
   assert.equal(store.settings.localMaxTokens, 2048, 'the token budget is persisted');
-  assert.equal(store.settings.fallbackEngine, 'google', 'the opted-in fallback is persisted');
   assert.equal((await settings.load()).localModelId, 'model-a');
 
+  // A patch with one unusable value keeps what the user already had; the rest of
+  // the patch still lands. (The stored target is 'en' here: the garbage above was
+  // repaired on read.)
+  const patched = await settings.save({ targetLang: 'klingon', maxNodes: 900 });
+  assert.equal(patched.targetLang, 'en', 'an unusable patch value does not reset the choice');
+  assert.equal(patched.maxNodes, 900);
+
   const reset = await settings.reset();
-  assert.equal(reset.engine, 'local', 'a reset goes back to the on-device engine');
-  assert.equal(store.settings.engine, 'local');
+  assert.equal(store.settings.targetLang, 'en');
   assert.equal(reset.localModelId, '', 'a reset stops pointing at a model the user may have deleted');
-  assert.equal(reset.fallbackEngine, '', 'a reset does not keep a provider as the offline fallback');
 });

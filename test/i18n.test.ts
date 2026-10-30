@@ -215,8 +215,6 @@ test('both shipped catalogues carry the on-device wording', () => {
     'options_localModel',
     'options_localNone',
     'options_localMaxTokens',
-    'options_fallbackEngine',
-    'options_fallbackNone',
     'options_modelUrl',
     'options_modelToken',
     'options_modelTokenHint',

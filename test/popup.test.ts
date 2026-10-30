@@ -364,9 +364,9 @@ test('a refused get-state leaves the fields untouched and names the error', asyn
 
 // --- on-device engine ------------------------------------------------------
 
-test('the on-device line names the resident model when the engine is local', async () => {
+test('the on-device line names the resident model when one is selected', async () => {
   const h = environment({
-    stored: { enabled: true, engine: 'local', targetLang: 'ko', localModelId: 'gemma-task' },
+    stored: { enabled: true, targetLang: 'ko', localModelId: 'gemma-task' },
     state: stateOf({
       local: { supported: true, status: { state: 'ready', modelName: 'TranslateGemma 4B', loadedBytes: 4096, loadMs: 1200 } }
     })
@@ -383,9 +383,9 @@ test('the on-device line names the resident model when the engine is local', asy
   assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
 });
 
-test('the default engine without a model points at Options instead of claiming readiness', async () => {
+test('with no model selected the line points at Options instead of claiming readiness', async () => {
   const h = environment({
-    stored: { enabled: true, engine: 'local', targetLang: 'ko' },
+    stored: { enabled: true, targetLang: 'ko' },
     state: stateOf({ local: { supported: true, status: { state: 'unloaded' } } })
   });
   await h.boot();
@@ -397,7 +397,7 @@ test('the default engine without a model points at Options instead of claiming r
 
 test('a browser that cannot run the model still shows the line, as a warning', async () => {
   const h = environment({
-    stored: { enabled: true, engine: 'local' },
+    stored: { enabled: true },
     state: stateOf({ local: { supported: false, status: { state: 'error', lastError: 'no webgpu' } } })
   });
   await h.boot();
@@ -405,19 +405,9 @@ test('a browser that cannot run the model still shows the line, as a warning', a
   assert.deepEqual(h.localStatus(), { text: 'options_localUnsupported', kind: 'warn', hidden: false });
 });
 
-test('a remote engine keeps the on-device line hidden and blank', async () => {
-  const h = environment({
-    stored: { enabled: true, engine: 'google' },
-    state: stateOf({ local: { supported: true, status: { state: 'ready', modelName: 'TranslateGemma 4B' } } })
-  });
-  await h.boot();
-
-  assert.deepEqual(h.localStatus(), { text: '', kind: undefined, hidden: true });
-});
-
 test('an unchecked language pair says so instead of looking fine', async () => {
   const h = environment({
-    stored: { enabled: true, engine: 'local', sourceLang: 'de', targetLang: 'ko', localModelId: 'gemma-task' },
+    stored: { enabled: true, sourceLang: 'de', targetLang: 'ko', localModelId: 'gemma-task' },
     state: stateOf({
       local: { supported: true, status: { state: 'ready', modelName: 'TranslateGemma 4B', loadedBytes: 4096, loadMs: 1200 } }
     })
@@ -435,7 +425,7 @@ test('an unchecked language pair says so instead of looking fine', async () => {
 
 test('an unsupported browser gets one problem, not two', async () => {
   const h = environment({
-    stored: { enabled: true, engine: 'local', sourceLang: 'de', targetLang: 'pl' },
+    stored: { enabled: true, sourceLang: 'de', targetLang: 'pl' },
     state: stateOf({ local: { supported: false, status: { state: 'error', lastError: 'no webgpu' } } })
   });
   await h.boot();

@@ -6,10 +6,9 @@ browser-specific bundles — each shipped as a ready-to-upload zip.
 
 Pages are translated in place: text nodes are replaced, originals are kept so the page can
 be restored, and a `MutationObserver` keeps up with dynamically inserted content. Translation
-requests are issued by the background context, so provider endpoints and API keys never reach
-content scripts. Besides the two cloud providers there is a third engine that never opens a
-socket: a quantised TranslateGemma model running in this browser, in both browsers (see
-[On-device translation](#on-device-translation)).
+is **on-device only**: a quantised TranslateGemma model, run by the background context, so no
+page text ever leaves the browser and there is no endpoint, no API key and no account to set
+up (see [On-device translation](#on-device-translation)).
 
 ## Requirements
 
@@ -76,12 +75,12 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
   background.ts          menus, badge, tab state, message router, auto-translate
   content.ts             injected on demand: translate / restore / selection card
   popup.{html,ts}        per-tab controls
-  options.{html,ts}      provider, language, limits, site rules, model store
+  options.{html,ts}      language, limits, site rules, model store
   styles.css             shared by popup and options
   offscreen.html         the Chrome placement of the on-device host, opened by URL
   offscreen.ts           message plumbing for that document; the host itself is a lib
   lib/
-    constants.ts         AT namespace, message names, languages, provider catalogue
+    constants.ts         AT namespace, message names, languages
     browser.ts           the only file that names the host global; AT.api, capabilities, i18n, onMessage
     local.ts             prompts, token budgets, model records, host status, storage keys
     modelstore.ts        model bytes in OPFS + metadata in IndexedDB (seams for tests)
@@ -92,14 +91,14 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
     localhost.ts         the host: one LlmInference, a serial queue, idle unload, placement-agnostic
     rules.ts             site pattern matching and precedence
     settings.ts          defaults, validation, persistence, content snapshot
-    engines.ts           Google, LibreTranslate and the on-device engine: batching, retries, error codes
+    engines.ts           the model call: token packing, language codes, error codes
     dom.ts               text-node walker, run merging, replacement cache, restore
   _locales/{en,ko}/messages.json
   icons/                 generated PNGs (16/32/48/128)
 demo/                    offline sample page that drives the same AT.dom engine
   index.html             sample document + request inspector
   demo.ts                translates, restores, and verifies the sample
-  glossary.ts            offline phrase dictionary (a stub, not a provider)
+  glossary.ts            offline phrase dictionary (a stub, not a model)
 scripts/
   build.ts               compile + per-target manifest + vendor copy + validation + zip
   zip.ts                 dependency-free ZIP writer/reader
@@ -109,7 +108,7 @@ scripts/
   serve-demo.ts          static server for the sample page
 test/                    node:test suites in TypeScript, one file per feature:
   rules, settings, constants     site rules, settings normalisation, the shared catalogue
-  engines                        providers: batching, retries, timeouts, error codes
+  engines                        the model call: token packing, language codes, error codes
   dom, content                   walker, run merging, markers, restore, selection card, observer
   background, popup, options     message router and tab state, the two UI pages
   i18n, messages                 catalogue substitutions, data-i18n apply, send/receive envelope
@@ -133,13 +132,13 @@ compile against. Load order is fixed:
 sequenceDiagram
   participant BG as background (SW / event page)
   participant CS as content.ts
-  participant PV as provider
+  participant PV as on-device model
   BG->>BG: tabs.onUpdated(complete) + site rules -> decision
   BG->>CS: scripting.executeScript(CONTENT_FILES)
   BG->>CS: at/content-translate {decision, settings snapshot}
   CS->>CS: walk text nodes, group them into runs, skip ignored/edited/translated
   CS->>BG: at/batch {texts}
-  BG->>PV: translate (batched, deduped, retried)
+  BG->>PV: one prompt per token-sized chunk
   PV-->>BG: translations
   BG-->>CS: translations
   CS->>BG: at/state-changed {translated} -> badge
@@ -163,17 +162,17 @@ it" both possible.
 Around that, three rules decide what leaves the page and where the answer lands:
 
 - **Whitespace envelope.** Leading/trailing whitespace is split off before the request and
-  re-attached afterwards, so a provider that trims its answer cannot swallow the only space
+  re-attached afterwards, so a model that trims its answer cannot swallow the only space
   between two inline elements, and authored indentation survives.
 - **Inline runs are merged.** Consecutive text nodes that a reader sees as one sentence —
   split by `<strong>`, `<a>`, `<em>` — are sent as **one** string with private-use markers
-  (`\uE000{n}\uE001`) at the boundaries, so the provider can re-order the sentence the way
+  (`\uE000{n}\uE001`) at the boundaries, so the model can re-order the sentence the way
   the target language needs. A run never crosses a block element or a `<br>`, and an
   ignored inline element (`<code>`, `pre`, …) drops out of the sentence without breaking it.
   Set `mergeInline: false` to send every text node separately.
 - **Markers are verified, never guessed.** A merged answer is accepted only when every
   marker returns, in order, with content on both sides. Otherwise that run alone is retried
-  **one text node per request** — a provider that eats placeholders costs requests, it does
+  **one text node per request** — a model that eats placeholders costs generations, it does
   not misfile text into the wrong element.
 
 Ignored content is decided by `C.IGNORE_SELECTOR` plus `isIgnoredElement` (contenteditable
@@ -236,8 +235,8 @@ Only a recognised kind earns the first sentence, and only named entities earn th
 an unidentified page with nothing named adds no line at all, because a bare host is true of
 every page and would cost prompt tokens. The glossary is *not* in that line: it is collected
 for consistency work (the same term translated the same way), not for describing the page.
-The cloud providers have no prompt and ignore all of it. Nothing is fetched to build any of
-this — the module only reads markup the page already downloaded.
+Nothing is fetched to build any of this — the module only reads markup the page already
+downloaded.
 
 ### The page translation engine
 
@@ -283,12 +282,11 @@ shape of a pass on real sites:
 | --- | --- |
 | A single-page app reports `complete` with an empty body and `lang="ko-KR"`; judging then says "already Korean" and nothing ever translates | an empty page is not judged: the pass answers `waiting-for-content` and re-checks at 0.4 s, 1.2 s, 3 s and 6 s, translating as soon as there is something to read |
 | A page that mutates faster than the debounce (video progress, ads, live counters) pushed the pending tick back forever | a mutation inside the window keeps the scheduled tick and marks another one due, so the pass runs |
-| A localised shell around foreign content made one request look Korean, so the provider echoed the English title untouched | a chunk is asked per writing system (Hangul, CJK, Cyrillic, Arabic, Hebrew, Thai, everything else), and the answers are put back in order |
-| A page that rewrote a translated node's text in place put the source back, and the node was then skipped because its answer was already cached | the cache answers the write as well as the request: the node is translated again without asking the provider |
+| A page that rewrote a translated node's text in place put the source back, and the node was then skipped because its answer was already cached | the cache answers the write as well as the request: the node is translated again without asking the model |
 | Every mutation meant reading the whole body again — thousands of nodes, several times a second, on a feed | the observer reads its own records: an inserted subtree or an edited text node is the region the tick visits. Removals, ignored regions (`contenteditable`, `translate="no"`) and the script's own write-back are dropped before they can schedule anything, and a tick that is already running only leaves a note for the next one instead of starting a second pass |
 
 A batch that fails no longer takes the rest of the page with it: the nodes stay eligible, the
-remaining groups still translate, and the pass reports `failed` and the provider's own message.
+remaining groups still translate, and the pass reports `failed` and the host's own message.
 Only a pass where *every* group failed is an error, which is what the popup shows.
 
 Grouping is also what lets a batch carry register: a batch of navigation labels, comments or
@@ -340,42 +338,31 @@ independently.
 | On-device host | offscreen document (`chrome.offscreen`) | the background page itself | one host module, one caller (`AT.local.callHost`); the placement is chosen at runtime |
 | Unsigned packages | fine | temporary load only | documented above; sign with `web-ext` when publishing |
 
-## Providers
+## The engine
 
-| Provider | Endpoint default | Notes |
-| --- | --- | --- |
-| `google` | `https://translate.googleapis.com/translate_a/single` | keyless **unofficial** endpoint: rate limits and payload shape can change without notice. Texts are joined with newlines per request and split back; if the split cannot be reproduced, that chunk is re-run one text per request instead of guessing. |
-| `libretranslate` | `http://127.0.0.1:5000/translate` | stock LibreTranslate on your machine; any instance that answers `POST /translate` with `{q: [...]} -> [{translatedText}]` works. Optional `api_key`. |
-| `local` *(default)* | none — runs in this browser | quantised TranslateGemma 4B through `@mediapipe/tasks-genai`. No endpoint to validate, no key, no request. Chunked by **tokens** instead of characters and never retried: a repeat would spend another minute on the same model. Runs in either browser, see below. |
+One engine: quantised **TranslateGemma 4B** through `@mediapipe/tasks-genai`, running in this
+browser. There is no endpoint to validate, no key to keep and no request to send — the engine
+layer (`AT.engines.translate`) turns a batch of texts into a prompt, asks the host, and writes
+the answer back. Identical strings are sent once, whitespace- and number-free nodes are never
+sent, an empty answer keeps the original text, and a failed generation surfaces in the popup
+with a code (`config`, `provider`, `format`, `network`, `timeout`) instead of leaving a
+half-translated page silently.
 
-Rules that apply to the two cloud providers: endpoints must be `https` (plain `http` only for
-`127.0.0.1`/`localhost`), requests are chunked under the provider's character budget,
-identical strings are sent once, whitespace/number-free nodes are never sent, empty or
-missing translations keep the original text, and `429`/`5xx`/network failures are retried
-once. Failures surface in the popup with a code (`http`, `rate-limit`, `timeout`,
-`network`, `format`, `config`) instead of silently leaving a half-translated page.
+Chunks are packed by **tokens**, not characters: `AT.local.chunkByCounts` asks the host for a
+per-text token count against the model's own tokenizer, and a text too long to ever fit
+travels alone instead of being dropped. One chunk is one generation and is never retried — a
+repeat would spend another minute on the same model for the same answer.
 
-A provider implementation is `(texts: string[]) => Promise<string[]>` behind
-`AT.engines.translate`; the same shape is what `demo/glossary.ts` implements, which is why
-the sample can exercise the real DOM engine offline.
-
-Provider traffic is deliberately *not* exercised against live endpoints in CI: the
-suites stub `fetch` with recorded response shapes (including HTML rate-limit pages,
-`{error: ...}` bodies and short replies). Run the "Test provider" button in
-`Options → Provider` to check a real endpoint.
+The model file is not shipped: it is the user's download (see below). `demo/glossary.ts`
+implements the same `(texts: string[]) => Promise<string[]>` shape, which is why the sample
+page can exercise the real DOM engine without a model.
 
 ## On-device translation
 
-**The default.** A fresh install translates with the on-device engine: nothing is fetched
-while translating, and no page text leaves the browser. The model itself is a one-time
-download in Options (3.6 GiB, see below); until it is there the popup says so instead of
-quietly switching to a provider. Google and LibreTranslate stay in the list as an explicit
-choice, and `fallbackEngine` starts empty, so picking the offline engine can never fall back
-to the cloud on its own.
-
-The engine translates a page without opening a socket. It is a normal engine entry (`C.ENGINES`, `kind: 'local'`), so batching, dedup,
-per-tab state, the badge and the popup behave exactly as they do for a cloud provider; only
-the answer's origin changes.
+**The only engine.** A page is translated without opening a socket: the model runs in this
+browser, and no page text leaves it. The model file itself is a one-time download in Options
+(3.6 GiB, see below); until it is there the popup says so and nothing is translated, because
+there is nowhere else to send the text.
 
 | Piece | Where it lives |
 | --- | --- |
@@ -420,11 +407,11 @@ so the first real sentence is not 8× slower, and it is released after ten minut
 resident 4B model costs gigabytes. `at/local-status` (or the reporter the background
 installs) is what the popup line and the Options status read.
 
-**Budgets.** Cloud providers are sized in characters; a model is sized by the tokens one
-generation may spend, so texts are packed to `localMaxTokens` (128–8192, default 1024)
-counting input *and* expected output, and a text too long to ever fit travels alone rather
-than being dropped. Several texts go out as one numbered prompt; if the reply cannot be
-split back reliably, that chunk is re-run one text per generation.
+**Budgets.** The model is sized by the tokens one generation may spend, so texts are packed to
+`localMaxTokens` (128–8192, default 1024) counting input *and* expected output, and a text too
+long to ever fit travels alone rather than being dropped. Several texts go out as one numbered
+prompt; if the reply cannot be split back reliably, that chunk is re-run one text per
+generation.
 
 **Keeping the file.** Options asks the browser to pin the storage before a transfer starts
 (`AT.modelstore.requestPersistence`). When that is refused the usage line says so instead of
@@ -442,9 +429,9 @@ engine refuses the target (`config`) and simply omits an unknown source.
 `zh-Hans`) and `zh-TW`; every other pair still translates, but the popup labels it *not
 checked* rather than pretending it is equally good (`AT.local.isVerifiedPair`).
 
-**Staying offline is the default.** `fallbackEngine` is empty: picking the offline engine
-must not quietly upload page text to a provider. Set it explicitly in Options to allow a
-cloud retry when the model fails, and the result reports which engine answered.
+**Offline by construction.** There is no fallback to configure: `AT.engines` has one
+implementation, and a failed generation is reported as a failure. Nothing in the extension
+opens a network connection for translation.
 
 Measured on one Apple-silicon machine, Chromium, TranslateGemma 4B IT int8
 (3,896,377,344 bytes), cold profile unless noted, with the prompt and language
@@ -468,8 +455,8 @@ them. Before packing, the engine asks the host (`at/local-count`) for the token 
 text and for the measured cost of the instruction; the host answers with
 `LlmInference.sizeInTokens`. The chunker then packs by those numbers
 (`chunkByCounts`), and the host re-measures the finished prompt before generating, halving
-the batch if it still does not fit. Characters survive in two places only: the cloud
-providers, which bill characters, and the fallback estimate used when no host can answer.
+the batch if it still does not fit. Characters survive in two places only: the ceiling the DOM
+layer uses to split a long page run, and the fallback estimate used when no host can answer.
 
 The context budget, measured with the model's own tokenizer (`LlmInference.sizeInTokens`,
 600-character samples of real prose, 1170-character chunks):
@@ -519,13 +506,13 @@ The sample is a styled page with a fake page's worst habits — a sentence split
 block, `kbd`, a table, an `address` with `<br>`, a `contenteditable` draft,
 `.notranslate` and `[translate="no"]` markers. It loads `constants.js` and `dom.js` from the
 compiled output and drives `AT.dom.createTranslator` exactly the way `content.ts` does, with
-`demo/glossary.ts` — a phrase dictionary, **not** a translator — answering in place of a
-provider.
+`demo/glossary.ts` — a phrase dictionary, **not** a translator — answering in place of the
+model.
 
 - **인라인 문장 병합** decides whether a sentence that `<strong>`/`<em>`/`<a>` split travels
-  as one marked string (the provider may re-order it) or as one string per fragment. The
-  *provider 요청* panel shows exactly what leaves the page, with run markers drawn as `⟦n⟧`.
-- **provider 시뮬레이션 → 마커 유실** strips the markers from the answer, so every merged run
+  as one marked string (the model may re-order it) or as one string per fragment. The
+  *모델 요청* panel shows exactly what the model is asked for, with run markers drawn as `⟦n⟧`.
+- **모델 시뮬레이션 → 마커 유실** strips the markers from the answer, so every merged run
   is refused and its pieces are requested one at a time — which is the expensive path, not
   the wrong-text path.
 - **스타일·원문 검증** compares the sample subtree against the pre-translation capture:
@@ -533,9 +520,9 @@ provider.
   untranslated regions, and — after 원문으로 — the original values byte for byte.
 
 What those three settings measure on this page (83 text nodes, 45 elements, Chromium, the
-offline dictionary answering instead of a provider):
+offline dictionary answering instead of the model):
 
-| 설정 | provider 호출 | 요청된 문자열 | 병합 런 | 변경된 텍스트 노드 |
+| 설정 | 모델 호출 | 요청된 문자열 | 병합 런 | 변경된 텍스트 노드 |
 | --- | --- | --- | --- | --- |
 | 병합 켜짐 · 마커 보존 | 1 | 22 (marked runs included) | 4 | 31 |
 | 병합 켜짐 · 마커 유실 | 2 | 22, then 15 retried pieces | 0 | 31 |
@@ -566,8 +553,8 @@ path prefix length. A tie resolves to `never`, so `example.com → always` plus
   `contenteditable` regions are never rewritten.
 - Attributes (`placeholder`, `alt`, `title`, `aria-*`) are not translated: they are the
   page's own text, and replacing them is a different risk profile than replacing a text node.
-- Per page: at most `maxNodes` text nodes (default 600) and `batchChars` characters per
-  request (default 1200, capped by the provider).
+- Per page: at most `maxNodes` text nodes (default 600); one generation is bounded by
+  `localMaxTokens` instead of a character budget.
 - Merged runs are only merged when the whole run is being translated in that pass; a
   partial (observer-driven) pass sends its nodes separately, which costs word order but
   keeps a half-observed sentence from being glued together.

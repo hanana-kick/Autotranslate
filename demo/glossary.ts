@@ -1,5 +1,5 @@
-// Offline stand-in provider for the sample page. This is NOT a translation
-// engine: it is a phrase/word dictionary so the DOM engine can be exercised
+// Offline stand-in for the sample page. This is NOT a translation model: it is
+// a phrase/word dictionary so the DOM engine can be exercised
 // without a network. The real build sends the same `texts` array to
 // AT.engines instead.
 namespace AT.demo {

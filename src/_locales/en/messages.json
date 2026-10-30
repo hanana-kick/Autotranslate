@@ -38,10 +38,6 @@
   "options_autoDetect": { "message": "Translate foreign pages automatically" },
   "options_showBadge": { "message": "Show badge on translated pages" },
   "options_debug": { "message": "Verbose logging" },
-  "options_provider": { "message": "Provider" },
-  "options_engine": { "message": "Provider" },
-  "options_endpoint": { "message": "Endpoint URL" },
-  "options_apiKey": { "message": "API key" },
   "options_test": { "message": "Test provider" },
   "options_testing": { "message": "Testing…" },
   "options_testOk": {
@@ -56,7 +52,6 @@
   "options_sourceLang": { "message": "Source language" },
   "options_sourceAuto": { "message": "Detect automatically" },
   "options_limits": { "message": "Limits" },
-  "options_batchChars": { "message": "Characters per request" },
   "options_maxNodes": { "message": "Maximum text nodes per page" },
   "options_rules": { "message": "Site rules" },
   "options_rulePlaceholder": { "message": "example.com or example.com/news/*" },
@@ -84,12 +79,6 @@
   },
   "options_localMaxTokens": {
     "message": "Token budget per generation"
-  },
-  "options_fallbackEngine": {
-    "message": "Fallback provider"
-  },
-  "options_fallbackNone": {
-    "message": "None — report the failure instead"
   },
   "options_modelUrl": {
     "message": "Model URL"

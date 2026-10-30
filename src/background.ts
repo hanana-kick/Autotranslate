@@ -41,9 +41,6 @@ namespace AT.background {
 
   /** at/test-engine; every override is optional so stored settings win. */
   export type EngineTestRequest = {
-    engine?: string;
-    endpoint?: string;
-    apiKey?: string;
     target?: string;
   };
 
@@ -293,64 +290,34 @@ if (typeof self.importScripts === 'function') {
     return { settings: AT.settings.contentSnapshot(next), pattern: canonical };
   }
 
-  /** The on-device engine needs two more settings than a provider does. */
-  function localFields(settings: AT.settings.Settings): Pick<AT.engines.TranslateRequest, 'localModelId' | 'localMaxTokens'> {
-    return { localModelId: settings.localModelId, localMaxTokens: settings.localMaxTokens };
-  }
-
   async function translateBatch(message: AT.background.BatchRequest): Promise<AT.MessageResult> {
     const settings = await getSettings();
     const request: AT.engines.TranslateRequest = {
-      engine: settings.engine,
-      endpoints: settings.endpoints,
-      apiKey: settings.apiKey,
       texts: message.texts ?? [],
       source: message.sourceLang ?? settings.sourceLang,
       target: message.targetLang ?? settings.targetLang,
-      batchChars: settings.batchChars,
       // The content script sends what the page says about itself; the analyzer
       // is the only thing that decides what it means.
       context: AT.pagecontext.normalize(message.context),
       role: AT.targets.normalizeRole(message.role),
-      ...localFields(settings)
+      localModelId: settings.localModelId,
+      localMaxTokens: settings.localMaxTokens
     };
-    if (request.engine === 'local') {
-      // The host has to exist before the engine layer can ask it anything.
-      await ensureHost();
-      localKey = request.localModelId || null;
-    }
-    try {
-      const result = await AT.engines.translate(request);
-      return { translations: result.translations, detected: result.detected, engine: result.engine };
-    } catch (error: unknown) {
-      const failure = error as { code?: string; message?: string };
-      // Opt-in only: a user who chose the offline engine must not have text
-      // sent to a provider unless they picked one as the fallback.
-      if (request.engine !== 'local' || !settings.fallbackEngine) throw error;
-      AT.warn('on-device translation failed, using', settings.fallbackEngine, failure?.message);
-      const result = await AT.engines.translate({ ...request, engine: settings.fallbackEngine, localModelId: '' });
-      return {
-        translations: result.translations,
-        detected: result.detected,
-        engine: result.engine,
-        fallback: { from: 'local', code: failure?.code ?? null, error: failure?.message ?? null }
-      };
-    }
+    // The host has to exist before the engine layer can ask it anything.
+    await ensureHost();
+    localKey = request.localModelId || null;
+    const result = await AT.engines.translate(request);
+    return { translations: result.translations, detected: result.detected };
   }
 
-  async function testEngine(message: AT.background.EngineTestRequest): Promise<AT.MessageResult> {
+  async function testModel(message: AT.background.EngineTestRequest): Promise<AT.MessageResult> {
     const settings = await getSettings({ force: true });
-    const engine = message.engine ?? settings.engine;
-    const endpoints: { [engineId: string]: string } = { ...settings.endpoints };
-    if (message.endpoint) endpoints[engine] = message.endpoint;
-    if (engine === 'local') await ensureHost();
+    await ensureHost();
     const result = await AT.engines.test({
-      engine,
-      endpoints,
-      apiKey: message.apiKey ?? settings.apiKey,
       source: settings.sourceLang,
       target: message.target ?? settings.targetLang,
-      ...localFields(settings)
+      localModelId: settings.localModelId,
+      localMaxTokens: settings.localMaxTokens
     });
     return { result };
   }
@@ -366,7 +333,7 @@ if (typeof self.importScripts === 'function') {
       canTranslate: isInjectable(tab?.url),
       rule: rule?.action ?? null,
       state: tab?.id != null ? tabStates.get(tab.id) ?? null : null,
-      local: await localState(settings.engine === 'local')
+      local: await localState(true)
     };
   }
 
@@ -597,7 +564,7 @@ if (typeof self.importScripts === 'function') {
     }),
     [C.MSG.SET_SITE_RULE]: (message) => setSiteRule(message as AT.background.SiteRuleRequest),
     [C.MSG.REMOVE_SITE_RULE]: (message) => setSiteRule({ ...(message as AT.background.SiteRuleRequest), action: null }),
-    [C.MSG.TEST_ENGINE]: (message) => testEngine(message as AT.background.EngineTestRequest),
+    [C.MSG.TEST_ENGINE]: (message) => testModel(message as AT.background.EngineTestRequest),
     [C.MSG.TRANSLATE_TAB]: (message) => translateTab((message as AT.background.TabRequest).tabId, { force: true }),
     [C.MSG.RESTORE_TAB]: (message) => restoreTab((message as AT.background.TabRequest).tabId),
     [C.MSG.LOCAL_STATUS]: (message) => reportLocal(message as { status?: unknown }),

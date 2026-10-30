@@ -179,19 +179,12 @@ const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['autoDetect', 'input'],
   ['showBadge', 'input'],
   ['debug', 'input'],
-  ['engine', 'select'],
-  ['endpoint', 'input'],
-  ['endpointField', 'div'],
-  ['apiKey', 'input'],
-  ['apiKeyField', 'div'],
-  ['engineDocs', 'p'],
   ['testEngine', 'button', 'options_test'],
   ['testStatus', 'p'],
   // The on-device card, in the order options.html lists them.
   ['localSupport', 'p'],
   ['localModel', 'select'],
   ['localMaxTokens', 'input'],
-  ['fallbackEngine', 'select'],
   ['localUsage', 'p'],
   ['modelList', 'ul'],
   ['modelUrl', 'input'],
@@ -205,7 +198,6 @@ const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['modelStatus', 'p'],
   ['targetLang', 'select'],
   ['sourceLang', 'select'],
-  ['batchChars', 'input'],
   ['maxNodes', 'input'],
   ['rulePattern', 'input'],
   ['ruleAction', 'select'],
@@ -536,17 +528,8 @@ function storedSettings(overrides: ATNamespace = {}): ATNamespace {
     autoDetect: true,
     targetLang: 'en',
     sourceLang: 'auto',
-    engine: 'google',
-    endpoints: {
-      google: 'https://g.example/translate_a/single',
-      libretranslate: 'https://lt.example/translate',
-      local: ''
-    },
-    apiKey: '',
     localModelId: '',
     localMaxTokens: 1024,
-    fallbackEngine: '',
-    batchChars: 1200,
     maxNodes: 600,
     showBadge: true,
     siteRules: [],
@@ -574,11 +557,9 @@ test('boot fills the selects, every field and the button labels from storage', a
       autoDetect: false,
       showBadge: false,
       debug: true,
-      engine: 'libretranslate',
-      apiKey: '  secret-key  ',
       targetLang: 'ko',
       sourceLang: 'ja',
-      batchChars: 2500,
+      localMaxTokens: 2048,
       maxNodes: 450,
       siteRules: [
         { pattern: 'news.example.com', action: 'never' },
@@ -592,18 +573,11 @@ test('boot fills the selects, every field and the button labels from storage', a
   assert.equal(field('autoDetect').checked, false);
   assert.equal(field('showBadge').checked, false);
   assert.equal(field('debug').checked, true);
-  assert.equal(field('engine').value, 'libretranslate');
-  assert.equal(field('endpoint').value, 'https://lt.example/translate', 'the endpoint of the selected engine');
-  assert.equal(field('apiKey').value, 'secret-key', 'the stored key is trimmed on the way in');
   assert.equal(field('targetLang').value, 'ko');
   assert.equal(field('sourceLang').value, 'ja');
-  assert.equal(field('batchChars').value, '2500');
+  assert.equal(field('localMaxTokens').value, '2048');
   assert.equal(field('maxNodes').value, '450');
 
-  assert.deepEqual(
-    field('engine').children.map((node) => [node.value, node.textContent]),
-    AT.C.ENGINES.map((engine: ATNamespace) => [engine.id, engine.label])
-  );
   assert.deepEqual(
     field('targetLang').children.map((node) => node.value),
     AT.C.LANGS.map((lang: ATNamespace) => lang.code)
@@ -623,13 +597,11 @@ test('boot fills the selects, every field and the button labels from storage', a
   assert.equal(field('pickModel').textContent, msg('options_pickFile'));
   assert.equal(field('prepareModel').textContent, msg('options_prepare'));
 
-  // The on-device card starts from the stored settings: nothing selected, the
-  // default budget, no fallback, and the endpoint field left alone.
+  // The on-device card starts from the stored settings: no model selected and
+  // the budget it was saved with.
   assert.equal(field('localModel').children.length, 1, 'no model is stored, so only the empty choice is offered');
   assert.equal(field('localModel').value, '');
-  assert.equal(field('localMaxTokens').value, '1024');
-  assert.equal(field('fallbackEngine').value, '');
-  assert.equal(field('endpointField').hidden, false, 'a provider has an endpoint to type');
+  assert.equal(field('localMaxTokens').value, '2048');
 
   const items = ruleItems(field('ruleList'));
   assert.equal(items.length, 2);
@@ -652,15 +624,13 @@ test('junk in storage renders a coerced form, never a half-filled one', async ()
   const env = await boot({
     stored: {
       enabled: 'yes',
-      engine: 'deepl',
       targetLang: 'klingon',
       sourceLang: 'de',
-      apiKey: '  padded  ',
-      batchChars: 'abc',
+      localModelId: 42,
+      localMaxTokens: 'abc',
       maxNodes: {},
       showBadge: 'true',
       debug: 'yes',
-      endpoints: { google: 'http://evil.example/translate', libretranslate: 'https://lt.example/translate' },
       siteRules: [
         { pattern: '!!!', action: 'never' },
         { pattern: 'ok.example.com', action: 'maybe' },
@@ -668,19 +638,13 @@ test('junk in storage renders a coerced form, never a half-filled one', async ()
       ]
     }
   });
-  const { AT, field } = env;
+  const { field } = env;
 
-  assert.equal(field('engine').value, 'local', 'an unknown engine falls back to the default engine');
-  assert.equal(field('targetLang').value, 'en');
+  assert.equal(field('targetLang').value, 'en', 'an unknown language falls back to the default target');
   assert.equal(field('sourceLang').value, 'de');
-  assert.equal(field('apiKey').value, 'padded');
-  assert.equal(field('batchChars').value, String(AT.C.DEFAULT_BATCH_CHARS), 'a non-numeric limit falls back');
-  assert.equal(field('maxNodes').value, String(AT.C.DEFAULT_MAX_NODES));
-  // The endpoint field follows the selected engine; `local` has none, so ask
-  // the select for Google to see the rejected value replaced by the default.
-  field('engine').value = 'google';
-  await fire(field('engine'), 'change');
-  assert.equal(field('endpoint').value, AT.C.getEngineMeta('google')!.endpoint, 'a rejected endpoint falls back');
+  assert.equal(field('localModel').value, '', 'a non-string model id is dropped');
+  assert.equal(field('localMaxTokens').value, '1024', 'a non-numeric budget falls back');
+  assert.equal(field('maxNodes').value, '600');
   assert.equal(field('enabled').checked, true);
   assert.equal(field('showBadge').checked, true);
   assert.equal(field('debug').checked, false, 'debug is strictly true');
@@ -693,22 +657,15 @@ test('junk in storage renders a coerced form, never a half-filled one', async ()
 
 test('an empty store boots the defaults and the empty rule row', async () => {
   const env = await boot();
-  const { AT, field } = env;
+  const { field } = env;
 
-  assert.equal(field('engine').value, 'local', 'a fresh install translates on-device');
-  assert.equal(field('endpoint').value, '', 'the local engine has no endpoint');
-  assert.equal(field('apiKey').value, '');
   assert.equal(field('targetLang').value, 'en', 'the default target is the UI language');
   assert.equal(field('sourceLang').value, 'auto');
-  assert.equal(field('batchChars').value, '1200');
+  assert.equal(field('localModel').value, '', 'no model is selected on a fresh install');
+  assert.equal(field('localModel').children.length, 1);
+  assert.equal(field('localMaxTokens').value, '1024');
   assert.equal(field('maxNodes').value, '600');
   assert.deepEqual([field('enabled').checked, field('autoDetect').checked, field('showBadge').checked, field('debug').checked], [true, true, true, false]);
-  assert.equal(field('apiKeyField').hidden, true, 'the local engine needs no key');
-  assert.equal(
-    field('engineDocs').textContent,
-    AT.C.getEngineMeta('local')!.docs,
-    'the docs under the select belong to the engine that is selected'
-  );
 
   const list = field('ruleList');
   assert.equal(list.children.length, 1);
@@ -717,19 +674,16 @@ test('an empty store boots the defaults and the empty rule row', async () => {
 });
 
 test('saving writes one record with the typed values, coerced', async () => {
-  const env = await boot({ stored: storedSettings({ apiKey: 'old', batchChars: 1200, maxNodes: 600 }) });
+  const env = await boot({ stored: storedSettings({ maxNodes: 600 }) });
   const { AT, field } = env;
 
   field('enabled').checked = true;
   field('autoDetect').checked = false;
   field('showBadge').checked = false;
   field('debug').checked = true;
-  field('engine').value = 'libretranslate';
-  field('endpoint').value = 'https://lt2.example/translate';
-  field('apiKey').value = ' typed-key ';
   field('targetLang').value = 'ja';
   field('sourceLang').value = 'ko';
-  field('batchChars').value = '2500';
+  field('localMaxTokens').value = '2048';
   field('maxNodes').value = '900';
   await click(field('save'));
 
@@ -740,53 +694,45 @@ test('saving writes one record with the typed values, coerced', async () => {
     'the page writes storage itself, no at/set-settings round trip'
   );
   const saved = savedSettings(env);
-  assert.equal(saved.engine, 'libretranslate');
-  assert.deepEqual(saved.endpoints, {
-    google: 'https://g.example/translate_a/single',
-    libretranslate: 'https://lt2.example/translate',
-    local: ''
-  }, 'only the selected engine keeps the edited endpoint');
-  assert.equal(saved.apiKey, 'typed-key', 'the field is trimmed, not padded');
   assert.equal(saved.targetLang, 'ja');
   assert.equal(saved.sourceLang, 'ko');
   assert.equal(saved.autoDetect, false);
   assert.equal(saved.showBadge, false);
   assert.equal(saved.debug, true);
   assert.equal(saved.version, 1);
-  assert.equal(typeof saved.batchChars, 'number', 'the limit reaches storage as a number');
-  assert.equal(saved.batchChars, 2500);
+  assert.equal(typeof saved.localMaxTokens, 'number', 'the budget reaches storage as a number');
+  assert.equal(saved.localMaxTokens, 2048);
   assert.equal(saved.maxNodes, 900);
+  assert.equal('engine' in saved, false, 'the removed provider settings are not resurrected');
+  assert.equal('apiKey' in saved, false);
   assert.equal(AT.debug, true, 'the debug flag reaches the logger');
 
   assert.equal(field('saveStatus').textContent, msg('options_saved'));
   assert.equal(field('saveStatus').dataset.kind, 'ok');
-  assert.equal(field('apiKey').value, 'typed-key', 'the form repaints from what was stored');
+  assert.equal(field('localMaxTokens').value, '2048', 'the form repaints from what was stored');
 });
 
-test('blank limits and a blank key are cleared, never stored as NaN', async () => {
-  const env = await boot({ stored: storedSettings({ apiKey: 'keep-me', batchChars: 1200, maxNodes: 600 }) });
+test('blank limits are clamped to their floors, never stored as NaN', async () => {
+  const env = await boot({ stored: storedSettings({ maxNodes: 600 }) });
   const { field } = env;
 
-  field('batchChars').value = '';
+  field('localMaxTokens').value = '';
   field('maxNodes').value = '';
-  field('apiKey').value = '   ';
   await click(field('save'));
 
   const saved = savedSettings(env);
-  assert.equal(saved.batchChars, 100, 'an empty limit clamps to its floor instead of becoming NaN');
+  assert.equal(saved.localMaxTokens, 128, 'an empty budget clamps to its floor instead of becoming NaN');
   assert.equal(saved.maxNodes, 10);
-  assert.equal(Number.isNaN(saved.batchChars), false);
-  assert.equal(saved.apiKey, '', 'a blank key wipes the stored one');
-  assert.equal(field('batchChars').value, '100');
+  assert.equal(Number.isNaN(saved.localMaxTokens), false);
+  assert.equal(field('localMaxTokens').value, '128');
   assert.equal(field('maxNodes').value, '10');
-  assert.equal(field('apiKey').value, '');
 });
 
 test('a failing storage write is not reported as saved', async () => {
-  const env = await boot({ stored: storedSettings({ batchChars: 1200 }) });
+  const env = await boot({ stored: storedSettings() });
   const before = clone(env.store.settings);
   env.failWrites('quota exceeded');
-  env.field('batchChars').value = '3000';
+  env.field('localMaxTokens').value = '3000';
 
   await assert.rejects(() => click(env.field('save')), /quota exceeded/);
 
@@ -796,57 +742,13 @@ test('a failing storage write is not reported as saved', async () => {
   assert.equal(env.field('saveStatus').dataset.kind, undefined);
 });
 
-test('the engine selector swaps endpoint, docs and the API-key field', async () => {
-  const env = await boot({ stored: storedSettings({ engine: 'google', apiKey: 'typed-key' }) });
-  const { AT, field } = env;
-  const libre = AT.C.getEngineMeta('libretranslate')!;
-  const google = AT.C.getEngineMeta('google')!;
-
-  assert.equal(field('apiKeyField').hidden, true, 'google has no key to type');
-  assert.equal(field('engineDocs').textContent, google.docs);
-
-  field('engine').value = 'libretranslate';
-  await fire(field('engine'), 'change');
-  assert.equal(field('endpoint').value, 'https://lt.example/translate', 'the stored endpoint wins over the constant');
-  assert.notEqual(field('endpoint').value, libre.endpoint);
-  assert.equal(field('apiKeyField').hidden, false, 'an engine that takes a key shows the field');
-  assert.equal(field('engineDocs').textContent, libre.docs);
-  assert.equal(field('apiKey').value, 'typed-key', 'hiding the field never throws the typed key away');
-  assert.equal(field('apiKey').hidden, false, 'only the wrapper is hidden');
-
-  field('engine').value = 'google';
-  await fire(field('engine'), 'change');
-  assert.equal(field('endpoint').value, 'https://g.example/translate_a/single', 'each engine keeps its own endpoint');
-  assert.equal(field('apiKeyField').hidden, true);
-  assert.equal(field('engineDocs').textContent, google.docs);
-  assert.deepEqual(env.writes, [], 'switching engines alone saves nothing');
-});
-
-test('an unknown engine selection falls back to the first provider', async () => {
-  const env = await boot({ stored: storedSettings({ engine: 'google' }) });
-  const { AT, field } = env;
-
-  field('engine').value = 'deepl';
-  await fire(field('engine'), 'change');
-  assert.equal(field('apiKeyField').hidden, true, 'the fallback provider needs no key');
-  assert.equal(field('engineDocs').textContent, AT.C.getEngineMeta('google')!.docs);
-  assert.equal(field('endpoint').value, 'https://g.example/translate_a/single');
-
-  await click(field('save'));
-  const saved = savedSettings(env);
-  assert.equal(saved.engine, 'google', 'the bogus engine never reaches storage');
-  assert.equal('deepl' in (saved.endpoints as ATNamespace), false, 'and neither does an endpoint for it');
-  assert.equal(field('engine').value, 'google', 'the form is repainted with the provider that was stored');
-});
-
-test('testing the provider probes with exactly the typed engine, endpoint and key', async () => {
+test('testing the engine probes with exactly the typed target language', async () => {
   const env = await boot({
-    stored: storedSettings({ engine: 'libretranslate', apiKey: 'typed-key', targetLang: 'ko' }),
-    replies: { 'at/test-engine': () => ({ ok: true, result: { output: 'ok', detected: 'ko', engine: 'libretranslate', ms: 1 } }) }
+    stored: storedSettings({ targetLang: 'ko' }),
+    replies: { 'at/test-engine': () => ({ ok: true, result: { output: 'ok', detected: 'ko', ms: 1 } }) }
   });
   const { field } = env;
 
-  field('endpoint').value = 'https://lt2.example/translate';
   field('targetLang').value = 'ja';
   await click(field('testEngine'));
 
@@ -854,9 +756,6 @@ test('testing the provider probes with exactly the typed engine, endpoint and ke
   assert.equal(probes.length, 1, 'one click is one probe');
   assert.deepEqual(probes[0], {
     type: 'at/test-engine',
-    engine: 'libretranslate',
-    endpoint: 'https://lt2.example/translate',
-    apiKey: 'typed-key',
     target: 'ja'
   }, 'the probe carries what is typed, not what is stored');
   assert.deepEqual(env.writes, [], 'testing must not save anything');
@@ -868,7 +767,7 @@ test('a successful probe renders the output and the elapsed time, no leftover pl
     resolveProbe = resolve;
   });
   const env = await boot({
-    stored: storedSettings({ engine: 'libretranslate' }),
+    stored: storedSettings(),
     replies: { 'at/test-engine': () => probe }
   });
   const { field } = env;
@@ -878,7 +777,7 @@ test('a successful probe renders the output and the elapsed time, no leftover pl
   assert.equal(field('testStatus').textContent, msg('options_testing'), 'the row reports the running probe');
   assert.equal(field('testStatus').dataset.kind, 'info');
 
-  resolveProbe({ ok: true, result: { output: 'Hallo Welt', detected: 'de', engine: 'libretranslate', ms: 42 } });
+  resolveProbe({ ok: true, result: { output: 'Hallo Welt', detected: 'de', ms: 42 } });
   await flying;
 
   const rendered = field('testStatus').textContent;
@@ -890,10 +789,10 @@ test('a successful probe renders the output and the elapsed time, no leftover pl
   assert.equal(field('testStatus').dataset.kind, 'ok');
 });
 
-test('a probe whose provider returned no text still renders a number, not undefined', async () => {
+test('a probe whose engine returned no text still renders a number, not undefined', async () => {
   const env = await boot({
-    stored: storedSettings({ engine: 'libretranslate' }),
-    replies: { 'at/test-engine': { ok: true, result: { output: undefined, detected: null, engine: 'libretranslate', ms: 7 } } }
+    stored: storedSettings(),
+    replies: { 'at/test-engine': { ok: true, result: { output: undefined, detected: null, ms: 7 } } }
   });
   await click(env.field('testEngine'));
 
@@ -905,7 +804,7 @@ test('a probe whose provider returned no text still renders a number, not undefi
 });
 
 test('a failed probe renders the error and never claims success', async () => {
-  const env = await boot({ stored: storedSettings({ engine: 'libretranslate' }) });
+  const env = await boot({ stored: storedSettings() });
   const { field } = env;
 
   env.replies['at/test-engine'] = { ok: false, error: 'Rate limit exceeded', code: 'rate-limit' };
@@ -1062,11 +961,9 @@ test('reset writes the defaults and repaints the form', async () => {
   const env = await boot({
     uiLang: 'ja',
     stored: storedSettings({
-      engine: 'libretranslate',
-      apiKey: 'secret-key',
       targetLang: 'ko',
       sourceLang: 'ja',
-      batchChars: 2500,
+      localMaxTokens: 2048,
       maxNodes: 900,
       enabled: false,
       autoDetect: false,
@@ -1086,19 +983,17 @@ test('reset writes the defaults and repaints the form', async () => {
 
   assert.equal(env.writes.length, 1, 'reset is one write');
   const saved = savedSettings(env);
-  assert.equal(saved.engine, 'local', 'a reset goes back to the on-device engine');
-  assert.equal(saved.apiKey, '');
+  assert.equal(saved.localModelId, '', 'a reset forgets the chosen model');
   assert.equal(saved.targetLang, 'ja', 'the default target follows the UI language');
   assert.equal(saved.sourceLang, 'auto');
-  assert.equal(saved.batchChars, AT.C.DEFAULT_BATCH_CHARS);
+  assert.equal(saved.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS);
   assert.equal(saved.maxNodes, AT.C.DEFAULT_MAX_NODES);
   assert.deepEqual(saved.siteRules, []);
-  assert.deepEqual(Object.keys(saved.endpoints as ATNamespace).sort(), ['google', 'libretranslate', 'local']);
+  assert.equal('engine' in saved, false, 'the defaults carry no provider settings');
+  assert.equal('endpoints' in saved, false);
   assert.deepEqual([field('enabled').checked, field('autoDetect').checked, field('showBadge').checked, field('debug').checked], [true, true, true, false]);
-  assert.equal(field('engine').value, 'local');
-  assert.equal(field('apiKey').value, '');
-  assert.equal(field('apiKeyField').hidden, true, 'the key field is hidden again with the default engine');
-  assert.equal(field('batchChars').value, '1200');
+  assert.equal(field('localModel').value, '');
+  assert.equal(field('localMaxTokens').value, '1024');
   assert.equal(field('maxNodes').value, '600');
   assert.equal(field('ruleList').children[0]!.className, 'empty', 'the rule list goes back to the empty row');
   assert.equal(field('saveStatus').textContent, msg('options_resetDone'));
@@ -1108,10 +1003,8 @@ test('reset writes the defaults and repaints the form', async () => {
 
 // --- on-device models ------------------------------------------------------
 
-test('the on-device engine hides the endpoint field and takes the docs line', async () => {
-  const offline = await boot({ stored: storedSettings({ engine: 'local' }) });
-  assert.equal(offline.field('endpointField').hidden, true, 'booting with it already hides the endpoint');
-  assert.equal(offline.field('apiKeyField').hidden, true, 'the on-device engine takes no key');
+test('the local support line describes the host state', async () => {
+  const offline = await boot();
   assert.equal(
     offline.field('localSupport').textContent,
     msg('options_localUnsupported'),
@@ -1119,52 +1012,17 @@ test('the on-device engine hides the endpoint field and takes the docs line', as
   );
 
   const env = await boot({
-    stored: storedSettings({ engine: 'google' }),
+    stored: storedSettings(),
     replies: {
       'at/local-get-status': { ok: true, supported: true, status: { state: 'ready', modelName: 'Gemma', loadMs: 12 } }
     }
   });
-  const { AT, field } = env;
 
-  assert.deepEqual(
-    field('engine').children.map((node) => [node.value, node.textContent]),
-    AT.C.ENGINES.map((engine: ATNamespace) => [engine.id, engine.label]),
-    'the on-device engine is offered next to the providers'
-  );
-  assert.equal(AT.C.ENGINES[2].label, 'On-device TranslateGemma (offline)');
   assert.equal(
-    field('localSupport').textContent,
+    env.field('localSupport').textContent,
     `${msg('options_stateReady')} · Gemma (12 ms)`,
     'the host describes itself through the catalogue'
   );
-
-  field('engine').value = 'local';
-  await fire(field('engine'), 'change');
-  assert.equal(field('endpointField').hidden, true, 'nothing is fetched, so there is no endpoint to type');
-  assert.equal(field('engineDocs').textContent, AT.C.getEngineMeta('local')!.docs);
-
-  field('engine').value = 'google';
-  await fire(field('engine'), 'change');
-  assert.equal(field('endpointField').hidden, false, 'switching back shows the endpoint field again');
-});
-
-test('the fallback selector never offers the on-device engine', async () => {
-  const env = await boot({ stored: storedSettings({ fallbackEngine: 'libretranslate' }) });
-  const { AT, field } = env;
-
-  assert.deepEqual(
-    field('fallbackEngine').children.map((node) => node.value),
-    [
-      '',
-      ...AT.C.ENGINES.filter((engine: ATNamespace) => engine.kind !== 'local').map(
-        (engine: ATNamespace) => engine.id
-      )
-    ],
-    'the chain may only end at a provider'
-  );
-  assert.equal(field('fallbackEngine').children.some((node) => node.value === 'local'), false, 'no on-device fallback');
-  assert.equal(field('fallbackEngine').children[0]!.textContent, msg('options_fallbackNone'));
-  assert.equal(field('fallbackEngine').value, 'libretranslate');
 });
 
 test('the injected models render in the picker, the list and the usage line', async () => {
@@ -1229,7 +1087,7 @@ test('the usage line admits when the browser may evict the model', async () => {
 
 test('the stored model is selected on boot and survives a save nobody touched', async () => {
   const env = await boot({
-    stored: storedSettings({ engine: 'local', localModelId: 'alpha-task' }),
+    stored: storedSettings({ localModelId: 'alpha-task' }),
     models: { rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' })] }
   });
   assert.equal(
@@ -1294,7 +1152,7 @@ test('deleting an unselected model leaves the settings and the host alone', asyn
 
 test('downloading a model streams its progress and then registers it', async () => {
   const env = await boot({
-    stored: storedSettings({ engine: 'local', localModelId: '' }),
+    stored: storedSettings({ localModelId: '' }),
     models: { token: 'hf-secret' }
   });
   const { AT, field } = env;
@@ -1338,33 +1196,27 @@ test('downloading a model streams its progress and then registers it', async () 
   );
 });
 
-test('saving stores the on-device choices and refuses a local fallback', async () => {
+test('saving stores the on-device choices, clamping the budget', async () => {
   const env = await boot({
     stored: storedSettings(),
     models: { rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' })] }
   });
   const { AT, field } = env;
 
-  field('engine').value = 'local';
   field('localModel').value = 'alpha-task';
   field('localMaxTokens').value = '2048';
-  field('fallbackEngine').value = 'libretranslate';
   await click(field('save'));
 
   assert.equal(env.writes.length, 1, 'one save is one write');
   const saved = savedSettings(env);
-  assert.equal(saved.engine, 'local');
   assert.equal(saved.localModelId, 'alpha-task');
-  assert.equal(saved.fallbackEngine, 'libretranslate');
   assert.equal(typeof saved.localMaxTokens, 'number', 'the budget reaches storage as a number');
   assert.equal(saved.localMaxTokens, 2048);
 
   field('localMaxTokens').value = '999999';
-  field('fallbackEngine').value = 'local';
   await click(field('save'));
 
   const second = savedSettings(env);
   assert.equal(second.localMaxTokens, AT.local.MAX_MAX_TOKENS, 'an oversized budget clamps to the ceiling');
-  assert.equal(second.fallbackEngine, '', 'the on-device engine is never its own fallback');
   assert.equal(field('localMaxTokens').value, String(AT.local.MAX_MAX_TOKENS), 'the form repaints from storage');
 });

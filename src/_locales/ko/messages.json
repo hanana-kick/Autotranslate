@@ -38,10 +38,6 @@
   "options_autoDetect": { "message": "외국어 페이지 자동 번역" },
   "options_showBadge": { "message": "번역된 페이지에 배지 표시" },
   "options_debug": { "message": "상세 로그" },
-  "options_provider": { "message": "번역 서비스" },
-  "options_engine": { "message": "번역 서비스" },
-  "options_endpoint": { "message": "엔드포인트 URL" },
-  "options_apiKey": { "message": "API 키" },
   "options_test": { "message": "서비스 테스트" },
   "options_testing": { "message": "테스트 중…" },
   "options_testOk": {
@@ -56,7 +52,6 @@
   "options_sourceLang": { "message": "원문 언어" },
   "options_sourceAuto": { "message": "자동 감지" },
   "options_limits": { "message": "제한" },
-  "options_batchChars": { "message": "요청당 문자 수" },
   "options_maxNodes": { "message": "페이지당 최대 텍스트 노드" },
   "options_rules": { "message": "사이트 규칙" },
   "options_rulePlaceholder": { "message": "example.com 또는 example.com/news/*" },
@@ -84,12 +79,6 @@
   },
   "options_localMaxTokens": {
     "message": "생성당 토큰 예산"
-  },
-  "options_fallbackEngine": {
-    "message": "폴백 제공자"
-  },
-  "options_fallbackNone": {
-    "message": "없음 — 실패를 그대로 표시"
   },
   "options_modelUrl": {
     "message": "모델 URL"

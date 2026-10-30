@@ -1,6 +1,6 @@
 // Drives the sample. The page talks to AT.dom.createTranslator directly — the
 // same call content.ts makes — so what you see here is the engine itself, with
-// an offline dictionary standing in for a translation provider.
+// an offline dictionary standing in for the model.
 namespace AT.demoPage {
   type Captured = {
     texts: (string | null)[];
@@ -31,7 +31,7 @@ namespace AT.demoPage {
     toggle: elementAs<HTMLButtonElement>('toggle'),
     probe: elementAs<HTMLButtonElement>('probe'),
     merge: elementAs<HTMLInputElement>('merge'),
-    provider: elementAs<HTMLSelectElement>('provider'),
+    simulation: elementAs<HTMLSelectElement>('simulation'),
     status: elementAs<HTMLElement>('status'),
     verdict: elementAs<HTMLElement>('verdict'),
     calls: elementAs<HTMLElement>('calls'),
@@ -134,12 +134,12 @@ namespace AT.demoPage {
   function statusLine(extra?: string): void {
     const stats = translator?.stats() ?? { translated: 0, cached: 0, runs: 0 };
     els.status.textContent = [
-      `provider 호출 ${String(calls.length)}회`,
+      `모델 호출 ${String(calls.length)}회`,
       `번역 ${String(stats.translated)}`,
       `캐시 ${String(stats.cached)}`,
       `병합 런 ${String(stats.runs)}`,
       `인라인 병합 ${els.merge.checked ? '켜짐' : '꺼짐'}`,
-      `provider ${els.provider.value === 'lossy' ? '마커 유실 시뮬레이션' : '마커 보존'}`,
+      `모델 ${els.simulation.value === 'lossy' ? '마커 유실 시뮬레이션' : '마커 보존'}`,
       extra
     ].filter(Boolean).join(' · ');
   }
@@ -154,7 +154,7 @@ namespace AT.demoPage {
       translate: async (texts) => {
         const started = performance.now();
         const out = await AT.demo.translate(texts, {
-          lossy: els.provider.value === 'lossy',
+          lossy: els.simulation.value === 'lossy',
           latencyMs: 140
         });
         calls.push({ sent: texts, received: out, ms: Math.round(performance.now() - started) });
@@ -244,7 +244,7 @@ namespace AT.demoPage {
   });
   els.probe.addEventListener('click', verify);
   els.merge.addEventListener('change', rerun);
-  els.provider.addEventListener('change', rerun);
+  els.simulation.addEventListener('change', rerun);
 
   renderCalls();
   renderMapping();

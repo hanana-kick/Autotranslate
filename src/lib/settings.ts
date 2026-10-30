@@ -9,30 +9,22 @@ namespace AT.settings {
     autoDetect: boolean;
     targetLang: string;
     sourceLang: string;
-    engine: string;
-    endpoints: { [engineId: string]: string };
-    apiKey: string;
     /** Model id the on-device engine loads; empty means none selected. */
     localModelId: string;
     /** Combined input and output tokens one generation may spend. */
     localMaxTokens: number;
-    /** Engine used when on-device translation fails; '' disables the fallback. */
-    fallbackEngine: string;
-    batchChars: number;
     maxNodes: number;
     showBadge: boolean;
     siteRules: AT.rules.SiteRule[];
     debug: boolean;
   };
 
-  /** What a content script may see: no endpoints, no API key, no site rules. */
+  /** What a content script may see: no site rules, no debug flag. */
   export type ContentSnapshot = {
     enabled: boolean;
     autoDetect: boolean;
     targetLang: string;
     sourceLang: string;
-    engine: string;
-    batchChars: number;
     maxNodes: number;
     showBadge: boolean;
   };
@@ -44,23 +36,12 @@ namespace AT.settings {
     autoDetect?: unknown;
     targetLang?: unknown;
     sourceLang?: unknown;
-    engine?: unknown;
-    endpoints?: { [engineId: string]: unknown } | null;
-    apiKey?: unknown;
     localModelId?: unknown;
     localMaxTokens?: unknown;
-    fallbackEngine?: unknown;
-    batchChars?: unknown;
     maxNodes?: unknown;
     showBadge?: unknown;
     siteRules?: { pattern?: unknown; action?: unknown }[] | null;
     debug?: unknown;
-  };
-
-  const LOCALHOSTS: Record<string, true | undefined> = {
-    localhost: true,
-    '127.0.0.1': true,
-    '[::1]': true
   };
 
   export function defaults(): Settings {
@@ -70,17 +51,8 @@ namespace AT.settings {
       autoDetect: true,
       targetLang: uiLang(),
       sourceLang: 'auto',
-      // The on-device engine is the product: a fresh install translates with
-      // the local model, not by sending the page to a provider.
-      engine: 'local',
-      endpoints: Object.fromEntries(C.ENGINES.map((e) => [e.id, e.endpoint])),
-      apiKey: '',
       localModelId: '',
       localMaxTokens: AT.local.DEFAULT_MAX_TOKENS,
-      // Off by default: choosing the on-device engine must not quietly send
-      // text to a provider. The options page offers this as an explicit opt-in.
-      fallbackEngine: '',
-      batchChars: C.DEFAULT_BATCH_CHARS,
       maxNodes: C.DEFAULT_MAX_NODES,
       showBadge: true,
       siteRules: [],
@@ -108,29 +80,6 @@ namespace AT.settings {
     return Math.min(max, Math.max(min, Math.round(n)));
   };
 
-  export function isValidEndpoint(value: unknown): string | null {
-    let url: URL;
-    try {
-      url = new URL(String(value ?? '').trim());
-    } catch {
-      return null;
-    }
-    const okScheme = url.protocol === 'https:' || (url.protocol === 'http:' && LOCALHOSTS[url.hostname] === true);
-    if (!okScheme || !url.hostname) return null;
-    return url.toString();
-  }
-
-  // A fallback must be a real remote engine: falling back to 'local' would
-  // loop, and an unknown id would only bury the failure the user should see.
-  function pickFallback(value: unknown, fallback: string): string {
-    if (value === undefined) return fallback;
-    // Anything else was asked for explicitly, so an unusable answer means "no
-    // fallback": keeping the previous provider would send a page to the cloud
-    // because of a value the user never chose.
-    const meta = typeof value === 'string' && value !== '' ? C.getEngineMeta(value) : null;
-    return meta && meta.kind !== 'local' ? meta.id : '';
-  }
-
   // Coerces anything (including old or hand-edited blobs) into a full, known
   // settings object. Unknown keys are dropped, bad values fall back.
   /**
@@ -142,13 +91,6 @@ namespace AT.settings {
     // The blob is whatever storage held; the all-unknown shape forces every
     // field to be narrowed before it is used.
     const input: RawSettings = raw && typeof raw === 'object' ? (raw as RawSettings) : {};
-    const endpoints: { [engineId: string]: string } = { ...base.endpoints };
-    // Every engine id stays a key, `local` included: its entry is never
-    // resolved, because `kind: 'local'` asks the model store rather than a URL.
-    for (const engine of C.ENGINES) {
-      const candidate = isValidEndpoint(input.endpoints?.[engine.id]);
-      if (candidate) endpoints[engine.id] = candidate;
-    }
     const siteRules: AT.rules.SiteRule[] = [];
     const seen = new Set<string>();
     // Widened from `readonly SiteRuleAction[]` so an untrusted action is
@@ -171,10 +113,6 @@ namespace AT.settings {
         input.sourceLang === 'auto' || (typeof input.sourceLang === 'string' && C.isSupportedLang(input.sourceLang))
           ? input.sourceLang
           : 'auto',
-      engine: typeof input.engine === 'string' && C.getEngineMeta(input.engine) ? input.engine : base.engine,
-      endpoints,
-      apiKey: typeof input.apiKey === 'string' ? input.apiKey.trim().slice(0, 512) : '',
-      batchChars: clampInt(input.batchChars, 100, 8000, base.batchChars),
       maxNodes: clampInt(input.maxNodes, 10, 5000, base.maxNodes),
       showBadge: input.showBadge !== false,
       siteRules,
@@ -185,12 +123,11 @@ namespace AT.settings {
         AT.local.MAX_MAX_TOKENS,
         base.localMaxTokens
       ),
-      fallbackEngine: pickFallback(input.fallbackEngine, base.fallbackEngine),
       debug: input.debug === true
     };
   }
 
-  // What a content script is allowed to know: no endpoints, no API key.
+  // What a content script is allowed to know: no site rules, no debug flag.
   export function contentSnapshot(normalized?: Settings | null): ContentSnapshot {
     const s = normalized ?? defaults();
     return {
@@ -198,8 +135,6 @@ namespace AT.settings {
       autoDetect: s.autoDetect,
       targetLang: s.targetLang,
       sourceLang: s.sourceLang,
-      engine: s.engine,
-      batchChars: Math.min(s.batchChars, C.getEngineMeta(s.engine)?.maxChars ?? s.batchChars),
       maxNodes: s.maxNodes,
       showBadge: s.showBadge
     };

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SRC, load, resetGlobals, fetchStub, json, deferred, type ATNamespace, type FetchHandler } from './helpers.ts';
+import { SRC, load, resetGlobals, deferred, type ATNamespace } from './helpers.ts';
 
 // The manifest's background scripts, minus the entry point itself: the harness
 // boots the page the way the browser would.
@@ -31,7 +31,6 @@ const CONTENT_FILES = [
   'lib/dom.js',
   'content.js'
 ];
-const LIBRE = 'https://lt.example/translate';
 /** `AT.local.TARGET_OFFSCREEN`: the routing field that addresses the host. */
 const OFFSCREEN_HOST = 'offscreen';
 
@@ -89,7 +88,6 @@ type EnvironmentOptions = {
   settings?: ATNamespace;
   tab?: Tab;
   tabs?: Tab[];
-  fetchImpl?: FetchHandler;
   withImportScripts?: boolean;
   /** Install `chrome.offscreen`: the model runs in a document of its own. */
   withOffscreen?: boolean;
@@ -169,7 +167,6 @@ function environment({
   settings,
   tab,
   tabs,
-  fetchImpl,
   withImportScripts = true,
   withOffscreen = false,
   inlineHost,
@@ -307,7 +304,6 @@ function environment({
     };
   }
   host.self = self;
-  if (fetchImpl) host.fetch = fetchImpl;
 
   const AT = load(...LIBS, 'background.js');
   // A Firefox background page is the host: the module is part of the page (it
@@ -318,9 +314,6 @@ function environment({
   const types = () => recorded.tabMessages.map((entry) => entry.message.type);
   return { AT, browser, recorded, events, send, fire, types };
 }
-
-const libreReplies = (translate = (text: string) => `\u00bb${text}\u00ab`) =>
-  fetchStub((_url, init) => json(JSON.parse(init.body!).q.map((text: string) => ({ translatedText: translate(text) }))));
 
 /** A host that has the model resident, in the shape `normalizeStatus` accepts. */
 const readyStatus = {
@@ -349,7 +342,7 @@ const unloadedStatus = {
 /**
  * Fires an event listener list and lets queued work settle. `setImmediate` is a
  * queue hop rather than a clock wait: every pending microtask chain (async
- * handlers, stubbed provider replies) has run by the time it fires, so nothing
+ * handlers, stubbed host replies) has run by the time it fires, so nothing
  * has to be guessed at.
  */
 const fire = async (list: Listener[], ...args: unknown[]) => {
@@ -383,9 +376,15 @@ test('the event page boots without importScripts (Firefox)', () => {
 });
 
 test('install seeds settings and registers the context menu', async () => {
-  const { events, recorded } = environment();
+  const { AT, events, recorded } = environment();
   await fire(events.installed, { reason: 'install' });
-  assert.equal(recorded.storage.settings.engine, 'local', 'an install starts on the on-device engine');
+  assert.equal(recorded.storage.settings.enabled, true, 'an install starts enabled');
+  assert.equal(recorded.storage.settings.localModelId, '', 'and with no on-device model selected');
+  assert.equal(
+    recorded.storage.settings.localMaxTokens,
+    AT.local.DEFAULT_MAX_TOKENS,
+    'the token budget starts at the model default'
+  );
   assert.deepEqual(recorded.storage.settings.siteRules, []);
   assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS);
   for (const item of recorded.menus) {
@@ -396,35 +395,38 @@ test('install seeds settings and registers the context menu', async () => {
   assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS, 'startup rebuilds the menu');
 });
 
-test('content batches go to the configured provider once per unique text', async () => {
-  const { fetchImpl, calls } = libreReplies();
-  const { AT, send } = environment({
-    settings: { engine: 'libretranslate', endpoints: { libretranslate: LIBRE }, targetLang: 'ko' },
-    fetchImpl
+test('content batches reach the host once per unique text', async () => {
+  const { AT, send, recorded } = environment({
+    inlineHost: 'stub',
+    settings: { localModelId: 'model-a', targetLang: 'ko' }
   });
   const reply = await send({ type: AT.C.MSG.BATCH, texts: ['Hello', 'Hello', 'Good morning'] });
   assert.equal(reply.ok, true);
   assert.deepEqual(reply.translations, ['\u00bbHello\u00ab', '\u00bbHello\u00ab', '\u00bbGood morning\u00ab']);
-  assert.equal(reply.engine, 'libretranslate');
-  assert.equal(calls.length, 1, 'unique texts share one request');
-  assert.equal(JSON.parse(calls[0]!.init.body!).q.length, 2);
+  const requests = recorded.inline.messages.filter((entry) => entry.type === AT.C.MSG.LOCAL_TRANSLATE);
+  assert.equal(requests.length, 1, 'unique texts share one generation');
+  assert.deepEqual(requests[0]!.texts, ['Hello', 'Good morning'], 'the duplicate is sent once');
 });
 
-test('provider failures reach the content script as an error, not a half translation', async () => {
-  const { fetchImpl } = fetchStub(() => json({ error: 'Rate limit exceeded' }, 429));
+test('host failures reach the content script as an error, not a half translation', async () => {
   const { AT, send } = environment({
-    settings: { engine: 'libretranslate', endpoints: { libretranslate: LIBRE } },
-    fetchImpl
+    settings: { localModelId: 'model-a', targetLang: 'ko' },
+    withOffscreen: true,
+    resident: true,
+    hostReplies: {
+      'at/local-translate': () => ({ ok: false, error: 'no webgpu device', code: 'no-webgpu' })
+    }
   });
   const reply = await send({ type: AT.C.MSG.BATCH, texts: ['Hello'] });
   assert.equal(reply.ok, false);
-  assert.equal(reply.code, 'rate-limit');
-  assert.equal(reply.translations, undefined);
+  assert.equal(reply.code, 'provider', 'an unknown host reason is still a provider-side failure');
+  assert.match(reply.error, /no webgpu device/);
+  assert.equal(reply.translations, undefined, 'nothing comes back, so the page keeps its source text');
 });
 
 test('navigation injects the content script and asks it to translate', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', title: 'News', ping: false, translated: 3 };
-  const { AT, events, recorded, types } = environment({ tab, fetchImpl: libreReplies().fetchImpl });
+  const { AT, events, recorded, types } = environment({ tab });
   await fire(events.updated, 7, { status: 'complete' }, tab);
 
   assert.equal(recorded.injected.length, 1);
@@ -432,9 +434,18 @@ test('navigation injects the content script and asks it to translate', async () 
   const translate = recorded.tabMessages.find((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE);
   assert.equal(translate!.tabId, 7);
   assert.equal(translate!.message.decision.action, 'detect', 'no rule means language detection');
-  assert.equal(translate!.message.settings.apiKey, undefined, 'content never sees the key');
-  assert.equal(translate!.message.settings.endpoints, undefined);
-  assert.equal(translate!.message.settings.engine, 'local', 'a fresh install translates on-device');
+  assert.deepEqual(
+    translate!.message.settings,
+    {
+      enabled: true,
+      autoDetect: true,
+      targetLang: 'en',
+      sourceLang: 'auto',
+      maxNodes: AT.C.DEFAULT_MAX_NODES,
+      showBadge: true
+    },
+    'the content script gets the bounded snapshot, never the stored blob'
+  );
   assert.deepEqual(types(), ['at/content-ping', 'at/content-translate']);
   assert.ok(
     recorded.badges.some((entry) => entry.text === AT.C.BADGE_TEXT),
@@ -477,7 +488,7 @@ test('a site rule of always forces translation without detection', async () => {
   assert.equal(translate!.message.decision.pattern, 'news.example.com');
 });
 
-test('browser and provider pages are left alone', async () => {
+test('browser and translator pages are left alone', async () => {
   const urls = [
     'https://addons.mozilla.org/en-US/firefox/extensions/',
     'https://chromewebstore.google.com/detail/x',
@@ -510,24 +521,27 @@ test('at/get-state reports the tab, the rule and the badge state', async () => {
 });
 
 test('settings patches are normalised and stripped before they come back', async () => {
-  const { AT, send, recorded } = environment({ settings: { apiKey: 'secret', engine: 'libretranslate' } });
+  const { AT, send, recorded } = environment({ settings: { localModelId: 'model-a' } });
   const reply = await send({
     type: AT.C.MSG.SET_SETTINGS,
     patch: {
       maxNodes: 99999,
-      batchChars: 99999,
+      localMaxTokens: 99999,
       targetLang: 'klingon',
       siteRules: [{ pattern: 'www.Example.com/', action: 'always' }]
     }
   });
   assert.equal(reply.ok, true);
   assert.equal(reply.settings.maxNodes, 5000);
-  assert.ok(reply.settings.batchChars <= 5000, 'the batch is clamped to the provider ceiling');
   assert.equal(reply.settings.targetLang, 'en', 'an unknown language falls back');
-  assert.equal(reply.settings.apiKey, undefined);
-  assert.equal(reply.settings.endpoints, undefined);
+  assert.equal(reply.settings.localModelId, undefined, 'the snapshot carries no model selection');
+  assert.equal(
+    recorded.storage.settings.localMaxTokens,
+    AT.local.MAX_MAX_TOKENS,
+    'the token budget is clamped to what the host can run'
+  );
   assert.deepEqual(recorded.storage.settings.siteRules, [{ pattern: 'example.com', action: 'always' }]);
-  assert.equal(recorded.storage.settings.apiKey, 'secret', 'the stored key survives unrelated patches');
+  assert.equal(recorded.storage.settings.localModelId, 'model-a', 'the stored model survives unrelated patches');
 });
 
 test('site rules are canonicalised, replaced and removed by host', async () => {
@@ -612,18 +626,21 @@ test('a message nothing answers is reported instead of hanging', async () => {
   assert.equal(answered.tab.host, 'news.example.com');
 });
 
-test('the provider test probes with one sentence', async () => {
-  const { fetchImpl, calls } = libreReplies((text) => `[${text}]`);
-  const { AT, send } = environment({
-    settings: { engine: 'libretranslate', endpoints: { libretranslate: LIBRE }, targetLang: 'de' },
-    fetchImpl
+test('the model test probes with one sentence through the host', async () => {
+  const { AT, send, recorded } = environment({
+    inlineHost: 'stub',
+    settings: { localModelId: 'model-a', targetLang: 'de' }
   });
-  const reply = await send({ type: AT.C.MSG.TEST_ENGINE, engine: 'libretranslate' });
+  const reply = await send({ type: AT.C.MSG.TEST_ENGINE, target: 'de' });
   assert.equal(reply.ok, true);
-  assert.match(reply.result.output, /^\[.+\]$/);
-  assert.equal(reply.result.engine, 'libretranslate');
-  assert.equal(calls.length, 1);
-  assert.equal(JSON.parse(calls[0]!.init.body!).target, 'de');
+  assert.equal(reply.result.output, `\u00bb${AT.engines.TEST_SENTENCE}\u00ab`);
+  assert.equal(typeof reply.result.ms, 'number');
+
+  const probes = recorded.inline.messages.filter((entry) => entry.type === AT.C.MSG.LOCAL_TRANSLATE);
+  assert.equal(probes.length, 1, 'one sentence, one generation');
+  assert.deepEqual(probes[0]!.texts, [AT.engines.TEST_SENTENCE]);
+  assert.equal(probes[0]!.modelId, 'model-a', 'the stored selection is the model probed');
+  assert.equal(probes[0]!.target, 'de');
 });
 
 test('context menu entries act on the clicked tab', async () => {
@@ -681,7 +698,7 @@ test('closing a tab drops its state and storage edits refresh the cache', async 
 
 test('the on-device engine gets an offscreen host that loads the selected model', async () => {
   const { AT, send, recorded } = environment({
-    settings: { engine: 'local', localModelId: 'model-a', localMaxTokens: 512 },
+    settings: { localModelId: 'model-a', localMaxTokens: 512 },
     withOffscreen: true,
     hostReplies: {
       'at/local-load': (message: ATNamespace) => ({ ok: true, status: { ...readyStatus, modelId: message.modelId } })
@@ -713,7 +730,7 @@ test('a browser without the offscreen API hosts the model in its own page', asyn
   const { AT, send, recorded } = environment({
     tab,
     inlineHost: 'stub',
-    settings: { engine: 'local', localModelId: 'model-a' }
+    settings: { localModelId: 'model-a' }
   });
 
   const prepared = await send({ type: AT.C.MSG.LOCAL_PREPARE });
@@ -736,7 +753,7 @@ test('a browser without the offscreen API hosts the model in its own page', asyn
 test('the real host reports a browser without WebGPU before anything is downloaded', async () => {
   const { AT, send, recorded } = environment({
     inlineHost: 'real',
-    settings: { engine: 'local', localModelId: 'model-a' }
+    settings: { localModelId: 'model-a' }
   });
 
   const status = await send({ type: AT.C.MSG.LOCAL_GET_STATUS });
@@ -761,7 +778,7 @@ test('the real host reaches the vendored runtime once WebGPU answers', async () 
   try {
     const { AT, send, recorded } = environment({
       inlineHost: 'real',
-      settings: { engine: 'local', localModelId: 'model-a' }
+      settings: { localModelId: 'model-a' }
     });
     // The store is not the subject here: answer it so the load reaches the
     // runtime import, which is the step a browser would satisfy.
@@ -794,7 +811,7 @@ test('the real host reaches the vendored runtime once WebGPU answers', async () 
 test('page context from the content script is normalised before the engine sees it', async () => {
   const { AT, recorded, send } = environment({
     inlineHost: 'stub',
-    settings: { engine: 'local', localModelId: 'model-a', targetLang: 'ko' }
+    settings: { localModelId: 'model-a', targetLang: 'ko' }
   });
 
   const reply = await send({
@@ -818,7 +835,6 @@ test('the on-device engine translates through the host in place', async () => {
   const { AT, recorded } = environment({ inlineHost: 'stub' });
 
   const result = await AT.engines.translate({
-    engine: 'local',
     localModelId: 'model-a',
     localMaxTokens: 512,
     texts: ['Good morning', 'Thank you'],
@@ -826,7 +842,8 @@ test('the on-device engine translates through the host in place', async () => {
     target: 'ko'
   });
   assert.deepEqual(result.translations, ['\u00bbGood morning\u00ab', '\u00bbThank you\u00ab']);
-  assert.equal(result.engine, 'local');
+  assert.equal(result.requested, 2, 'both texts were sent once');
+  assert.equal(result.detected, null, 'an explicit source is not re-detected');
   assert.deepEqual(recorded.hostMessages, []);
   assert.deepEqual(
     recorded.inline.handled,
@@ -835,15 +852,13 @@ test('the on-device engine translates through the host in place', async () => {
   );
 });
 
-test('the status the popup reads is the one the host last reported', async () => {
+test('the status the popup reads comes from a fresh probe of the host', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', title: 'News' };
   const { AT, send, recorded } = environment({
     tab,
     withOffscreen: true,
     resident: true,
-    // The page is on a cloud engine, so reading the tab state must not go and
-    // probe the host: the pushed state is the only source.
-    settings: { engine: 'google' },
+    settings: { localModelId: 'model-a' },
     hostReplies: { 'at/local-status': () => ({ ok: true, status: readyStatus }) }
   });
 
@@ -859,8 +874,8 @@ test('the status the popup reads is the one the host last reported', async () =>
   assert.equal(asked(), 2, 'every look asks the host, so an idle unload cannot hide behind a cache');
   for (const entry of recorded.hostMessages) assert.equal(entry.to, OFFSCREEN_HOST);
 
-  // The host pushes when it starts and stops generating; nothing else tells the
-  // popup about a state nobody asked for.
+  // The host also pushes when it starts and stops generating; that report is
+  // kept, but it never overrides what a fresh probe finds.
   const reported = await send(
     { type: AT.C.MSG.LOCAL_STATUS, status: { ...readyStatus, state: 'busy', generations: 3 } },
     { id: 'host' }
@@ -868,14 +883,16 @@ test('the status the popup reads is the one the host last reported', async () =>
   assert.equal(reported.ok, true);
   assert.equal(reported.status.state, 'busy');
 
+  const before = asked();
   const state = await send({ type: AT.C.MSG.GET_STATE, tabId: 7 }, { id: 'popup' });
-  assert.equal(state.local.status.state, 'busy', 'a page that is not using the model shows the pushed state');
+  assert.equal(asked(), before + 1, 'opening the popup probes the host');
+  assert.equal(state.local.status.state, 'ready', 'the host answer wins over an older pushed state');
   assert.equal(state.local.supported, true);
 });
 
 test('the resident model is unloaded when the selection changes', async () => {
   const { AT, events, recorded, send } = environment({
-    settings: { engine: 'local', localModelId: 'model-a' },
+    settings: { localModelId: 'model-a' },
     withOffscreen: true,
     hostReplies: {
       'at/local-load': () => ({ ok: true, status: readyStatus }),
@@ -905,9 +922,9 @@ test('the resident model is unloaded when the selection changes', async () => {
   assert.equal(released.status.loadedBytes, 0);
 });
 
-test('a model prepared while another engine translates stays warm', async () => {
+test('a prepared model stays warm across unrelated settings edits', async () => {
   const { AT, events, recorded, send } = environment({
-    settings: { engine: 'google', localModelId: 'model-a', autoDetect: true },
+    settings: { localModelId: 'model-a', autoDetect: true },
     withOffscreen: true,
     hostReplies: {
       'at/local-load': () => ({ ok: true, status: readyStatus }),
@@ -921,16 +938,16 @@ test('a model prepared while another engine translates stays warm', async () => 
   };
 
   const prepared = await send({ type: AT.C.MSG.LOCAL_PREPARE });
-  assert.equal(prepared.ok, true, 'the options page can warm a model while a provider does the translating');
+  assert.equal(prepared.ok, true, 'the options page can warm a model before the user translates');
   assert.equal(recorded.offscreen.length, 1);
   assert.equal(recorded.hostMessages.at(-1)!.type, AT.C.MSG.LOCAL_LOAD, 'the chosen model is the one loaded');
   assert.equal(recorded.hostMessages.at(-1)!.modelId, 'model-a');
 
-  // Nothing about the resident model changed. The engine is not part of the
-  // key, so an unrelated edit must not cost the user another huge load.
+  // Nothing about the resident model changed, so an unrelated edit must not
+  // cost the user another huge load.
   await edit({ autoDetect: false });
   await edit({ targetLang: 'de' });
-  assert.equal(unloads(), 0, 'an unrelated edit keeps a prepared model resident on any engine');
+  assert.equal(unloads(), 0, 'an unrelated edit keeps a prepared model resident');
 
   // The selection itself changed: keeping it resident would translate with a
   // model nobody chose any more.
@@ -944,43 +961,3 @@ test('a model prepared while another engine translates stays warm', async () => 
   assert.equal(unloads(), 1, 'nothing is unloaded twice');
 });
 
-test('an on-device failure stays offline unless the user picked a fallback', async () => {
-  const hostReplies = {
-    'at/local-translate': () => ({ ok: false, error: 'no webgpu device', code: 'no-webgpu' })
-  };
-  const { fetchImpl, calls } = libreReplies();
-
-  const strict = environment({
-    settings: { engine: 'local', localModelId: 'model-a', targetLang: 'ko' },
-    withOffscreen: true,
-    resident: true,
-    hostReplies,
-    fetchImpl
-  });
-  const offline = await strict.send({ type: strict.AT.C.MSG.BATCH, texts: ['Hello'] });
-  assert.equal(offline.ok, false, 'without an opt-in the user sees the host failure');
-  assert.match(offline.error, /no webgpu device/);
-  assert.equal(offline.code, 'provider', 'an unknown host reason is a provider-side failure');
-  assert.equal(calls.length, 0, 'no page text leaves the browser without an opt-in');
-
-  const opted = environment({
-    settings: {
-      engine: 'local',
-      localModelId: 'model-a',
-      fallbackEngine: 'libretranslate',
-      endpoints: { libretranslate: LIBRE },
-      targetLang: 'ko'
-    },
-    withOffscreen: true,
-    resident: true,
-    hostReplies,
-    fetchImpl
-  });
-  const rescued = await opted.send({ type: opted.AT.C.MSG.BATCH, texts: ['Hello'] });
-  assert.equal(rescued.ok, true);
-  assert.deepEqual(rescued.translations, ['\u00bbHello\u00ab']);
-  assert.equal(rescued.engine, 'libretranslate', 'the reply says who actually translated it');
-  assert.equal(rescued.fallback.from, 'local');
-  assert.match(rescued.fallback.error, /no webgpu device/);
-  assert.equal(calls.length, 1, 'the opted-in provider is asked exactly once');
-});

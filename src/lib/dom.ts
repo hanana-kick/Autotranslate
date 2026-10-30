@@ -63,7 +63,7 @@ namespace AT.dom {
     translateRoot(root?: Node | null | undefined, options?: { limit?: number }): Promise<Result>;
     translateNodes(nodes: Iterable<Text> | ArrayLike<Text>): Promise<Result>;
     /** Whether this node currently holds a translation of its own text. A node
-     *  the provider failed to answer for is not "done", so a later pass retries
+     *  the model failed to answer for is not "done", so a later pass retries
      *  it instead of skipping it forever. */
     has(node: Text): boolean;
     /** Whether the node still shows the text we wrote. A page that put its own
@@ -88,7 +88,7 @@ namespace AT.dom {
   }
 
   /**
-   * Whitespace around a run is layout, not content: providers trim it, and an
+   * Whitespace around a run is layout, not content: the model trims it, and an
    * inline element often carries the only space separating it from its
    * neighbour. Take it off before the request, put it back afterwards.
    */
@@ -282,7 +282,7 @@ namespace AT.dom {
       for (const chunk of chunkByChars(keys, batchChars)) {
         const result = await translate(chunk);
         if (!Array.isArray(result) || result.length !== chunk.length) {
-          throw new Error('translation provider returned an unexpected number of results');
+          throw new Error('the model returned an unexpected number of results');
         }
         chunk.forEach((key, index) => {
           const value = result[index];

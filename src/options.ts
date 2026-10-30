@@ -12,19 +12,12 @@ namespace AT.options {
     autoDetect: HTMLInputElement;
     showBadge: HTMLInputElement;
     debug: HTMLInputElement;
-    engine: HTMLSelectElement;
-    endpoint: HTMLInputElement;
-    endpointField: HTMLDivElement;
-    apiKey: HTMLInputElement;
-    apiKeyField: HTMLDivElement;
-    engineDocs: HTMLParagraphElement;
     testEngine: HTMLButtonElement;
     testStatus: HTMLParagraphElement;
     targetLang: HTMLSelectElement;
     sourceLang: HTMLSelectElement;
     localModel: HTMLSelectElement;
     localMaxTokens: HTMLInputElement;
-    fallbackEngine: HTMLSelectElement;
     localSupport: HTMLParagraphElement;
     localUsage: HTMLParagraphElement;
     modelList: HTMLUListElement;
@@ -37,7 +30,6 @@ namespace AT.options {
     prepareModel: HTMLButtonElement;
     modelProgress: HTMLProgressElement;
     modelStatus: HTMLParagraphElement;
-    batchChars: HTMLInputElement;
     maxNodes: HTMLInputElement;
     rulePattern: HTMLInputElement;
     ruleAction: HTMLSelectElement;
@@ -52,13 +44,9 @@ namespace AT.options {
     return document.getElementById(id) as Fields[K];
   }
 
-  // What the form holds: `version` comes from settings.save, and the two limit
+  // What the form holds: `version` comes from settings.save, and the limit
   // fields are still the input strings normalize() later coerces.
-  type FormValues = Omit<
-    AT.settings.Settings,
-    'version' | 'batchChars' | 'maxNodes' | 'localMaxTokens'
-  > & {
-    batchChars: string;
+  type FormValues = Omit<AT.settings.Settings, 'version' | 'maxNodes' | 'localMaxTokens'> & {
     maxNodes: string;
     localMaxTokens: string;
   };
@@ -86,23 +74,13 @@ namespace AT.options {
     node.dataset.kind = kind ?? 'info';
   }
 
-  function selectedEngine(): AT.EngineMeta {
-    return C.getEngineMeta(el('engine').value) ?? C.ENGINES[0]!;
-  }
-
   function buildSelects(): void {
-    el('engine').replaceChildren(...C.ENGINES.map((engine) => option(engine.id, engine.label)));
     el('targetLang').replaceChildren(
       ...C.LANGS.map((lang) => option(lang.code, `${lang.native} (${lang.code})`))
     );
     el('sourceLang').replaceChildren(
       option('auto', AT.i18n.msg('options_sourceAuto')),
       ...C.LANGS.map((lang) => option(lang.code, `${lang.native} (${lang.code})`))
-    );
-    // 'local' cannot be its own fallback: the chain would end where it started.
-    el('fallbackEngine').replaceChildren(
-      option('', AT.i18n.msg('options_fallbackNone')),
-      ...C.ENGINES.filter((engine) => engine.kind !== 'local').map((engine) => option(engine.id, engine.label))
     );
   }
 
@@ -141,42 +119,28 @@ namespace AT.options {
     el('autoDetect').checked = settings!.autoDetect;
     el('showBadge').checked = settings!.showBadge;
     el('debug').checked = settings!.debug;
-    el('engine').value = settings!.engine;
-    el('endpoint').value = settings!.endpoints[settings!.engine] ?? '';
-    el('apiKey').value = settings!.apiKey;
     el('targetLang').value = settings!.targetLang;
     el('sourceLang').value = settings!.sourceLang;
-    el('batchChars').value = String(settings!.batchChars);
     el('maxNodes').value = String(settings!.maxNodes);
-    el('apiKeyField').hidden = !selectedEngine().supportsKey;
-    el('endpointField').hidden = selectedEngine().kind === 'local';
-    el('engineDocs').textContent = selectedEngine().docs;
     el('localModel').value = models.some((model) => model.id === settings!.localModelId)
       ? settings!.localModelId
       : '';
     el('localMaxTokens').value = String(settings!.localMaxTokens);
-    el('fallbackEngine').value = settings!.fallbackEngine;
     renderRules();
   }
 
   function collect(): FormValues {
-    const engine = el('engine').value;
     return {
       enabled: el('enabled').checked,
       autoDetect: el('autoDetect').checked,
       showBadge: el('showBadge').checked,
       debug: el('debug').checked,
-      engine,
-      endpoints: { ...settings!.endpoints, [engine]: el('endpoint').value },
-      apiKey: el('apiKey').value,
       targetLang: el('targetLang').value,
       sourceLang: el('sourceLang').value,
-      batchChars: el('batchChars').value,
       maxNodes: el('maxNodes').value,
       siteRules: settings!.siteRules,
       localModelId: el('localModel').value,
-      localMaxTokens: el('localMaxTokens').value,
-      fallbackEngine: el('fallbackEngine').value
+      localMaxTokens: el('localMaxTokens').value
     };
   }
 
@@ -186,7 +150,6 @@ namespace AT.options {
     // the stored value is unchanged and save() sees the numbers it promises.
     const patch: Partial<AT.settings.Settings> = {
       ...nextSettings,
-      batchChars: Number(nextSettings.batchChars),
       maxNodes: Number(nextSettings.maxNodes),
       localMaxTokens: Number(nextSettings.localMaxTokens)
     };
@@ -435,14 +398,6 @@ namespace AT.options {
   }
 
   function wire(): void {
-    el('engine').addEventListener('change', () => {
-      const engine = selectedEngine();
-      el('endpoint').value = settings!.endpoints[engine.id] ?? engine.endpoint;
-      el('apiKeyField').hidden = !engine.supportsKey;
-      el('endpointField').hidden = engine.kind === 'local';
-      el('engineDocs').textContent = engine.docs;
-    });
-
     el('save').addEventListener('click', () => persist(collect()));
 
     el('reset').addEventListener('click', async () => {
@@ -465,9 +420,6 @@ namespace AT.options {
       setStatus(el('testStatus'), AT.i18n.msg('options_testing'), 'info');
       const response = (await AT.sendMessage({
         type: C.MSG.TEST_ENGINE,
-        engine: el('engine').value,
-        endpoint: el('endpoint').value,
-        apiKey: el('apiKey').value,
         target: el('targetLang').value
       })) as TestReply;
       if (!response?.ok) {

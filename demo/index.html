@@ -17,8 +17,8 @@
         <button id="probe" type="button">스타일·원문 검증</button>
         <label class="check"><input id="merge" type="checkbox" checked /> 인라인 문장 병합</label>
         <label class="field">
-          provider 시뮬레이션
-          <select id="provider">
+          모델 시뮬레이션
+          <select id="simulation">
             <option value="faithful">마커 보존</option>
             <option value="lossy">마커 유실 (폴백 확인)</option>
           </select>
@@ -98,7 +98,7 @@ await at.translateRoot(document.body);</code></pre>
       </article>
 
       <aside class="panel">
-        <h2>provider 요청</h2>
+        <h2>모델 요청</h2>
         <p class="hint">
           병합을 끄면 같은 문장이 조각으로 나뉘어 각각 요청됩니다. 마커는
           <code>⟦n⟧</code> 로 표시했습니다.

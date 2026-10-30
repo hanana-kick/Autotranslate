@@ -33,29 +33,6 @@
       </section>
 
       <section class="card">
-        <h2 data-i18n="options_provider"></h2>
-        <div class="grid">
-          <div class="field">
-            <label for="engine" data-i18n="options_engine"></label>
-            <select id="engine"></select>
-          </div>
-          <div class="field" id="endpointField">
-            <label for="endpoint" data-i18n="options_endpoint"></label>
-            <input type="url" id="endpoint" spellcheck="false" autocomplete="off" />
-          </div>
-          <div class="field" id="apiKeyField">
-            <label for="apiKey" data-i18n="options_apiKey"></label>
-            <input type="password" id="apiKey" spellcheck="false" autocomplete="off" />
-          </div>
-          <p class="hint" id="engineDocs"></p>
-          <div class="row">
-            <button id="testEngine" type="button" data-i18n="options_test"></button>
-            <p class="status" id="testStatus" role="status"></p>
-          </div>
-        </div>
-      </section>
-
-      <section class="card">
         <h2 data-i18n="options_local"></h2>
         <div class="grid">
           <p class="hint" id="localSupport" data-i18n="options_localHint"></p>
@@ -66,10 +43,6 @@
           <div class="field">
             <label for="localMaxTokens" data-i18n="options_localMaxTokens"></label>
             <input type="number" id="localMaxTokens" min="128" max="8192" step="128" />
-          </div>
-          <div class="field">
-            <label for="fallbackEngine" data-i18n="options_fallbackEngine"></label>
-            <select id="fallbackEngine"></select>
           </div>
           <p class="hint" id="localUsage"></p>
           <ul class="rules" id="modelList"></ul>
@@ -88,7 +61,9 @@
             <input type="file" id="modelFile" accept=".task,application/octet-stream" hidden />
             <button id="pickModel" type="button" class="secondary" data-i18n="options_pickFile"></button>
             <button id="prepareModel" type="button" class="secondary" data-i18n="options_prepare"></button>
+            <button id="testEngine" type="button" class="secondary" data-i18n="options_test"></button>
           </div>
+          <p class="status" id="testStatus" role="status"></p>
           <progress id="modelProgress" max="100" value="0" hidden></progress>
           <p class="status" id="modelStatus" role="status"></p>
         </div>
@@ -111,10 +86,6 @@
       <section class="card">
         <h2 data-i18n="options_limits"></h2>
         <div class="grid">
-          <div class="field">
-            <label for="batchChars" data-i18n="options_batchChars"></label>
-            <input type="number" id="batchChars" min="100" max="8000" step="100" />
-          </div>
           <div class="field">
             <label for="maxNodes" data-i18n="options_maxNodes"></label>
             <input type="number" id="maxNodes" min="10" max="5000" step="10" />

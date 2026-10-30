@@ -5,17 +5,6 @@
 namespace AT {
   export type Lang = { code: string; native: string };
 
-  export type EngineMeta = {
-    id: string;
-    label: string;
-    endpoint: string;
-    supportsKey: boolean;
-    maxChars: number;
-    docs: string;
-    /** 'local' engines run in this browser, so they have no endpoint. */
-    kind?: 'remote' | 'local';
-  };
-
   export type SiteRuleAction = 'always' | 'never';
 
   export type MessageTypes = {
@@ -55,20 +44,13 @@ namespace AT {
     DEFAULT_MAX_NODES: number;
     OBSERVER_BATCH_NODES: number;
     SENTENCE_MAX_CHARS: number;
-    LOCAL_BATCH_CHARS: number;
     OBSERVER_DEBOUNCE_MS: number;
-    PROVIDER_TIMEOUT_MS: number;
-    PROVIDER_RETRIES: number;
-    PROVIDER_CONCURRENCY: number;
     IGNORE_SELECTOR: string;
     MSG: MessageTypes;
     LANGS: Lang[];
     LANG_CODES: Set<string>;
     isSupportedLang: (code: string | null | undefined) => boolean;
     sameLanguage: (a: string | null | undefined, b: string | null | undefined) => boolean;
-    ENGINES: EngineMeta[];
-    getEngineMeta: (id: string) => EngineMeta | null;
-    ENGINE_LANG_ALIAS: Record<string, Record<string, string>>;
     RTL_LANGS: Record<string, true | undefined>;
     SITE_RULE_ACTIONS: readonly SiteRuleAction[];
   };
@@ -77,7 +59,8 @@ namespace AT {
     STORAGE_KEY: 'settings',
     BADGE_TEXT: '文A',
     BADGE_COLOR: '#1a73e8',
-    // Requests longer than this are split into several provider calls.
+    // One request to the model is packed by tokens; this is only the ceiling
+    // the DOM layer uses when it has to split a long page run.
     DEFAULT_BATCH_CHARS: 1200,
     // Hard ceiling on DOM text nodes touched per run; keeps huge feeds cheap.
     DEFAULT_MAX_NODES: 600,
@@ -87,14 +70,7 @@ namespace AT {
     // Latin tokens, well inside a sentence's worth of meaning. Only a text
     // longer than this pays for the extra round trip.
     SENTENCE_MAX_CHARS: 900,
-    // The on-device provider is billed in tokens, so one message may carry far
-    // more characters than a cloud provider would accept; the engine then packs
-    // them by counting tokens.
-    LOCAL_BATCH_CHARS: 4000,
     OBSERVER_DEBOUNCE_MS: 300,
-    PROVIDER_TIMEOUT_MS: 15000,
-    PROVIDER_RETRIES: 1,
-    PROVIDER_CONCURRENCY: 4,
     // Text nodes inside any of these are left untouched.
     IGNORE_SELECTOR: [
       'script',
@@ -171,39 +147,6 @@ namespace AT {
     LANG_CODES: new Set<string>(),
     isSupportedLang,
     sameLanguage,
-    ENGINES: [
-      {
-        id: 'google',
-        label: 'Google Translate (unofficial endpoint)',
-        endpoint: 'https://translate.googleapis.com/translate_a/single',
-        supportsKey: false,
-        maxChars: 1200,
-        docs: 'Keyless but unofficial: subject to rate limits and terms changes.'
-      },
-      {
-        id: 'libretranslate',
-        label: 'LibreTranslate',
-        endpoint: 'http://127.0.0.1:5000/translate',
-        supportsKey: true,
-        maxChars: 4000,
-        docs: 'Stock LibreTranslate listens on 127.0.0.1:5000; use your own instance or key if required.'
-      },
-      {
-        id: 'local',
-        label: 'On-device TranslateGemma (offline)',
-        endpoint: '',
-        supportsKey: false,
-        maxChars: 1500,
-        kind: 'local',
-        docs: 'Nothing is fetched while translating: download the model once on the options page. Needs Chrome with WebGPU.'
-      }
-    ],
-    getEngineMeta,
-    // Provider-specific spellings of the codes in LANGS.
-    ENGINE_LANG_ALIAS: {
-      google: { 'zh-CN': 'zh-CN', 'zh-TW': 'zh-TW', pt: 'pt-BR' },
-      libretranslate: { 'zh-CN': 'zh', 'zh-TW': 'zh', pt: 'pt' }
-    },
     // Used only to pick a text direction for the selection card.
     RTL_LANGS: { ar: true, fa: true, he: true, ur: true },
     SITE_RULE_ACTIONS: ['always', 'never']
@@ -223,10 +166,6 @@ namespace AT {
     if (!left || !right) return false;
     if (left === right) return true;
     return !right.includes('-') && left.split('-')[0] === right;
-  }
-
-  function getEngineMeta(id: string): EngineMeta | null {
-    return C.ENGINES.find((engine) => engine.id === id) ?? null;
   }
 
   // Cheap logging shared by every context; engines and background call it

@@ -342,15 +342,6 @@ test('only https downloads are offered', () => {
   assert.equal(local.normalizeDownloadUrl(undefined), null);
 });
 
-test('the on-device engine is declared without an endpoint', () => {
-  const meta = AT.C.getEngineMeta('local');
-  assert.ok(meta, 'the engine must be selectable');
-  assert.equal(meta.kind, 'local');
-  assert.equal(meta.endpoint, '');
-  assert.equal(meta.supportsKey, false);
-  assert.equal(meta.maxChars, 1500);
-});
-
 test('no two message types collide', () => {
   const values = Object.values(AT.C.MSG);
   assert.equal(new Set(values).size, values.length, 'a duplicate type would let the wrong context answer');
