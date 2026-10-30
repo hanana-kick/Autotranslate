@@ -670,12 +670,16 @@ test('junk in storage renders a coerced form, never a half-filled one', async ()
   });
   const { AT, field } = env;
 
-  assert.equal(field('engine').value, 'google', 'an unknown engine falls back to the first provider');
+  assert.equal(field('engine').value, 'local', 'an unknown engine falls back to the default engine');
   assert.equal(field('targetLang').value, 'en');
   assert.equal(field('sourceLang').value, 'de');
   assert.equal(field('apiKey').value, 'padded');
   assert.equal(field('batchChars').value, String(AT.C.DEFAULT_BATCH_CHARS), 'a non-numeric limit falls back');
   assert.equal(field('maxNodes').value, String(AT.C.DEFAULT_MAX_NODES));
+  // The endpoint field follows the selected engine; `local` has none, so ask
+  // the select for Google to see the rejected value replaced by the default.
+  field('engine').value = 'google';
+  await fire(field('engine'), 'change');
   assert.equal(field('endpoint').value, AT.C.getEngineMeta('google')!.endpoint, 'a rejected endpoint falls back');
   assert.equal(field('enabled').checked, true);
   assert.equal(field('showBadge').checked, true);
@@ -689,18 +693,22 @@ test('junk in storage renders a coerced form, never a half-filled one', async ()
 
 test('an empty store boots the defaults and the empty rule row', async () => {
   const env = await boot();
-  const { field } = env;
+  const { AT, field } = env;
 
-  assert.equal(field('engine').value, 'google');
-  assert.equal(field('endpoint').value, 'https://translate.googleapis.com/translate_a/single');
+  assert.equal(field('engine').value, 'local', 'a fresh install translates on-device');
+  assert.equal(field('endpoint').value, '', 'the local engine has no endpoint');
   assert.equal(field('apiKey').value, '');
   assert.equal(field('targetLang').value, 'en', 'the default target is the UI language');
   assert.equal(field('sourceLang').value, 'auto');
   assert.equal(field('batchChars').value, '1200');
   assert.equal(field('maxNodes').value, '600');
   assert.deepEqual([field('enabled').checked, field('autoDetect').checked, field('showBadge').checked, field('debug').checked], [true, true, true, false]);
-  assert.equal(field('apiKeyField').hidden, true, 'google needs no key');
-  assert.equal(field('engineDocs').textContent, 'Keyless but unofficial: subject to rate limits and terms changes.');
+  assert.equal(field('apiKeyField').hidden, true, 'the local engine needs no key');
+  assert.equal(
+    field('engineDocs').textContent,
+    AT.C.getEngineMeta('local')!.docs,
+    'the docs under the select belong to the engine that is selected'
+  );
 
   const list = field('ruleList');
   assert.equal(list.children.length, 1);
@@ -1078,7 +1086,7 @@ test('reset writes the defaults and repaints the form', async () => {
 
   assert.equal(env.writes.length, 1, 'reset is one write');
   const saved = savedSettings(env);
-  assert.equal(saved.engine, 'google');
+  assert.equal(saved.engine, 'local', 'a reset goes back to the on-device engine');
   assert.equal(saved.apiKey, '');
   assert.equal(saved.targetLang, 'ja', 'the default target follows the UI language');
   assert.equal(saved.sourceLang, 'auto');
@@ -1087,7 +1095,7 @@ test('reset writes the defaults and repaints the form', async () => {
   assert.deepEqual(saved.siteRules, []);
   assert.deepEqual(Object.keys(saved.endpoints as ATNamespace).sort(), ['google', 'libretranslate', 'local']);
   assert.deepEqual([field('enabled').checked, field('autoDetect').checked, field('showBadge').checked, field('debug').checked], [true, true, true, false]);
-  assert.equal(field('engine').value, 'google');
+  assert.equal(field('engine').value, 'local');
   assert.equal(field('apiKey').value, '');
   assert.equal(field('apiKeyField').hidden, true, 'the key field is hidden again with the default engine');
   assert.equal(field('batchChars').value, '1200');

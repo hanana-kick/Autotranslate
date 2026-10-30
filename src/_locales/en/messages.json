@@ -24,6 +24,7 @@
   "popup_options": { "message": "Options" },
   "popup_idle": { "message": "Not translated yet." },
   "popup_localUnverified": { "message": "This language pair has not been checked with the on-device model." },
+  "popup_localNoModel": { "message": "No model yet — download one in Options" },
   "popup_translated": {
     "message": "Translated $1$ text segments.",
     "placeholders": { "1": { "content": "$1" } }

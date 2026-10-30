@@ -70,7 +70,9 @@ namespace AT.settings {
       autoDetect: true,
       targetLang: uiLang(),
       sourceLang: 'auto',
-      engine: 'google',
+      // The on-device engine is the product: a fresh install translates with
+      // the local model, not by sending the page to a provider.
+      engine: 'local',
       endpoints: Object.fromEntries(C.ENGINES.map((e) => [e.id, e.endpoint])),
       apiKey: '',
       localModelId: '',
@@ -121,15 +123,22 @@ namespace AT.settings {
   // A fallback must be a real remote engine: falling back to 'local' would
   // loop, and an unknown id would only bury the failure the user should see.
   function pickFallback(value: unknown, fallback: string): string {
-    if (value === '') return '';
-    const meta = typeof value === 'string' ? C.getEngineMeta(value) : null;
-    return meta && meta.kind !== 'local' ? meta.id : fallback;
+    if (value === undefined) return fallback;
+    // Anything else was asked for explicitly, so an unusable answer means "no
+    // fallback": keeping the previous provider would send a page to the cloud
+    // because of a value the user never chose.
+    const meta = typeof value === 'string' && value !== '' ? C.getEngineMeta(value) : null;
+    return meta && meta.kind !== 'local' ? meta.id : '';
   }
 
   // Coerces anything (including old or hand-edited blobs) into a full, known
   // settings object. Unknown keys are dropped, bad values fall back.
-  export function normalize(raw: unknown): Settings {
-    const base = defaults();
+  /**
+   * `base` is what an unusable value falls back to: the defaults for storage
+   * read from scratch, the settings already in hand for a patch, so a bad field
+   * in one save cannot silently reset the engine the user chose.
+   */
+  export function normalize(raw: unknown, base: Settings = defaults()): Settings {
     // The blob is whatever storage held; the all-unknown shape forces every
     // field to be narrowed before it is used.
     const input: RawSettings = raw && typeof raw === 'object' ? (raw as RawSettings) : {};
@@ -205,7 +214,7 @@ namespace AT.settings {
 
   export async function save(patch: Partial<Settings>): Promise<Settings> {
     const current = await load();
-    const next = normalize({ ...current, ...patch });
+    const next = normalize({ ...current, ...patch }, current);
     await AT.storage!.local.set({ [C.STORAGE_KEY]: next });
     AT.debug = next.debug;
     return next;

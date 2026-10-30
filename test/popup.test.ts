@@ -366,7 +366,7 @@ test('a refused get-state leaves the fields untouched and names the error', asyn
 
 test('the on-device line names the resident model when the engine is local', async () => {
   const h = environment({
-    stored: { enabled: true, engine: 'local', targetLang: 'ko' },
+    stored: { enabled: true, engine: 'local', targetLang: 'ko', localModelId: 'gemma-task' },
     state: stateOf({
       local: { supported: true, status: { state: 'ready', modelName: 'TranslateGemma 4B', loadedBytes: 4096, loadMs: 1200 } }
     })
@@ -381,6 +381,18 @@ test('the on-device line names the resident model when the engine is local', asy
   });
   // The regular status line keeps reporting the tab, not the model.
   assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
+});
+
+test('the default engine without a model points at Options instead of claiming readiness', async () => {
+  const h = environment({
+    stored: { enabled: true, engine: 'local', targetLang: 'ko' },
+    state: stateOf({ local: { supported: true, status: { state: 'unloaded' } } })
+  });
+  await h.boot();
+
+  // The engine is the default now, so the first thing a new user sees has to be
+  // the one step that makes it work.
+  assert.deepEqual(h.localStatus(), { text: 'popup_localNoModel', kind: 'warn', hidden: false });
 });
 
 test('a browser that cannot run the model still shows the line, as a warning', async () => {
@@ -405,7 +417,7 @@ test('a remote engine keeps the on-device line hidden and blank', async () => {
 
 test('an unchecked language pair says so instead of looking fine', async () => {
   const h = environment({
-    stored: { enabled: true, engine: 'local', sourceLang: 'de', targetLang: 'ko' },
+    stored: { enabled: true, engine: 'local', sourceLang: 'de', targetLang: 'ko', localModelId: 'gemma-task' },
     state: stateOf({
       local: { supported: true, status: { state: 'ready', modelName: 'TranslateGemma 4B', loadedBytes: 4096, loadMs: 1200 } }
     })

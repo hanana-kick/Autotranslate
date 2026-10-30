@@ -346,7 +346,7 @@ independently.
 | --- | --- | --- |
 | `google` | `https://translate.googleapis.com/translate_a/single` | keyless **unofficial** endpoint: rate limits and payload shape can change without notice. Texts are joined with newlines per request and split back; if the split cannot be reproduced, that chunk is re-run one text per request instead of guessing. |
 | `libretranslate` | `http://127.0.0.1:5000/translate` | stock LibreTranslate on your machine; any instance that answers `POST /translate` with `{q: [...]} -> [{translatedText}]` works. Optional `api_key`. |
-| `local` | none — runs in this browser | quantised TranslateGemma 4B through `@mediapipe/tasks-genai`. No endpoint to validate, no key, no request. Chunked by **tokens** instead of characters and never retried: a repeat would spend another minute on the same model. Runs in either browser, see below. |
+| `local` *(default)* | none — runs in this browser | quantised TranslateGemma 4B through `@mediapipe/tasks-genai`. No endpoint to validate, no key, no request. Chunked by **tokens** instead of characters and never retried: a repeat would spend another minute on the same model. Runs in either browser, see below. |
 
 Rules that apply to the two cloud providers: endpoints must be `https` (plain `http` only for
 `127.0.0.1`/`localhost`), requests are chunked under the provider's character budget,
@@ -366,8 +366,14 @@ suites stub `fetch` with recorded response shapes (including HTML rate-limit pag
 
 ## On-device translation
 
-Selecting **On-device TranslateGemma (offline)** translates a page without opening a
-socket. It is a normal engine entry (`C.ENGINES`, `kind: 'local'`), so batching, dedup,
+**The default.** A fresh install translates with the on-device engine: nothing is fetched
+while translating, and no page text leaves the browser. The model itself is a one-time
+download in Options (3.6 GiB, see below); until it is there the popup says so instead of
+quietly switching to a provider. Google and LibreTranslate stay in the list as an explicit
+choice, and `fallbackEngine` starts empty, so picking the offline engine can never fall back
+to the cloud on its own.
+
+The engine translates a page without opening a socket. It is a normal engine entry (`C.ENGINES`, `kind: 'local'`), so batching, dedup,
 per-tab state, the badge and the popup behave exactly as they do for a cloud provider; only
 the answer's origin changes.
 

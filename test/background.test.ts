@@ -385,7 +385,7 @@ test('the event page boots without importScripts (Firefox)', () => {
 test('install seeds settings and registers the context menu', async () => {
   const { events, recorded } = environment();
   await fire(events.installed, { reason: 'install' });
-  assert.equal(recorded.storage.settings.engine, 'google');
+  assert.equal(recorded.storage.settings.engine, 'local', 'an install starts on the on-device engine');
   assert.deepEqual(recorded.storage.settings.siteRules, []);
   assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS);
   for (const item of recorded.menus) {
@@ -434,7 +434,7 @@ test('navigation injects the content script and asks it to translate', async () 
   assert.equal(translate!.message.decision.action, 'detect', 'no rule means language detection');
   assert.equal(translate!.message.settings.apiKey, undefined, 'content never sees the key');
   assert.equal(translate!.message.settings.endpoints, undefined);
-  assert.equal(translate!.message.settings.engine, 'google');
+  assert.equal(translate!.message.settings.engine, 'local', 'a fresh install translates on-device');
   assert.deepEqual(types(), ['at/content-ping', 'at/content-translate']);
   assert.ok(
     recorded.badges.some((entry) => entry.text === AT.C.BADGE_TEXT),
@@ -841,6 +841,9 @@ test('the status the popup reads is the one the host last reported', async () =>
     tab,
     withOffscreen: true,
     resident: true,
+    // The page is on a cloud engine, so reading the tab state must not go and
+    // probe the host: the pushed state is the only source.
+    settings: { engine: 'google' },
     hostReplies: { 'at/local-status': () => ({ ok: true, status: readyStatus }) }
   });
 

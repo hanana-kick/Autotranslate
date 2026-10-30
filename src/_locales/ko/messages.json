@@ -24,6 +24,7 @@
   "popup_options": { "message": "설정" },
   "popup_idle": { "message": "아직 번역되지 않았습니다." },
   "popup_localUnverified": { "message": "이 언어 쌍은 온디바이스 모델로 검증하지 않았습니다." },
+  "popup_localNoModel": { "message": "모델이 없습니다 — Options에서 내려받으세요" },
   "popup_translated": {
     "message": "$1$개 구간을 번역했습니다.",
     "placeholders": { "1": { "content": "$1" } }

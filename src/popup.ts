@@ -140,6 +140,13 @@ namespace AT.popup {
     );
     const verified = AT.local.isVerifiedPair(view.settings!.sourceLang, view.settings!.targetLang);
     node.hidden = false;
+    // The engine is the default, so the first thing a new user needs is the one
+    // step that makes it work: the model is theirs to download, in Options.
+    if (supported && !view.settings!.localModelId) {
+      node.dataset.kind = 'warn';
+      node.textContent = AT.i18n.msg('popup_localNoModel');
+      return;
+    }
     // A model is only known-good on the pairs it was checked against; admitting
     // that is cheaper than letting a poor answer look like an extension bug.
     node.dataset.kind = !supported || !verified ? 'warn' : 'info';

@@ -12,7 +12,7 @@ test('defaults are a complete, normalised object', () => {
   assert.equal(base.autoDetect, true);
   assert.equal(base.targetLang, 'en');
   assert.equal(base.sourceLang, 'auto');
-  assert.equal(base.engine, 'google');
+  assert.equal(base.engine, 'local', 'a fresh install translates on-device, not through a provider');
   assert.equal(base.apiKey, '');
   assert.equal(base.localModelId, '', 'nothing is downloaded out of the box');
   assert.equal(base.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS, 'the budget starts at the shared default');
@@ -66,7 +66,7 @@ test('junk values fall back instead of throwing', () => {
   assert.equal(coerced.autoDetect, false);
   assert.equal(coerced.targetLang, 'en');
   assert.equal(coerced.sourceLang, 'ko');
-  assert.equal(coerced.engine, 'google');
+  assert.equal(coerced.engine, 'local', 'an unknown id falls back to the default engine');
   assert.equal(coerced.apiKey, 'secret');
   assert.equal(coerced.batchChars, 8000);
   assert.equal(coerced.maxNodes, 10);
@@ -222,8 +222,8 @@ test('storage round-trips through normalisation', async () => {
   assert.equal((await settings.load()).localModelId, 'model-a');
 
   const reset = await settings.reset();
-  assert.equal(reset.engine, 'google');
-  assert.equal(store.settings.engine, 'google');
+  assert.equal(reset.engine, 'local', 'a reset goes back to the on-device engine');
+  assert.equal(store.settings.engine, 'local');
   assert.equal(reset.localModelId, '', 'a reset stops pointing at a model the user may have deleted');
   assert.equal(reset.fallbackEngine, '', 'a reset does not keep a provider as the offline fallback');
 });
