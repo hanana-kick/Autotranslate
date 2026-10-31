@@ -1,0 +1,56 @@
+name: Native extension UI configuration
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/native-ui-context.yml']
+permissions:
+  contents: read
+jobs:
+  context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund && npm run build:chrome
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npx playwright install --with-deps chromium
+      - name: Configure only the test driver to operate the actual context input
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          let source=fs.readFileSync('test/native-extension/real-extension.mjs','utf8');
+          const a="assert.equal(await options.locator('#localMaxTokens').inputValue(), '1024');";
+          assert.ok(source.includes(a));
+          source=source.replace(a, "await options.locator('#localMaxTokens').fill('256'); assert.equal(await options.locator('#localMaxTokens').inputValue(), '256'); summary.configuration.maxTokens=256;");
+          const b="await options.close(); options = null;";
+          assert.ok(source.includes(b));
+          source=source.replace(b, "await options.reload(); await options.waitForFunction(() => document.querySelector('#localMaxTokens').value === '256'); " + b);
+          fs.writeFileSync('.native-context-run.mjs',source);
+          JS
+      - name: Run unchanged installed extension and original task model
+        env:
+          HEADED: '1'
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-extension
+          (while true; do date -u; free -m; ps -eo pid,ppid,comm,pcpu,rss,stat --sort=-pcpu | head -18; sleep 10; done) > test-results/native-extension/resources.txt &
+          monitor=$!
+          trap 'kill "$monitor" 2>/dev/null || true' EXIT
+          xvfb-run -a node .native-context-run.mjs 2>&1 | tee test-results/native-extension/execution.log
+      - name: Verify original application bytes
+        if: always()
+        run: git diff --exit-code -- src scripts package.json package-lock.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-ui-context256-${{ github.run_id }}
+          path: test-results/native-extension/
+          retention-days: 7
