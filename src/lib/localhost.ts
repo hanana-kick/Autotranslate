@@ -554,7 +554,9 @@ namespace AT.localhost {
     // Context only travels in the numbered batch prompt: measured, the
     // single-text shape answers with the context line translated instead of the
     // text, and the auto shape has no room for metadata at all.
-    const batch = L.buildBatchPrompt(source, target, texts, texts.length > 1 ? hint : null);
+    const batch = state.softwareRendering && texts.length === 1
+  ? L.wrapChatPrompt('Translate ' + (source ? AT.gemma.nameOf(source) + ' (' + source + ')' : 'the text') + ' to ' + AT.gemma.nameOf(target) + ' (' + target + '). Output only the translation.\n\n' + texts[0])
+  : L.buildBatchPrompt(source, target, texts, texts.length > 1 ? hint : null);
     if (!fits(batch, texts)) {
       if (texts.length === 1) {
         fail('context-overflow', 'a single translation segment exceeds the model context budget; split it or raise the token limit');

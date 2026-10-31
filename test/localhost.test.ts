@@ -134,3 +134,27 @@ test('host: hardware keeps the locked SDK default GPU device configuration', asy
   assert.equal(deviceCalls.length, 0);
   assert.equal(instances[0]!.settings.baseOptions.gpuOptions, undefined);
 });
+
+test('host: software single-input prompt preserves source, target and every input character', async () => {
+  const { AT, request, instances } = host({ software: true });
+  const text = 'line one\n<at0>リンク</at0> & line two';
+  await request({ source: 'ja', target: 'ko', texts: [text] });
+  assert.equal(instances[0]!.prompts.at(-1), AT.local.wrapChatPrompt(
+    'Translate Japanese (ja) to Korean (ko). Output only the translation.\n\n' + text));
+});
+test('host: unknown source remains unknown in the software prompt', async () => {
+  const { AT, request, instances } = host({ software: true });
+  await request({ source: 'auto', target: 'ko', texts: ['Hello.'] });
+  assert.equal(instances[0]!.prompts.at(-1), AT.local.wrapChatPrompt(
+    'Translate the text to Korean (ko). Output only the translation.\n\nHello.'));
+});
+test('host: hardware keeps the original trained translation prompt', async () => {
+  const { AT, request, instances } = host();
+  await request();
+  assert.equal(instances[0]!.prompts.at(-1), AT.local.buildBatchPrompt('en', 'ko', ['Hello world'], null));
+});
+test('host: software prompt still uses the real token-budget guard', async () => {
+  const { request, instances } = host({ software: true, oversized: true });
+  await assert.rejects(() => request({ texts: ['oversized input'] }), /context|budget/i);
+  assert.equal(instances[0]!.prompts.length, 1, 'only warmup, no overflowing generation');
+});

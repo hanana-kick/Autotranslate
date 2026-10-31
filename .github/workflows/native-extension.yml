@@ -2,7 +2,17 @@ name: Real installed extension
 
 on:
   workflow_dispatch:
+    inputs:
+      backend:
+        description: Actual browser backend (software is slower)
+        type: choice
+        options: [hardware, software]
+        default: hardware
   workflow_call:
+    inputs:
+      backend:
+        type: string
+        default: hardware
     secrets:
       HF_TOKEN:
         required: true
@@ -20,18 +30,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: native-extension-${{ github.workflow }}-${{ github.ref }}
+  group: native-extension-${{ github.workflow }}-${{ github.ref }}-${{ inputs.backend || 'hardware' }}
   cancel-in-progress: false
 
 jobs:
   original-runtime:
-    name: Original extension / Metal / fresh profile ${{ matrix.repetition }}
+    name: Original extension / ${{ inputs.backend || 'hardware' }} / fresh profile ${{ matrix.repetition }}
     strategy:
       fail-fast: false
       matrix:
-        repetition: [1, 2]
-    runs-on: macos-latest
-    timeout-minutes: 20
+        repetition: ${{ fromJSON(inputs.backend == 'software' && '[1]' || '[1,2]') }}
+    runs-on: ${{ inputs.backend == 'software' && 'ubuntu-latest' || 'macos-latest' }}
+    timeout-minutes: ${{ inputs.backend == 'software' && 45 || 20 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,8 +64,12 @@ jobs:
           set -euo pipefail
           mkdir -p test-results/native-extension
           node --check test/native-extension/real-extension.mjs
-          node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
-      - name: Verify production files remained unchanged
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
+          else
+            node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
+          fi
+      - name: Verify production files remained unchanged during testing
         if: always()
         run: git diff --exit-code -- src package.json package-lock.json scripts
       - name: Keep tested package and reject credential-bearing evidence
