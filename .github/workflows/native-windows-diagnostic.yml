@@ -1,4 +1,4 @@
-name: Native extension Windows diagnosis
+name: Native extension observed diagnosis
 on:
   push:
     branches: [fix/review-hardening-20261031]
@@ -6,8 +6,12 @@ on:
 permissions:
   contents: read
 jobs:
-  windows:
-    runs-on: windows-latest
+  observed:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     defaults:
       run:
@@ -21,33 +25,25 @@ jobs:
           node-version: '24'
       - run: npm ci --no-audit --no-fund && npm run build:chrome
       - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
-      - run: npx playwright install chromium
-      - name: Windows launch options only - production bundle remains unchanged
-        run: |
-          node --input-type=module <<'JS'
-          import fs from 'node:fs';
-          let script=fs.readFileSync('test/native-extension/real-extension.mjs','utf8');
-          const from="'--use-angle=swiftshader',\n      '--enable-unsafe-webgpu', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage'";
-          if(!script.includes(from))throw Error('test launch configuration changed');
-          script=script.replace(from,"'--use-angle=d3d11-warp', '--enable-unsafe-webgpu'");
-          script=script.replace("{ vendor: a.info?.vendor, architecture: a.info?.architecture }","{ vendor: a.info?.vendor, architecture: a.info?.architecture, description: a.info?.description, features: [...a.features] }");
-          script=script.replace("await welcome.locator('#targetLang').selectOption('ko');","console.log(JSON.stringify({actualAdapter:summary.adapter})); assert.ok(summary.adapter, 'WebGPU must be provided by the actual browser'); await welcome.locator('#targetLang').selectOption('ko');");
-          fs.writeFileSync('.native-windows-diagnostic.mjs',script);
-          JS
-      - name: Actual installed extension - unchanged SDK and model
+      - run: npx playwright install --with-deps chromium
+      - name: Actual installed extension with read-only worker diagnostics
         env:
           HEADED: '1'
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p test-results/native-extension
-          node .native-windows-diagnostic.mjs 2>&1 | tee test-results/native-extension/execution.log
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a node test/diagnostics/run-native-diagnostic.mjs 2>&1 | tee test-results/native-extension/execution.log
+          else
+            node test/diagnostics/run-native-diagnostic.mjs 2>&1 | tee test-results/native-extension/execution.log
+          fi
       - name: Production files unchanged
         if: always()
         run: git diff --exit-code -- src scripts package.json package-lock.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: native-windows-${{ github.run_id }}
+          name: native-observed-${{ matrix.os }}-${{ github.run_id }}
           path: test-results/native-extension/
           retention-days: 7
