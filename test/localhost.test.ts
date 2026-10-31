@@ -19,7 +19,17 @@ test.afterEach(() => {
 
 function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; oversized?: boolean; empty?: boolean; software?: boolean; delayed?: boolean } = {}) {
   resetGlobals();
-  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { gpu: { requestAdapter: async () => (options.software ? { info: { architecture: 'swiftshader' } } : {}) } } });
+  const deviceCalls: ATNamespace[] = [], devices: ATNamespace[] = [];
+  const softwareAdapter = { info: { architecture: 'swiftshader' },
+    features: new Set(['subgroups']),
+    limits: { maxBufferSize: 1073741824, maxStorageBufferBindingSize: 1073741824, maxStorageBuffersPerShaderStage: 32 },
+    async requestDevice(options: ATNamespace) {
+      deviceCalls.push(options);
+      const device = { destroyed: false, destroy() { this.destroyed = true; } };
+      devices.push(device); return device;
+    }
+  };
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { gpu: { requestAdapter: async () => (options.software ? softwareAdapter : {}) } } });
   const AT = load('lib/constants.js', 'lib/gemma.js', 'lib/local.js', 'lib/modelstore.js', 'lib/localhost.js');
   current = AT;
   const instances: ATNamespace[] = [];
@@ -57,7 +67,7 @@ function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; 
   AT.localhost.install('background', () => {});
   const request = (over: ATNamespace = {}) => AT.localhost.handle({ type: AT.C.MSG.LOCAL_TRANSLATE,
     modelId: 'fixture-model', source: 'en', target: 'ko', maxTokens: 1024, texts: ['Hello world'], ...over });
-  return { AT, instances, request };
+  return { AT, instances, request, deviceCalls, devices };
 }
 
 test('host: changing the context budget recreates the same model with matching options', async () => {
@@ -104,4 +114,23 @@ test('host: real software-adapter classification selects a bounded longer genera
   AT.local.IDLE_UNLOAD_MS = 15;
   assert.deepEqual((await request()).translations, ['검증된 응답']);
   assert.equal((await AT.localhost.status()).softwareRendering, true);
+});
+
+
+test('host: software devices retain actual limits but do not enable subgroup kernels', async () => {
+  const { AT, request, instances, deviceCalls, devices } = host({ software: true });
+  await request();
+  assert.equal(deviceCalls.length, 1);
+  assert.deepEqual(deviceCalls[0]!.requiredFeatures, []);
+  assert.equal(deviceCalls[0]!.requiredLimits.maxBufferSize, 1073741824);
+  assert.equal(instances[0]!.settings.baseOptions.gpuOptions.device, devices[0]);
+  AT.localhost.unload('test-device-lifetime');
+  assert.equal(devices[0]!.destroyed, true);
+});
+
+test('host: hardware keeps the locked SDK default GPU device configuration', async () => {
+  const { request, instances, deviceCalls } = host();
+  await request();
+  assert.equal(deviceCalls.length, 0);
+  assert.equal(instances[0]!.settings.baseOptions.gpuOptions, undefined);
 });

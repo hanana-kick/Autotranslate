@@ -80,6 +80,15 @@ namespace AT.localhost {
   let module: GenaiModule | null = null;
   let fileset: WasmFileset | null = null;
   let llm: LlmInstance | null = null;
+  type GpuDevice = { destroy: () => void };
+  type GpuAdapter = {
+    isFallbackAdapter?: boolean;
+    info?: { architecture?: string; description?: string };
+    features: { has: (feature: string) => boolean };
+    limits: { maxBufferSize: number; maxStorageBufferBindingSize: number; maxStorageBuffersPerShaderStage: number };
+    requestDevice: (options: Record<string, unknown>) => Promise<GpuDevice>;
+  };
+  let ownedDevice: GpuDevice | null = null;
   let loadedId: string | null = null;
   let loadedMaxTokens = 0;
   let loadedBytes = 0;
@@ -282,6 +291,8 @@ namespace AT.localhost {
       }
     }
     llm = null;
+    ownedDevice?.destroy();
+    ownedDevice = null;
     loadedId = null;
     loadedMaxTokens = 0;
     loadedBytes = 0;
@@ -352,6 +363,33 @@ namespace AT.localhost {
     if (!answer.trim()) throw new Error('model warmup returned an empty answer');
   }
 
+  /** Software WebGPU uses portable kernels rather than GPU subgroup kernels.
+   * The SDK and model are unchanged; this is its public gpuOptions.device API. */
+  async function softwareGpuOptions(): Promise<Record<string, unknown>> {
+    if (!state.softwareRendering) return {};
+    const gpu = (globalThis.navigator as unknown as {
+      gpu: { requestAdapter: (options: Record<string, unknown>) => Promise<GpuAdapter | null> }
+    }).gpu;
+    const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) fail('no-webgpu', 'the inference adapter is no longer available');
+    const software = adapter.isFallbackAdapter === true ||
+      /swiftshader|llvmpipe|lavapipe/i.test(
+        String(adapter.info?.architecture ?? '') + ' ' + String(adapter.info?.description ?? ''));
+    state.softwareRendering = software;
+    if (!software) return {}; // Keep the original SDK's hardware selection.
+    const requiredFeatures = adapter.features.has('shader-f16') ? ['shader-f16'] : [];
+    ownedDevice = await adapter.requestDevice({
+      requiredFeatures,
+      requiredLimits: {
+        maxBufferSize: adapter.limits.maxBufferSize,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage
+      }
+    });
+    AT.log('software WebGPU device enabled features', requiredFeatures);
+    return { gpuOptions: { device: ownedDevice, adapterInfo: adapter.info } };
+  }
+
   async function instantiate(record: AT.modelstore.ModelRecord, maxTokens: number): Promise<LlmInstance> {
     const active = module as GenaiModule;
     const assets = fileset as WasmFileset;
@@ -372,7 +410,7 @@ namespace AT.localhost {
     setPhase('model-create');
     return await active.LlmInference.createFromOptions(
       assets,
-      options({ modelAssetBuffer: blob.stream().getReader() })
+      options({ modelAssetBuffer: blob.stream().getReader(), ...await softwareGpuOptions() })
     );
   }
 
