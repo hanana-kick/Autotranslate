@@ -174,3 +174,11 @@ test('host: a streamed control token is rejected before a hanging generation fin
   const { request } = host({ streamCorrupt: true });
   await assert.rejects(request, /control-token/);
 });
+
+
+test('host: greedy sampling uses one candidate with finite temperature scaling', async () => {
+  const { request, instances } = host();
+  await request();
+  assert.equal(instances[0]!.settings.topK, 1);
+  assert.equal(instances[0]!.settings.temperature, 1);
+});

@@ -53,8 +53,8 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npm run build:chrome
-      - name: Install pinned browser test driver
-        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - name: Install pinned current browser test driver
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
       - run: npx playwright install --with-deps chromium
       - name: Actual installed extension - static and dynamic DOM, original SDK and model
         env:

@@ -437,7 +437,6 @@ namespace AT.dom {
               const reply = await ask([marked]);
               if (cancelled() || !items.every(owns)) continue;
               pieces = splitRun(reply[0] ?? '', items.length);
-              if (pieces) remember(key, pieces);
             }
             if (pieces) {
               // Validate the entire unit before writing any part of it.
@@ -446,6 +445,7 @@ namespace AT.dom {
                   const issue = AT.outputIssue(items[index]!.source, pieces[index]!);
                   if (issue) throw Object.assign(new Error(issue), { reason: 'invalid-output' });
                 }
+                remember(key, pieces);
                 items.forEach((item, index) => write(item, pieces![index]!));
                 mergedRuns++;
               }

@@ -256,3 +256,39 @@ check('identical inline fallback units reuse the verified aligned cache', async 
   assert.equal(result.calls.length, 4, 'one failed alignment plus three pieces; no second alignment failure');
   assert.deepEqual(result.links, ['안내서', '안내서']);
 });
+
+check('unrelated successful mutations cannot clear unresolved segment failures', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture'); root.innerHTML = '<h1>Good title</h1><p id="bad">Broken text</p><section id="later"></section>';
+    let rejectBad = true;
+    const pipeline = AT.pipeline.create({ doc: document, settings: () => ({ maxNodes: 600 }), translate: async ({ texts }) => {
+      if (rejectBad && texts.some(s => s.includes('Broken'))) throw new Error('recorded provider failure');
+      return texts.map(s => '번역 ' + s);
+    } });
+    const first = await pipeline.translate();
+    const later = root.querySelector('#later'); later.innerHTML = '<p>New valid content</p>';
+    const second = await pipeline.refresh(later);
+    rejectBad = false;
+    const retry = await pipeline.refresh(root.querySelector('#bad'));
+    return { first, second, retry };
+  });
+  assert.equal(result.first.failed, 1);
+  assert.equal(result.second.failed, 1);
+  assert.match(result.second.error, /recorded provider failure/);
+  assert.equal(result.retry.failed, 0);
+  assert.equal(result.retry.error, null);
+});
+
+check('invalid aligned pieces are rejected atomically before caching', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture'); root.innerHTML = '<p>The &lt;pad&gt; token <a href="/guide">guide</a></p>';
+    const original = root.innerHTML;
+    const translator = AT.dom.createTranslator({ doc: document, translate: async () => ['토큰 \uE0001\uE001<pad> 안내서'] });
+    let failed = false; try { await translator.translateRoot(root); } catch { failed = true; }
+    return { failed, unchanged: original === root.innerHTML, ...translator.stats() };
+  });
+  assert.equal(result.failed, true);
+  assert.equal(result.unchanged, true);
+  assert.equal(result.cached, 0);
+  assert.equal(result.translated, 0);
+});

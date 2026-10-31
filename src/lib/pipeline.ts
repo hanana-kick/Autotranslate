@@ -163,6 +163,8 @@ namespace AT.pipeline {
     const viewportHeight = request.viewportHeight ?? (() => globalThis.innerHeight || 800);
 
     const done = new Set<Text>();
+    // A successful unrelated mutation must not erase an earlier segment failure.
+    const failures = new Map<Text, { value: string | null; error: string }>();
     let generation = 0;
     /** A pass owns the translator's run table: two of them must not interleave. */
     let passes: Promise<unknown> = Promise.resolve();
@@ -213,11 +215,15 @@ namespace AT.pipeline {
       const dom = executor();
       const cancelled = () => epoch !== generation || request.shouldAbort?.() === true;
       const empty = (): Result => ({ requested: 0, translated: dom.stats().translated, runs: 0,
-        batches: 0, failed: 0, error: null, processedNodes: 0, hasMore: false });
+        batches: 0, failed: failures.size, error: failures.values().next().value?.error ?? null, processedNodes: 0, hasMore: false });
       if (cancelled()) return empty();
       for (const node of done) if (node.isConnected === false) done.delete(node);
       for (const node of swept) if (node.isConnected === false) swept.delete(node);
+      for (const [node, failure] of failures) {
+        if (node.isConnected === false || node.nodeValue !== failure.value || dom.has(node)) failures.delete(node);
+      }
       if (reset) {
+        failures.clear();
         context = AT.pagecontext.analyze(AT.pagecontext.collect(request.doc as AT.pagecontext.MetaDocument));
         done.clear();
         swept = new Set<Text>();
@@ -298,7 +304,8 @@ namespace AT.pipeline {
           // answered with nothing stays eligible, so the next pass retries it
           // instead of leaving the page half English forever.
           for (const node of subset) {
-            if (dom.has(node)) done.add(node);
+            if (dom.has(node)) { done.add(node); failures.delete(node); }
+            else if (result.failed > 0) failures.set(node, { value: node.nodeValue, error: result.error ?? 'translation incomplete' });
             if (budgeted) swept.add(node);
           }
           request.onProgress?.({ translated: dom.stats().translated, requested });
@@ -310,6 +317,10 @@ namespace AT.pipeline {
           groupFailures += 1;
           if (!firstError) firstError = caught;
           error ??= String((caught as { message?: unknown })?.message ?? caught);
+          for (const node of subset) {
+            if (dom.has(node)) failures.delete(node);
+            else failures.set(node, { value: node.nodeValue, error });
+          }
           AT.warn('translation batch failed', group.role, caught);
         }
       }
@@ -317,6 +328,8 @@ namespace AT.pipeline {
       // Nothing got through: fail the pass so the caller shows the host's own
       // error instead of a silent no-op. A partial pass returns normally.
       if (!cancelled() && attempted > 0 && groupFailures === attempted) throw firstError;
+      failed = Math.max(failed, failures.size);
+      error ??= failures.values().next().value?.error ?? null;
       return { requested, translated: dom.stats().translated, runs, batches: batches - before, failed, error,
         processedNodes, hasMore: !cancelled() && ordered.length > processedNodes };
     }
@@ -336,6 +349,7 @@ namespace AT.pipeline {
         generation++;
         const restored = translator ? translator.restore(request.doc.documentElement).restored : 0;
         done.clear();
+        failures.clear();
         swept.clear();
         role = null;
         return { restored };

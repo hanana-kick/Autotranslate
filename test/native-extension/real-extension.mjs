@@ -105,7 +105,21 @@ try {
     welcome = context.pages().find((p) => /^(?:chrome|moz)-extension:\/\/[^/]+\/welcome\.html$/.test(p.url()));
     if (!welcome) await sleep(100);
   }
-  assert.ok(welcome, 'installation must open the shipped onboarding');
+  summary.onboardingAutoOpened = Boolean(welcome);
+  if (!welcome && family === 'firefox') {
+    // Temporary add-on installation can open a tab in Firefox's default
+    // container rather than Playwright's context. Read the installed actor's
+    // actual manifest URL and navigate to its shipped UI; do not inject it.
+    // Record this separately: manual UI access is not automatic-onboarding QA.
+    const manifestURL = summary.installation.descriptor.manifestURL;
+    assert.match(manifestURL, /^moz-extension:\/\/[^/]+\/manifest\.json$/);
+    welcome = await context.newPage();
+    await welcome.goto(manifestURL.replace('/manifest.json', '/welcome.html'));
+  }
+  if (!welcome) {
+    summary.openTabs = context.pages().map((p) => p.url().split('?')[0]); await save();
+  }
+  assert.ok(welcome, 'the installed extension must expose its shipped onboarding');
   const id = welcome.url().split('/')[2]; summary.extensionId = id;
   const extensionOrigin = welcome.url().replace('/welcome.html', '');
   assert.ok(welcome, 'installation opens the real onboarding');

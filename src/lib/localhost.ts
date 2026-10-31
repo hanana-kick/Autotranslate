@@ -409,7 +409,10 @@ namespace AT.localhost {
       // maxTokens covers input plus output, so the chunker budgets both.
       maxTokens: Math.max(L.MIN_MAX_TOKENS, Math.min(maxTokens, L.MAX_MAX_TOKENS)),
       topK: 1,
-      temperature: 0,
+      // topK=1 already selects the single highest-ranked token. Keep the
+      // logit scaling finite instead of relying on a native zero-temperature
+      // special case; the locked SDK and greedy selection remain unchanged.
+      temperature: 1,
       randomSeed: 42,
       numResponses: 1
     });
@@ -505,7 +508,9 @@ namespace AT.localhost {
           streamed += partial;
           const issue = AT.outputIssue(source, streamed, true);
           if (issue) {
-            const error = workerError('invalid-output', 'invalid model output: ' + issue);
+            const controls = [...new Set(streamed.match(/<(?:pad|bos|eos|start_of_turn|end_of_turn)>|<\|(?:endoftext|im_start|im_end)\|>/g) ?? [])];
+            const error = workerError('invalid-output', 'invalid model output: ' + issue +
+              (controls.length ? ' [' + controls.join(',') + ']' : ''));
             state.state = 'error'; state.reason = 'invalid-output'; state.lastError = error.message;
             publish(); reject(error); return;
           }

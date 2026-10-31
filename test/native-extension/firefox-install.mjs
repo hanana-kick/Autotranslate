@@ -53,6 +53,12 @@ export async function installFirefoxAddon(port, addonPath) {
     // Some versions deliver the initial greeting before the getRoot response.
     const resolved = root.addonsActor ? root : await next();
     if (!resolved.addonsActor) throw new Error('Firefox has no temporary add-on actor');
-    return await request(resolved.addonsActor, 'installTemporaryAddon', { addonPath, openDevTools: false });
+    const installed = await request(resolved.addonsActor, 'installTemporaryAddon', { addonPath, openDevTools: false });
+    const listing = await request('root', 'listAddons');
+    const addon = listing.addons?.find((a) => a.id === installed.addon?.id);
+    if (!addon?.manifestURL) throw new Error('installed Firefox extension has no manifest URL');
+    return { ...installed, descriptor: { id: addon.id, manifestURL: addon.manifestURL,
+      backgroundScriptStatus: addon.backgroundScriptStatus, debuggable: addon.debuggable,
+      warnings: addon.warnings, temporarilyInstalled: addon.temporarilyInstalled } };
   } finally { socket.destroy(); }
 }
