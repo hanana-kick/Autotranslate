@@ -1,0 +1,49 @@
+name: Firefox original addon WebDriver
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['test/firefox-native/**', '.github/workflows/firefox-webdriver.yml']
+permissions:
+  contents: read
+jobs:
+  firefox:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund && npm run build:firefox
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1 && npx playwright install firefox
+      - name: Pinned official Mozilla driver
+        run: |
+          set -euo pipefail
+          curl -fL --retry 3 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-macos-aarch64.tar.gz -o "$RUNNER_TEMP/geckodriver.tar.gz"
+          echo "d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5  $RUNNER_TEMP/geckodriver.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP"
+      - name: Install actual addon and translate through shipped UI
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GECKODRIVER: ${{ runner.temp }}/geckodriver
+        run: node test/firefox-native/webdriver.mjs
+      - name: Verify production and redact evidence
+        id: evidence
+        if: always()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git diff --exit-code -- src scripts package.json package-lock.json
+          node --input-type=module <<'JS'
+          import fs from'node:fs';import path from'node:path';const dir='test-results/firefox-webdriver';if(fs.existsSync(dir))for(const name of fs.readdirSync(dir)){if(/\.(json|html|log)$/.test(name)){const file=path.join(dir,name),s=fs.readFileSync(file,'utf8');if((process.env.HF_TOKEN&&s.includes(process.env.HF_TOKEN))||/hf_[A-Za-z0-9]{20,}/.test(s)){fs.rmSync(file);throw Error('unsafe evidence');}}}
+          JS
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        with:
+          name: firefox-webdriver-${{ github.run_id }}
+          path: test-results/firefox-webdriver/
+          if-no-files-found: error
+          retention-days: 7
