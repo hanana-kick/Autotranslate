@@ -1,0 +1,108 @@
+name: Real extension browser compatibility
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/native-browser-compatibility.yml']
+permissions:
+  contents: read
+concurrency:
+  group: native-compatibility-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  installed-extension:
+    name: Original extension / Chromium current / ${{ matrix.graphics }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        graphics: [swiftshader, mesa]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:chrome
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
+      - run: npx playwright install --with-deps chromium
+      - name: Install actual Mesa software Vulkan driver
+        if: matrix.graphics == 'mesa'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+          ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$ICD"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          echo "LP_NUM_THREADS=4" >> "$GITHUB_ENV"
+      - name: Configure only the browser launch for the Mesa case
+        if: matrix.graphics == 'mesa'
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          import { execFileSync } from 'node:child_process';
+          const path = 'test/native-extension/real-extension.mjs';
+          assert.equal(execFileSync('git', ['hash-object', path], { encoding: 'utf8' }).trim(), 'ff7f4e8984be6b70340053a0da058ba571a89d90');
+          const text = fs.readFileSync(path, 'utf8');
+          const from = "'--use-angle=swiftshader',";
+          assert.equal(text.split(from).length, 2);
+          // This is a browser-driver configuration, not an inference bridge.
+          // The installed extension, SDK, model, UI actions and assertions stay identical.
+          const to = "'--use-angle=vulkan', '--use-vulkan=native', '--use-webgpu-adapter=default', '--enable-features=Vulkan,VulkanFromANGLE', '--disable-vulkan-surface',";
+          fs.writeFileSync(path, text.replace(from, to));
+          JS
+      - name: Verify the real selected browser adapter before downloading weights
+        env:
+          GRAPHICS: ${{ matrix.graphics }}
+        shell: bash
+        run: |
+          mkdir -p test-results/native-extension
+          xvfb-run -a node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { createServer } from 'node:http';
+          import { chromium } from 'playwright';
+          import assert from 'node:assert/strict';
+          const mesa = process.env.GRAPHICS === 'mesa';
+          const args = ['--enable-unsafe-webgpu', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage', ...(mesa ? ['--use-angle=vulkan', '--use-vulkan=native', '--use-webgpu-adapter=default', '--enable-features=Vulkan,VulkanFromANGLE', '--disable-vulkan-surface'] : ['--use-angle=swiftshader'])];
+          const server = createServer((req,res)=>res.end('<!doctype html><title>Adapter preflight</title>'));
+          await new Promise(r=>server.listen(0,'127.0.0.1',r));
+          const browser = await chromium.launch({channel:'chromium',headless:false,args});
+          let result;
+          try {
+            const page=await browser.newPage();
+            await page.goto(`http://127.0.0.1:${server.address().port}`);
+            result=await page.evaluate(async()=>{
+              const a=await navigator.gpu?.requestAdapter({powerPreference:'high-performance'});
+              return a ? {vendor:a.info.vendor,architecture:a.info.architecture,description:a.info.description,device:a.info.device,features:[...a.features],maxBufferSize:a.limits.maxBufferSize} : null;
+            });
+            fs.writeFileSync('test-results/native-extension/adapter-preflight.json',JSON.stringify({browser:browser.version(),args,adapter:result},null,2));
+            console.log(JSON.stringify(result));
+            assert.ok(result,'real browser provides a WebGPU adapter');
+            if(mesa) assert.match(JSON.stringify(result),/mesa|llvmpipe|lavapipe/i,'must actually select Mesa, not silently fall back to SwiftShader');
+            else assert.match(JSON.stringify(result),/swiftshader/i);
+          } finally {await browser.close();await new Promise(r=>server.close(r));}
+          JS
+      - name: Actual installed extension download, inference, HTML and restore
+        env:
+          HEADED: '1'
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          xvfb-run -a node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
+      - name: Verify no product or runtime substitution
+        if: always()
+        run: git diff --exit-code -- src package.json package-lock.json scripts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: original-extension-current-${{ matrix.graphics }}-${{ github.run_id }}
+          path: test-results/native-extension/
+          if-no-files-found: error
+          retention-days: 14
