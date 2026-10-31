@@ -11,3 +11,6 @@ weight/
 *.task
 # Agent runtime state, not part of the project
 .omp/
+
+# Browser QA evidence is uploaded by Actions, never packaged
+test-results/

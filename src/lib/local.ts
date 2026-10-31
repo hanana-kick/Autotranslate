@@ -540,10 +540,12 @@ namespace AT.local {
     'model-load-failed': true,
     'generation-failed': true,
     'generation-timeout': true,
+    'context-overflow': true,
     cancelled: true
   };
 
   const CONFIG_REASONS: Record<string, true | undefined> = {
+    'context-overflow': true,
     'unsupported-browser': true,
     'no-webgpu': true,
     // The target has no code in the model's language table, so no prompt can

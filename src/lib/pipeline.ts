@@ -50,6 +50,10 @@ namespace AT.pipeline {
     /** Groups that failed, and why; the rest of the page still went through. */
     failed: number;
     error: string | null;
+    /** DOM nodes visited, not deduplicated model inputs. */
+    processedNodes: number;
+    /** Unvisited planned work; failures alone do not create an infinite retry. */
+    hasMore: boolean;
   };
 
   export type PageTranslator = {
@@ -130,6 +134,7 @@ namespace AT.pipeline {
     const viewportHeight = request.viewportHeight ?? (() => globalThis.innerHeight || 800);
 
     const done = new Set<Text>();
+    let generation = 0;
     /** A pass owns the translator's run table: two of them must not interleave. */
     let passes: Promise<unknown> = Promise.resolve();
     const once = <T>(job: () => Promise<T>): Promise<T> => {
@@ -154,6 +159,7 @@ namespace AT.pipeline {
         maxNodes: settings.maxNodes,
         sentences: request.sentences,
         shouldAbort: request.shouldAbort,
+        cacheScope: () => JSON.stringify([context, role]),
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
         translate: async (texts) => {
           batches += 1;
@@ -172,9 +178,16 @@ namespace AT.pipeline {
     async function run(
       root: Element | Document | null | undefined,
       reset: boolean,
-      budget?: number
+      budget?: number,
+      epoch = generation
     ): Promise<Result> {
       const dom = executor();
+      const cancelled = () => epoch !== generation || request.shouldAbort?.() === true;
+      const empty = (): Result => ({ requested: 0, translated: dom.stats().translated, runs: 0,
+        batches: 0, failed: 0, error: null, processedNodes: 0, hasMore: false });
+      if (cancelled()) return empty();
+      for (const node of done) if (node.isConnected === false) done.delete(node);
+      for (const node of swept) if (node.isConnected === false) swept.delete(node);
       if (reset) {
         context = AT.pagecontext.analyze(AT.pagecontext.collect(request.doc as AT.pagecontext.MetaDocument));
         done.clear();
@@ -182,7 +195,7 @@ namespace AT.pipeline {
       }
       const start = root ?? request.doc.documentElement;
       if (!start) {
-        return { requested: 0, translated: dom.stats().translated, runs: 0, batches: 0, failed: 0, error: null };
+        return empty();
       }
       // `maxNodes` bounds how much one pass *translates*, not how much it looks
       // at: collection follows DOM order, and a page's sidebar often precedes
@@ -190,12 +203,12 @@ namespace AT.pipeline {
       // article. Look at a wide window, then let the plan pick.
       const settings = request.settings();
       const window = Math.min(Math.max(settings.maxNodes, 1) * 8, 4000);
-      const collected = dom.collect(start, window);
+      const collected = dom.collect(start, window + 1);
       // `done` is a memory aid, not the truth: a page that rewrites a node's
       // text in place puts it back in play (`dom.has` is false again).
       const pending = collected.filter((node) => !done.has(node) || !dom.has(node));
       if (pending.length === 0) {
-        return { requested: 0, translated: dom.stats().translated, runs: 0, batches: 0, failed: 0, error: null };
+        return empty();
       }
 
       const height = viewportHeight();
@@ -228,18 +241,22 @@ namespace AT.pipeline {
       /** Groups that threw outright; a group can also fail in part. */
       let groupFailures = 0;
       let attempted = 0;
+      let processedNodes = 0;
       let error: string | null = null;
       let firstError: unknown = null;
       for (const group of groups) {
-        if (request.shouldAbort?.() === true) break;
+        if (cancelled()) break;
         const subset = group.ids
           .map((id) => ordered[Number(id)])
           .filter((node): node is Text => node !== undefined);
         if (subset.length === 0) continue;
         role = group.role;
         attempted += 1;
+        processedNodes += subset.length;
+        if (budgeted) subset.forEach((node) => swept.add(node));
         try {
           const result = await dom.translateNodes(subset);
+          if (cancelled()) break;
           requested += result.requested;
           runs += result.runs;
           if (result.failed > 0) {
@@ -255,6 +272,7 @@ namespace AT.pipeline {
           }
           request.onProgress?.({ translated: dom.stats().translated, requested });
         } catch (caught: unknown) {
+          if (cancelled()) break;
           // A generation that fails must not take the rest of the page with it. Those nodes stay eligible; the caller is
           // told what happened.
           failed += 1;
@@ -267,19 +285,27 @@ namespace AT.pipeline {
       role = null;
       // Nothing got through: fail the pass so the caller shows the host's own
       // error instead of a silent no-op. A partial pass returns normally.
-      if (attempted > 0 && groupFailures === attempted) throw firstError;
-      return { requested, translated: dom.stats().translated, runs, batches: batches - before, failed, error };
+      if (!cancelled() && attempted > 0 && groupFailures === attempted) throw firstError;
+      return { requested, translated: dom.stats().translated, runs, batches: batches - before, failed, error,
+        processedNodes, hasMore: !cancelled() && ordered.length > processedNodes };
+    }
+
+    function schedule(root: Element | Document | null, reset: boolean, budget?: number): Promise<Result> {
+      const epoch = generation;
+      return once(() => run(root, reset, budget, epoch));
     }
 
     return {
-      translate: () => once(() => run(null, true)),
-      refresh: (root, budget) => once(() => run(root ?? null, false, budget)),
+      translate: () => schedule(null, true),
+      refresh: (root, budget) => schedule(root ?? null, false, budget),
       isTranslated(node: Text) {
         return translator ? translator.holds(node) : false;
       },
       restore() {
+        generation++;
         const restored = translator ? translator.restore(request.doc.documentElement).restored : 0;
         done.clear();
+        swept.clear();
         role = null;
         return { restored };
       },

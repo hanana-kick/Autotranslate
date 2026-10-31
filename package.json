@@ -17,7 +17,9 @@
     "verify": "node scripts/verify-package.ts",
     "pretest": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts",
-    "ci": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify"
+    "ci": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify",
+    "test:browser": "node --test --test-concurrency=1 test/browser/*.test.mjs",
+    "test:browser:dom": "node --test test/browser/dom.test.mjs"
   },
   "devDependencies": {
     "@mediapipe/tasks-genai": "0.10.30",

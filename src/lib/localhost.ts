@@ -226,11 +226,8 @@ namespace AT.localhost {
 
   /** First generation on a freshly loaded model is ~8x slower; pay it here. */
   async function warmup(instance: LlmInstance): Promise<void> {
-    try {
-      await instance.generateResponse(L.wrapChatPrompt('Translate to Korean: Good morning.'));
-    } catch (error: unknown) {
-      AT.warn('on-device warmup failed', error);
-    }
+    const answer = await boundedResponse(instance, L.wrapChatPrompt('Translate to Korean: Good morning.'));
+    if (!answer.trim()) throw new Error('model warmup returned an empty answer');
   }
 
   async function instantiate(record: AT.modelstore.ModelRecord, maxTokens: number): Promise<LlmInstance> {
@@ -256,13 +253,16 @@ namespace AT.localhost {
   }
 
   async function ensureLoaded(modelId: string, maxTokens: number): Promise<void> {
-    if (llm && loadedId === modelId) {
+    const budget = Number.isFinite(maxTokens)
+      ? Math.max(L.MIN_MAX_TOKENS, Math.min(Math.round(maxTokens), L.MAX_MAX_TOKENS))
+      : L.DEFAULT_MAX_TOKENS;
+    if (llm && loadedId === modelId && loadedMaxTokens === budget) {
       touchIdleTimer();
       return;
     }
     if (loading) {
       await loading;
-      if (llm && loadedId === modelId) return;
+      if (llm && loadedId === modelId && loadedMaxTokens === budget) return;
     }
     // Whether this browser can run a model at all is the more fundamental
     // answer, and reading the store first would mask it behind a store error.
@@ -278,11 +278,13 @@ namespace AT.localhost {
     loading = (async () => {
       await loadRuntime();
       if (llm) teardown('switch');
-      const instance = await instantiate(record as AT.modelstore.ModelRecord, maxTokens);
-      await warmup(instance);
+      const instance = await instantiate(record as AT.modelstore.ModelRecord, budget);
+      // Own the instance before warming it, so a failed verification also frees
+      // its allocated weights. Readiness means inference succeeded, not just load.
       llm = instance;
+      await warmup(instance);
       loadedId = record.id;
-      loadedMaxTokens = Math.max(L.MIN_MAX_TOKENS, Math.min(maxTokens, L.MAX_MAX_TOKENS));
+      loadedMaxTokens = budget;
       loadedBytes = record.size;
       loadMs = Date.now() - started;
       state.state = 'ready';
@@ -315,19 +317,23 @@ namespace AT.localhost {
       : L.estimateTokens(text);
   }
 
-  /** One generation, bounded: MediaPipe never aborts on its own. */
-  async function generate(prompt: string): Promise<string> {
-    const instance = llm;
-    if (!instance) fail('no-model', 'no model is loaded');
+  /** Includes warmup: no generation may hold the queue without a deadline. */
+  function boundedResponse(instance: LlmInstance, prompt: string): Promise<string> {
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const guarded = new Promise<string>((resolve, reject) => {
+    return new Promise<string>((resolve, reject) => {
       timer = setTimeout(() => reject(new Error('generation timeout')), L.GENERATION_TIMEOUT_MS);
       instance.generateResponse(prompt).then(resolve, reject);
     }).finally(() => {
       if (timer) clearTimeout(timer);
     });
+  }
+
+  /** A timed-out promise does not mean the native runtime has stopped. */
+  async function generate(prompt: string): Promise<string> {
+    const instance = llm;
+    if (!instance) fail('no-model', 'no model is loaded');
     try {
-      const reply = await guarded;
+      const reply = await boundedResponse(instance, prompt);
       generations += 1;
       touchIdleTimer();
       return reply;
@@ -338,6 +344,9 @@ namespace AT.localhost {
         // cancellation is best-effort
       }
       const message = String((error as { message?: unknown })?.message ?? error);
+      // Never reuse the possibly still-busy graph after rejection or timeout.
+      // The next queued request has to create a fresh, verified instance.
+      teardown('generation-failed');
       fail(message.includes('timeout') ? 'generation-timeout' : 'generation-failed', error);
     }
   }
@@ -351,8 +360,7 @@ namespace AT.localhost {
    * answer. When no tokenizer is exposed, the estimate is all there is.
    */
   function fits(prompt: string, texts: string[]): boolean {
-    const count = llm?.sizeInTokens?.(prompt);
-    if (typeof count !== 'number' || !Number.isFinite(count)) return true;
+    const count = tokenCount(prompt);
     const answer = texts.reduce((sum, text) => sum + L.estimateTokens(text), 0);
     return count + answer <= loadedMaxTokens;
   }
@@ -367,7 +375,10 @@ namespace AT.localhost {
     // single-text shape answers with the context line translated instead of the
     // text, and the auto shape has no room for metadata at all.
     const batch = L.buildBatchPrompt(source, target, texts, texts.length > 1 ? hint : null);
-    if (texts.length > 1 && !fits(batch, texts)) {
+    if (!fits(batch, texts)) {
+      if (texts.length === 1) {
+        fail('context-overflow', 'a single translation segment exceeds the model context budget; split it or raise the token limit');
+      }
       // Halve the batch and pay for a second generation rather than let the
       // model silently drop the end of the prompt.
       const middle = Math.ceil(texts.length / 2);
@@ -377,16 +388,14 @@ namespace AT.localhost {
       return [...head, ...tail];
     }
     const reply = await generate(batch);
-    if (texts.length === 1) return [reply.trim() || texts[0]!];
+    if (texts.length === 1) return [reply.trim()];
     const parsed = L.parseNumbered(reply, texts.length);
     if (parsed) return parsed;
     AT.warn('on-device split mismatch, retrying per text', texts.length);
     const out: string[] = [];
     for (const text of texts) {
-      const single = await generate(
-        source ? L.buildTranslatePrompt(source, target, text) : L.buildAutoPrompt(target, text)
-      );
-      out.push(single.trim() || text);
+      const single = await translateChunk(source, target, [text], null);
+      out.push(single[0] ?? '');
     }
     return out;
   }
@@ -438,8 +447,12 @@ namespace AT.localhost {
     publish();
     try {
       await ensureLoaded(modelId, maxTokens);
+      state.state = 'busy';
+      publish();
       const translations = await translateChunk(source, target, texts, hint);
       state.state = 'ready';
+      state.reason = null;
+      state.lastError = null;
       publish();
       return { translations, engine: 'local' };
     } catch (error: unknown) {
@@ -461,8 +474,7 @@ namespace AT.localhost {
         return { status: await enqueue(() => load(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS)) };
       }
       case C.MSG.LOCAL_UNLOAD:
-        await enqueue(() => Promise.resolve());
-        return { status: unload('requested') };
+        return await enqueue(async () => ({ status: unload('requested') }));
       case C.MSG.LOCAL_COUNT: {
         // Counting uses the same tokenizer as generation, so it queues like one.
         const request = message as CountRequest;

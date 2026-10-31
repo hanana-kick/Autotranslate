@@ -43,8 +43,10 @@ namespace AT.content {
     settings: AT.settings.ContentSnapshot | null;
     /** Whether the scroll listener that translates newly visible text is on. */
     scrollBound: boolean;
-    /** Debounce for the scroll pass, apart from the mutation one. */
-    scrollTimer: number;
+    /** Monotonic session identity: an old result can never join a new session. */
+    epoch: number;
+    settingsKey: string | null;
+    commandPending: boolean;
     /** Mutations arrived while a pass was already running. */
     dirty: boolean;
     /** Regions the last mutations touched, waiting for the next tick. */
@@ -89,7 +91,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     pipeline: null,
     settings: null,
     scrollBound: false,
-    scrollTimer: 0,
+    epoch: 0,
+    settingsKey: null,
+    commandPending: false,
     dirty: false,
     roots: [],
     full: false,
@@ -121,6 +125,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       texts,
       targetLang: settings.targetLang,
       sourceLang: settings.sourceLang,
+      ...(settings.translationKey ? { translationKey: settings.translationKey } : {}),
       url: location.href,
       // Read once per pass. Only a context that would actually change the
       // prompt is sent: an unidentified page adds nothing to a request.
@@ -138,27 +143,20 @@ declare var __autotranslate: AT.content.Boot | undefined;
   /** One engine per page: it keeps the records restore() needs. */
   function ensurePipeline(settings: AT.settings.ContentSnapshot): AT.pipeline.PageTranslator {
     if (!state.pipeline) {
+      const epoch = state.epoch;
+      const snapshot = { ...settings };
       state.pipeline = AT.pipeline.create({
         doc: document,
-        // A paragraph's sentences share one request, and one-sentence nodes are
-        // packed up to four. Measured on a ten-paragraph page: packing four
-        // nodes per request cut the page from 16 s to under 9 s, because the
-        // fixed cost of a request is paid once instead of ten times.
-        settings: () => ({ maxNodes: (state.settings ?? settings).maxNodes }),
-        // Read settings from state so a later target-language change applies
-        // without re-injecting the script.
-        translate: (batch) => requestBatch(batch, state.settings ?? settings),
-        // A long paragraph is several sentences; sending it whole either
-        // overflows the model's context or gets cut mid-clause by the char
-        // chunker. Split first, rejoin in place.
-        // Every multi-sentence paragraph is translated sentence by sentence:
-        // each answer is written as it lands, and the paragraph rides along as
-        // the hint so the sentences read as one text.
+        settings: () => ({ maxNodes: snapshot.maxNodes }),
+        // A pass owns an immutable settings snapshot, not mutable global state.
+        translate: (batch) => requestBatch(batch, snapshot),
+        // Each paragraph is one unit; token splitting stays in the engine.
         sentences: { split: AT.targets.sentences, maxChars: C.SENTENCE_MAX_CHARS, always: true },
         // A restore in another task owns the page: stop writing.
-        shouldAbort: () => state.stopped,
+        shouldAbort: () => state.stopped || state.epoch !== epoch,
         // A pass over a long page takes a minute; say so while it works.
         onProgress: ({ translated }) => {
+          if (state.stopped || state.epoch !== epoch) return;
           const now = Date.now();
           if (now - state.lastReport < 700) return;
           state.lastReport = now;
@@ -191,6 +189,8 @@ declare var __autotranslate: AT.content.Boot | undefined;
   }
 
   function scheduleTick(): void {
+    if (state.stopped || !state.pipeline) return;
+    if (state.working) { state.dirty = true; return; }
     if (state.timer !== 0) {
       // A busy page - video progress, ads, live counters - mutates faster than
       // the debounce. Resetting the timer every time meant it never fired and
@@ -315,14 +315,10 @@ declare var __autotranslate: AT.content.Boot | undefined;
 
   /** A page is longer than a screen: translate what scrolls into view. */
   function scheduleViewportPass(): void {
-    if (!state.settings?.enabled || !state.pipeline) return;
-    if (state.scrollTimer) return;
-    state.scrollTimer = globalThis.setTimeout(() => {
-      state.scrollTimer = 0;
-      state.pipeline
-        ?.refresh(document.documentElement, C.OBSERVER_BATCH_NODES)
-        .catch((error) => AT.warn('viewport translation failed', error));
-    }, C.OBSERVER_DEBOUNCE_MS);
+    if (!state.settings?.enabled || !state.pipeline || state.stopped) return;
+    // Scroll and mutations share a scheduler. Separate promise queues could
+    // accumulate obsolete full-page passes behind a slow generation.
+    requestFullPass();
   }
 
   type ScrollTarget = {
@@ -347,7 +343,8 @@ declare var __autotranslate: AT.content.Boot | undefined;
 
   async function runTick(): Promise<void> {
     const pipeline = state.pipeline;
-    if (!pipeline || !state.settings?.enabled) return;
+    const epoch = state.epoch;
+    if (!pipeline || !state.settings?.enabled || state.stopped) return;
     if (state.working) {
       // A pass is already running. Ask for another tick when it finishes
       // instead of interleaving two passes over the same nodes.
@@ -361,11 +358,12 @@ declare var __autotranslate: AT.content.Boot | undefined;
     // Background passes take a small slice: a page that keeps mutating (a video
     // site re-rendering its feed) must not hold the single model for minutes.
     let left = C.OBSERVER_BATCH_NODES;
-    let requested = 0;
+    let processed = 0;
     let translated = 0;
     let more = false;
     try {
       for (const region of regions) {
+        if (epoch !== state.epoch || state.stopped) break;
         if (left <= 0) {
           more = true;
           break;
@@ -373,24 +371,23 @@ declare var __autotranslate: AT.content.Boot | undefined;
         // The page may have removed the region between the mutation and now.
         if (region.isConnected === false) continue;
         const result = await pipeline.refresh(region, left);
-        requested += result.requested;
+        if (epoch !== state.epoch || state.stopped) break;
+        processed += result.processedNodes;
         translated = result.translated;
-        left -= Math.min(result.requested, left);
-        if (result.requested >= C.OBSERVER_BATCH_NODES) more = true;
+        left -= Math.min(result.processedNodes, left);
+        if (result.hasMore) more = true;
       }
     } finally {
-      state.working = false;
-      if (state.dirty) {
-        state.dirty = false;
-        scheduleTick();
+      if (epoch === state.epoch) {
+        state.working = false;
+        if (state.dirty) { state.dirty = false; scheduleTick(); }
       }
     }
-    // A tick that found nothing new must not move the badge or the status.
-    if (requested === 0) return;
-    await report({ status: 'translated', translated });
-    // The budget was spent, so there is more to do. Waiting for the page to
-    // change again would leave a quiet page half translated.
+    if (epoch !== state.epoch || state.stopped) return;
+    // Cached work may make no model requests at all, but still has DOM work
+    // left. Continuation is the planner's decision, not a request-count guess.
     if (more) requestFullPass();
+    if (processed > 0) await report({ status: 'translated', translated });
   }
 
   /** Ask for one pass over the whole page (the queue has no regions). */
@@ -399,70 +396,90 @@ declare var __autotranslate: AT.content.Boot | undefined;
     scheduleTick();
   }
 
-  /** One full pass over the page, then keep up with what changes. */
-  async function runTranslation(settings: AT.settings.ContentSnapshot): Promise<AT.MessageResult> {
-    state.stopped = false;
-    const pipeline = ensurePipeline(settings);
-    // A pass into a different language has to start from the page's own text:
-    // the records and the cache both belong to the previous language.
-    if (state.targetLang !== null && state.targetLang !== settings.targetLang) {
-      pipeline.restore();
-    }
-    state.targetLang = settings.targetLang;
-    // More nodes than one pass may translate: carry on by ourselves.
-    const result = await pipeline.translate();
-    startObserver();
-    startViewportPass();
-    if (result.requested >= settings.maxNodes) requestFullPass();
-    // A partly translated page is still worth showing; say what went wrong
-    // instead of failing the whole pass.
-    await report({ status: 'translated', translated: result.translated, error: result.error });
-    return {
-      status: 'translated',
-      translated: result.translated,
-      requested: result.requested,
-      failed: result.failed,
-      error: result.error
-    };
+  function sessionKey(settings: AT.settings.ContentSnapshot): string {
+    return JSON.stringify([settings.translationKey ?? '', settings.targetLang, settings.sourceLang, settings.maxNodes]);
   }
 
-  /**
-   * The switch is the whole policy: on translates this page into the target
-   * language, off leaves it alone. A page already in the target language comes
-   * back from the model unchanged and nothing is written.
-   */
+  /** Control commands bypass the work queue. This is synchronous up to the UI report. */
+  function invalidate(): number {
+    state.epoch++;
+    state.stopped = true;
+    state.commandPending = false;
+    state.dirty = false;
+    state.full = false;
+    state.roots = [];
+    state.working = false;
+    state.targetLang = null;
+    state.settingsKey = null;
+    stopObserver();
+    stopViewportPass();
+    const restored = state.pipeline?.restore().restored ?? 0;
+    state.pipeline = null;
+    return restored;
+  }
+
+  /** Observe before the first asynchronous generation: a page may render late. */
+  async function runTranslation(settings: AT.settings.ContentSnapshot): Promise<AT.MessageResult> {
+    const key = sessionKey(settings);
+    if (!state.pipeline || state.stopped || state.settingsKey !== key) {
+      invalidate();
+      state.settings = Object.freeze({ ...settings });
+      state.settingsKey = key;
+      state.targetLang = settings.targetLang;
+      state.stopped = false;
+    }
+    const epoch = state.epoch;
+    const pipeline = ensurePipeline(settings);
+    state.working = true;
+    startObserver();
+    startViewportPass();
+    try {
+      const result = await pipeline.translate();
+      if (epoch !== state.epoch || state.stopped) return { status: 'cancelled' };
+      if (result.hasMore) requestFullPass();
+      await report({ status: 'translated', translated: result.translated, error: result.error });
+      return { status: 'translated', translated: result.translated, requested: result.requested,
+        failed: result.failed, error: result.error };
+    } finally {
+      if (epoch === state.epoch) {
+        state.working = false;
+        if (state.dirty || state.full || state.roots.length) {
+          state.dirty = false;
+          scheduleTick();
+        }
+      }
+    }
+  }
+
   async function translate(message: AT.content.TranslateRequest): Promise<AT.MessageResult> {
     const settings = message.settings;
     if (!settings) throw new Error('translate request without settings');
-    state.settings = settings;
     const decision = message.decision ?? { action: 'translate' };
     if (!settings.enabled || decision.action === 'skip') {
-      await report({ status: 'idle' });
+      await restore();
       return { status: 'idle', reason: decision.reason ?? 'disabled' };
     }
+    const task = runTranslation(settings);
+    const epoch = state.epoch;
     try {
-      return await runTranslation(settings);
+      return await task;
     } catch (error: unknown) {
-      // Nobody is listening for the reply on an automatic pass; record the
-      // failure so the popup and badge can say what happened.
+      if (epoch !== state.epoch || state.stopped) return { status: 'cancelled' };
+      // A wholly failed pass must not retry the same broken configuration on
+      // every page mutation. Keep completed records for an explicit retry.
+      stopObserver();
+      stopViewportPass();
+      state.dirty = false;
+      state.full = false;
+      state.roots = [];
       await report({ status: 'error', error: String((error as { message?: unknown })?.message ?? error) });
       throw error;
     }
   }
 
   async function restore(): Promise<AT.MessageResult> {
-    // A pass in flight must not write its answers back over the restored page,
-    // and the user must not wait for the model to finish before the switch works.
-    state.stopped = true;
-    state.dirty = false;
-    state.full = false;
-    state.roots = [];
-    state.targetLang = null;
-    stopObserver();
-    stopViewportPass();
-    clearTimeout(state.timer);
-    state.timer = 0;
-    const restored = state.pipeline ? state.pipeline.restore().restored : 0;
+    const restored = invalidate();
+    closeCard();
     await report({ status: 'idle' });
     return { status: 'idle', restored };
   }
@@ -539,7 +556,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     const parts = AT.targets.sentences(selected).slice(0, SELECTION_MAX_PARTS);
     const gap = /\s/.test(selected) ? ' ' : '';
     const texts = parts.length > 1 ? parts : [selected.slice(0, C.SENTENCE_MAX_CHARS)];
+    const epoch = state.epoch;
     const translated = await requestBatch({ texts, role: 'unknown', context: null }, settings);
+    if (epoch !== state.epoch) return { status: 'cancelled' };
     showCard(translated.filter((text) => text).join(gap) || selected, settings);
     return { status: 'selection' };
   }
@@ -556,13 +575,15 @@ declare var __autotranslate: AT.content.Boot | undefined;
     }),
     [C.MSG.CONTENT_TRANSLATE]: (message) => {
       const request = message as AT.content.TranslateRequest;
-      state.busy = state.busy.then(() => translate(request), () => translate(request));
+      if (state.commandPending && request.settings?.enabled && request.decision?.action !== 'skip' &&
+          state.settingsKey === sessionKey(request.settings)) return state.busy;
+      const task = translate(request);
+      const epoch = state.epoch;
+      state.commandPending = true;
+      state.busy = task.finally(() => { if (epoch === state.epoch) state.commandPending = false; });
       return state.busy;
     },
-    [C.MSG.CONTENT_RESTORE]: () => {
-      state.busy = state.busy.then(() => restore(), () => restore());
-      return state.busy;
-    },
+    [C.MSG.CONTENT_RESTORE]: () => restore(),
     [C.MSG.CONTENT_TRANSLATE_SELECTION]: (message) => translateSelection(message as AT.content.SelectionRequest)
   });
 })();

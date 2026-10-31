@@ -456,7 +456,8 @@ test('navigation injects the content script and asks it to translate', async () 
       targetLang: 'en',
       sourceLang: 'auto',
       maxNodes: AT.C.DEFAULT_MAX_NODES,
-      showBadge: true
+      showBadge: true,
+      translationKey: JSON.stringify(['prompt-v2', '', 1024, 'auto', 'en'])
     },
     'the content script gets the bounded snapshot, never the stored blob'
   );
@@ -981,3 +982,61 @@ test('a prepared model stays warm across unrelated settings edits', async () => 
   assert.equal(unloads(), 1, 'nothing is unloaded twice');
 });
 
+
+const settlePolicy = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+test('policy: a fresh worker restores open tabs without an in-memory tab registry', async () => {
+  const tabs = [{ id: 7, url: 'https://a.example/page' }, { id: 8, url: 'https://b.example/page' }];
+  const env = environment({ tabs, settings: { enabled: false } });
+  const oldValue = env.AT.settings.normalize({ enabled: true });
+  const newValue = env.AT.settings.normalize({ enabled: false });
+  for (const listener of env.events.storageChanged) listener({ settings: { oldValue, newValue } }, 'local');
+  await settlePolicy();
+  assert.deepEqual(env.recorded.tabMessages.filter((entry) => entry.message.type === 'at/content-restore')
+    .map((entry) => entry.tabId).sort(), [7, 8]);
+});
+
+test('policy: one tab waiting for a restore cannot hold the other tabs behind it', async () => {
+  const tabs = [{ id: 7, url: 'https://a.example/page' }, { id: 8, url: 'https://b.example/page' }];
+  const env = environment({ tabs, settings: { enabled: false } });
+  const blocked = deferred<ATNamespace>();
+  const calls: number[] = [];
+  env.browser.tabs.sendMessage = async (id: number, message: TabMessage) => {
+    if (message.type === 'at/content-restore') {
+      calls.push(id);
+      if (id === 7) return blocked.promise;
+    }
+    return { ok: true };
+  };
+  for (const listener of env.events.storageChanged) listener({ settings: {
+    oldValue: env.AT.settings.normalize({ enabled: true }),
+    newValue: env.AT.settings.normalize({ enabled: false })
+  } }, 'local');
+  await settlePolicy();
+  assert.deepEqual(calls, [7, 8]);
+  blocked.resolve({ ok: true });
+  await settlePolicy();
+});
+
+test('policy: changing source language re-evaluates sites and respects never rules', async () => {
+  const tabs = [{ id: 7, url: 'https://a.example/page' }, { id: 8, url: 'https://b.example/page' }];
+  const settings = { enabled: true, sourceLang: 'ja', siteRules: [{ pattern: 'b.example', action: 'never' }] };
+  const env = environment({ tabs, settings });
+  env.browser.tabs.get = async (id: number) => tabs.find((tab) => tab.id === id);
+  for (const listener of env.events.storageChanged) listener({ settings: {
+    oldValue: env.AT.settings.normalize({ ...settings, sourceLang: 'en' }),
+    newValue: env.AT.settings.normalize(settings)
+  } }, 'local');
+  await settlePolicy();
+  assert.ok(env.recorded.tabMessages.some((entry) => entry.tabId === 7 && entry.message.type === 'at/content-translate'));
+  assert.ok(env.recorded.tabMessages.some((entry) => entry.tabId === 8 && entry.message.type === 'at/content-restore'));
+  assert.ok(!env.recorded.tabMessages.some((entry) => entry.tabId === 8 && entry.message.type === 'at/content-translate'));
+});
+
+test('policy: requests from an obsolete model/language snapshot never reach inference', async () => {
+  const env = environment({ settings: { enabled: true, targetLang: 'ko', localModelId: 'model-a' }, inlineHost: 'stub' });
+  const reply = await env.send({ type: env.AT.C.MSG.BATCH, texts: ['Hello'], translationKey: 'obsolete' });
+  assert.equal(reply.ok, false);
+  assert.match(reply.error, /changed|obsolete|stale/i);
+  assert.equal(env.recorded.inline.messages.length, 0);
+});

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { load, resetGlobals, type ATNamespace } from './helpers.ts';
+import { deferred, load, resetGlobals, type ATNamespace } from './helpers.ts';
 
 // The content script is the page-context half: it owns a DOM, a MutationObserver
 // and a floating card, all of which the test has to stand in for. Like the rest
@@ -315,7 +315,7 @@ type Options = {
   /** One `<p>` per entry inside the body. */
   texts?: string[];
   /** What the provider answers an at/batch with. */
-  translate?: (texts: string[]) => string[];
+  translate?: (texts: string[]) => string[] | Promise<string[]>;
   /** Answer at/batch with a rejection instead, from the `after`th call on. */
   fail?: { error: string; code?: string | null; after?: number };
   /** What `getSelection().toString()` reports. */
@@ -372,7 +372,7 @@ function environment(options: Options = {}) {
 
   const recorded = { batch: [] as ATNamespace[], state: [] as ATNamespace[] };
   let batchCalls = 0;
-  const batchReply = (message: ATNamespace): ATNamespace => {
+  const batchReply = async (message: ATNamespace): Promise<ATNamespace> => {
     const index = batchCalls;
     batchCalls += 1;
     const texts = Array.isArray(message.texts) ? (message.texts as string[]) : [];
@@ -380,7 +380,7 @@ function environment(options: Options = {}) {
     if (fail && index >= (fail.after ?? 0)) {
       return { ok: false, error: fail.error, code: fail.code ?? null };
     }
-    return { ok: true, translations: (options.translate ?? wrap)(texts), detected: 'en', engine: 'libre' };
+    return { ok: true, translations: await (options.translate ?? wrap)(texts), detected: 'en', engine: 'libre' };
   };
 
   const events: { messages: MessageListener[] } = { messages: [] };
@@ -1088,7 +1088,7 @@ test('a stopped observer ignores later mutations', async () => {
     await env.send({ type: 'at/content-restore' });
     assert.equal(observer.disconnected, true, 'the restore path disconnects the observer');
     assert.equal(env.boot.state.observer, null);
-    assert.ok(env.boot.state.pipeline, 'the engine that holds the originals stays recoverable');
+    assert.equal(env.boot.state.pipeline, null, 'a cancelled session releases its pipeline after restoring');
 
     env.page.body.appendChild(env.page.make('p', {}, [t('Late content')]));
     env.mutate();
@@ -1101,4 +1101,87 @@ test('a stopped observer ignores later mutations', async () => {
   } finally {
     clock.restore();
   }
+});
+
+// --- cancellation and session regressions -----------------------------------
+
+test('restore is acknowledged before an in-flight generation finishes', async () => {
+  const gate = deferred<string[]>();
+  const env = environment({ texts: ['Pending source'], translate: () => gate.promise });
+  const running = env.send(translateMessage());
+  await drain();
+  assert.equal(env.recorded.batch.length, 1);
+  let acknowledged = false;
+  const restoring = env.send({ type: 'at/content-restore' }).then((reply) => { acknowledged = true; return reply; });
+  await drain();
+  try {
+    assert.equal(acknowledged, true, 'control commands must not wait in the translation queue');
+    assert.equal(env.boot.state.stopped, true);
+  } finally {
+    gate.resolve(['Late result']);
+    await Promise.all([running, restoring]);
+  }
+  assert.deepEqual(pageTexts(env.page.body), ['Pending source']);
+  assert.equal(env.states().at(-1)?.status, 'idle');
+});
+
+test('a cancelled response cannot join a new session even with the same target language', async () => {
+  const gate = deferred<string[]>();
+  let calls = 0;
+  const env = environment({ texts: ['Source'], translate: () => ++calls === 1 ? gate.promise : ['New session result'] });
+  const old = env.send(translateMessage());
+  await drain();
+  await env.send({ type: 'at/content-restore' });
+  const current = await env.send(translateMessage());
+  assert.equal(current.ok, true);
+  gate.resolve(['Obsolete result']);
+  const previous = await old;
+  assert.equal(previous.status, 'cancelled');
+  assert.deepEqual(pageTexts(env.page.body), ['New session result']);
+  assert.equal(env.states().at(-1)?.status, 'translated');
+});
+
+test('mutations during the first generation are observed and drained afterwards', async () => {
+  const gate = deferred<string[]>();
+  let calls = 0;
+  const env = environment({ texts: ['First source'], translate: (texts) => ++calls === 1 ? gate.promise : wrap(texts) });
+  const clock = installClock();
+  try {
+    const running = env.send(translateMessage());
+    await drain();
+    assert.ok(env.observers.some((observer) => !observer.disconnected), 'observe before awaiting inference');
+    const inserted = env.page.make('p', {}, [t('Arrived during generation')]);
+    env.page.body.appendChild(inserted);
+    env.mutate([{ type: 'childList', target: env.page.body, addedNodes: [inserted] }]);
+    gate.resolve(['First result']);
+    await running;
+    await clock.run();
+    await drain();
+    assert.deepEqual(pageTexts(env.page.body), ['First result', '»Arrived during generation«']);
+  } finally {
+    gate.resolve(['First result']);
+    clock.restore();
+  }
+});
+
+test('model configuration changes invalidate the cache even when the target is unchanged', async () => {
+  const env = environment({ texts: ['Original source'] });
+  await env.send(translateMessage(snapshot({ translationKey: 'model-one' })));
+  await env.send(translateMessage(snapshot({ translationKey: 'model-two' })));
+  assert.equal(env.recorded.batch.length, 2);
+  assert.deepEqual(env.recorded.batch[1]?.texts, ['Original source']);
+});
+
+test('a new target takes effect without waiting for the obsolete target response', async () => {
+  const gate = deferred<string[]>();
+  let calls = 0;
+  const env = environment({ texts: ['Original source'], translate: () => ++calls === 1 ? gate.promise : ['새 번역'] });
+  const old = env.send(translateMessage(snapshot({ targetLang: 'ja' })));
+  await drain();
+  const current = await env.send(translateMessage(snapshot({ targetLang: 'ko' })));
+  assert.equal(current.ok, true);
+  assert.equal(env.recorded.batch[1]?.targetLang, 'ko');
+  gate.resolve(['古い翻訳']);
+  await old;
+  assert.deepEqual(pageTexts(env.page.body), ['새 번역']);
 });
