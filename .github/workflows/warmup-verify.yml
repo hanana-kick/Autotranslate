@@ -1,0 +1,44 @@
+name: Verify bounded startup recovery
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/warmup-verify.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply reviewed startup recovery proposal
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import zlib from 'node:zlib';import crypto from 'node:crypto';import assert from 'node:assert/strict';import{execFileSync}from'node:child_process';
+          const data='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';
+          const patch=zlib.brotliDecompressSync(Buffer.from(data,'base64'));assert.equal(crypto.createHash('sha256').update(patch).digest('hex'),'3f94c954a2638f04e8be0b7992ff8754cb9a6859ba70ab4d432fc5ebb32c68ee');
+          const paths=[...patch.toString().matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map(m=>m[2]);execFileSync('git',['diff','--exit-code','0e3c244394d80ad7b3e0a39864516a298025ec13','HEAD','--',...paths]);
+          fs.mkdirSync('/tmp/startup-export',{recursive:true});fs.writeFileSync('/tmp/startup-export/paths.json',JSON.stringify(paths));fs.writeFileSync('/tmp/startup.patch',patch);execFileSync('git',['apply','--index','/tmp/startup.patch'],{stdio:'inherit'});
+          JS
+      - run: npm ci --no-audit --no-fund && npm run typecheck && npm run pretest
+      - run: node --test test/localhost.test.ts test/worker-host.test.ts && npm run build:chrome
+      - name: Export validated source blobs without moving branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from'node:fs';import{execFileSync}from'node:child_process';const api=async(p,b)=>{const r=await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/${p}`,{method:b?'POST':'GET',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(b?{body:JSON.stringify(b)}:{})});const d=await r.json();if(!r.ok)throw Error(`${p}:${r.status}`);return d;};const parent=process.env.GITHUB_SHA,base=await api(`git/commits/${parent}`),entries=[];
+          for(const path of JSON.parse(fs.readFileSync('/tmp/startup-export/paths.json','utf8'))){const blob=await api('git/blobs',{content:fs.readFileSync(path,'utf8'),encoding:'utf-8'});if(blob.sha!==execFileSync('git',['hash-object',path],{encoding:'utf8'}).trim())throw Error('hash mismatch');entries.push({path,mode:'100644',type:'blob',sha:blob.sha});}fs.writeFileSync('/tmp/startup-export/blobs.json',JSON.stringify({parent,baseTree:base.tree.sha,entries},null,2));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: startup-verification-${{ github.run_id }}
+          path: /tmp/startup-export/
+          retention-days: 2
