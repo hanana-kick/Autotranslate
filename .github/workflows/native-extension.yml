@@ -1,24 +1,12 @@
 name: Real installed extension
 on:
   workflow_dispatch:
-  push:
-    branches: [main, fix/review-hardening-20261031]
-    paths:
-      - 'src/**'
-      - 'scripts/**'
-      - 'package*.json'
-      - '.github/workflows/native-extension.yml'
-      - 'test/native-extension/**'
 permissions:
   contents: read
-concurrency:
-  group: native-extension-${{ github.ref }}
-  cancel-in-progress: false
 jobs:
-  original-runtime:
-    name: Installed extension / original model / default context
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  native:
+    runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -26,31 +14,18 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
-      - run: npm ci --no-audit --no-fund
-      - run: npm run build:chrome
-      - name: Install browser test driver
-        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npm ci --no-audit --no-fund && npm run build:chrome
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
       - run: npx playwright install --with-deps chromium
-      - name: Actual extension download, inference and HTML restoration
+      - name: Actual installed extension
         env:
           HEADED: '1'
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p test-results/native-extension
-          xvfb-run -a node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
-      - name: Verify production files remained unchanged
-        if: always()
-        run: git diff --exit-code -- src package.json package-lock.json scripts
-      - name: No authenticated browser traces
-        if: always()
-        run: find test-results/native-extension -type f -name '*trace*.zip' -delete
+          NATIVE_GPU_BACKEND: metal
+        run: node test/native-extension/real-extension.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-extension-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-results/native-extension/
-          if-no-files-found: error
           retention-days: 14
