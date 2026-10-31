@@ -17,7 +17,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  browser:
+    uses: ./.github/workflows/browser.yml
+    permissions:
+      contents: read
+
   release:
+    needs: browser
     name: Package and publish
     runs-on: ubuntu-latest
     steps:
