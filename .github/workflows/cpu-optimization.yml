@@ -1,0 +1,87 @@
+name: Real CPU translation audit
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths:
+      - .github/workflows/cpu-optimization.yml
+      - test/optimization/cpu-real.mjs
+permissions:
+  contents: read
+concurrency:
+  group: cpu-audit-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  real-cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npx playwright install --with-deps chromium
+      - name: Download pinned CPU runtime and verify release digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/llama" test-results/cpu-real
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/b11979 > "$RUNNER_TEMP/llama-release.json"
+          node --input-type=module <<'JS'
+          import {readFileSync, writeFileSync} from 'node:fs';
+          const release=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/llama-release.json','utf8'));
+          const asset=release.assets.find(a=>a.name==='llama-b11979-bin-ubuntu-x64.tar.gz');
+          if(!asset?.digest?.startsWith('sha256:')) throw new Error('CPU release asset/digest missing');
+          writeFileSync(process.env.RUNNER_TEMP+'/llama.sha',asset.digest.slice(7)+'  '+process.env.RUNNER_TEMP+'/llama.tar.gz\n');
+          writeFileSync('test-results/cpu-real/runtime-provenance.json',JSON.stringify({tag:release.tag_name,commit:release.target_commitish,asset:asset.name,digest:asset.digest},null,2));
+          JS
+          curl -fL --retry 3 https://github.com/ggml-org/llama.cpp/releases/download/b11979/llama-b11979-bin-ubuntu-x64.tar.gz -o "$RUNNER_TEMP/llama.tar.gz"
+          sha256sum -c "$RUNNER_TEMP/llama.sha"
+          tar -xzf "$RUNNER_TEMP/llama.tar.gz" -C "$RUNNER_TEMP/llama"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/autotranslate-cpu
+          key: translategemma-4b-q8-f5006ddf207becaa
+      - name: Download genuine model weights and verify SHA-256
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.cache/autotranslate-cpu"
+          model="$HOME/.cache/autotranslate-cpu/translategemma-4b-it.Q8_0.gguf"
+          if [ ! -f "$model" ]; then
+            curl -fL --retry 3 --max-time 900 'https://huggingface.co/mradermacher/translategemma-4b-it-GGUF/resolve/35a7486e128b19642cdc72d7b91b21ba388aaf42/translategemma-4b-it.Q8_0.gguf?download=true' -o "$model.part"
+            mv "$model.part" "$model"
+          fi
+          echo "f5006ddf207becaace1668113a61b31cf8b2e03f0f0baa0d1ca37eb8371d4bc1  $model" | sha256sum -c -
+          stat -c '%s' "$model" > test-results/cpu-real/model-bytes.txt
+      - name: Execute CPU inference and real browser DOM lifecycle
+        run: |
+          set -euo pipefail
+          binary="$(find "$RUNNER_TEMP/llama" -name llama-server -type f | head -1)"
+          test -n "$binary"
+          export LD_LIBRARY_PATH="$(dirname "$binary"):${LD_LIBRARY_PATH:-}"
+          "$binary" --version > test-results/cpu-real/runtime-version.txt 2>&1
+          "$binary" -m "$HOME/.cache/autotranslate-cpu/translategemma-4b-it.Q8_0.gguf" -ngl 0 -t 4 -tb 4 -c 4096 -np 1 --host 127.0.0.1 --port 8766 > test-results/cpu-real/server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 180); do
+            if curl -fsS http://127.0.0.1:8766/health >/dev/null; then ready=1; break; fi
+            kill -0 "$pid" || { cat test-results/cpu-real/server.log; exit 1; }
+            sleep 1
+          done
+          test "$ready" = 1
+          node test/optimization/cpu-real.mjs 2>&1 | tee test-results/cpu-real/run.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-cpu-evidence-${{ github.run_id }}
+          path: test-results/cpu-real/
+          retention-days: 14
+          if-no-files-found: warn
