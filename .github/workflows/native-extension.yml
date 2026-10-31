@@ -25,6 +25,7 @@ on:
       - '.github/workflows/native-extension.yml'
       - '.github/workflows/release.yml'
       - 'test/native-extension/**'
+      - 'test/dynamic-extension/**'
 
 permissions:
   contents: read
@@ -55,7 +56,7 @@ jobs:
       - name: Install pinned browser test driver
         run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
       - run: npx playwright install --with-deps chromium
-      - name: Actual installed extension - original SDK and model, real UI and DOM
+      - name: Actual installed extension - static and dynamic DOM, original SDK and model
         env:
           HEADED: '1'
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -64,10 +65,12 @@ jobs:
           set -euo pipefail
           mkdir -p test-results/native-extension
           node --check test/native-extension/real-extension.mjs
+          node --check test/dynamic-extension/dynamic-page.mjs
+          node --check test/dynamic-extension/run-dynamic.mjs
           if [ "$RUNNER_OS" = Linux ]; then
-            xvfb-run -a node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
+            xvfb-run -a node test/dynamic-extension/run-dynamic.mjs 2>&1 | tee test-results/native-extension/execution.log
           else
-            node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
+            node test/dynamic-extension/run-dynamic.mjs 2>&1 | tee test-results/native-extension/execution.log
           fi
       - name: Verify production files remained unchanged during testing
         if: always()
