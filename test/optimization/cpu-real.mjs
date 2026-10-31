@@ -17,7 +17,7 @@ for (const name of ['constants', 'gemma', 'local', 'targets', 'pagecontext', 'en
   runInThisContext(await readFile(join(root, 'build/ts/src/lib', `${name}.js`), 'utf8'));
 }
 const AT = globalThis.AT;
-const calls = [], checks = [], errors = [], states = [];
+const calls = [], checks = [], errors = [];
 let phase = 'warmup';
 const post = async (path, payload) => {
   const response = await fetch(endpoint + path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -104,7 +104,7 @@ async function open(name, body, source = 'en') {
     AT.i18n = { msg: (key) => key };
     AT.sendMessage = (message) => {
       if (message.type === 'at/batch') { qa.started++; return window.cpuBatch(message); }
-      qa.reports.push(message); return Promise.resolve({ ok: true });
+      qa.reports.push({ ...message, atMs: performance.now() }); return Promise.resolve({ ok: true });
     };
   }, source);
   await page.addScriptTag({ content: await readFile(join(root, 'build/ts/src/content.js'), 'utf8') });
@@ -114,13 +114,15 @@ async function open(name, body, source = 'en') {
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     qa.nodes = []; let node; while ((node = walker.nextNode())) qa.nodes.push({ node, text: node.nodeValue });
     qa.attributes = qa.elements.map((el) => JSON.stringify([...el.attributes].map((a) => [a.name, a.value])));
-    qa.start = () => qa.handlers['at/content-translate']({ settings: qa.settings, decision: { action: 'translate' } });
+    qa.start = () => { qa.startAt = performance.now(); return qa.handlers['at/content-translate']({ settings: qa.settings, decision: { action: 'translate' } }); };
     qa.restore = () => qa.handlers['at/content-restore']();
   });
   return page;
 }
 async function capture(page, name) {
-  await page.screenshot({ path: join(out, `${name}.png`), fullPage: true });
+  // Default caret hiding adds an empty style attribute to inputs. Preserve the
+  // real DOM: screenshots must not cause the attribute mismatch being tested.
+  await page.screenshot({ path: join(out, `${name}.png`), fullPage: true, caret: 'initial' });
   await writeFile(join(out, `${name}.html`), await page.content());
 }
 async function exactRestore(page) {
@@ -135,8 +137,14 @@ async function exactRestore(page) {
 async function check(name, fn) {
   const start = performance.now(); phase = name;
   try { const detail = await fn(); checks.push({ name, passed: true, ms: performance.now() - start, ...detail }); }
-  catch (error) { checks.push({ name, passed: false, error: error.stack }); throw error; }
-  finally { await writeFile(join(out, 'checks.json'), JSON.stringify(checks, null, 2)); }
+  catch (error) {
+    checks.push({ name, passed: false, error: error.stack }); process.exitCode = 1;
+    for (const [index, page] of context.pages().entries()) await capture(page, `${name}-failure-${index}`).catch(() => {});
+    console.error(error);
+  } finally {
+    await writeFile(join(out, 'checks.json'), JSON.stringify(checks, null, 2));
+    for (const page of context.pages()) await page.close();
+  }
 }
 try {
   await generation(AT.local.buildTranslatePrompt('en', 'ko', 'The page is ready.'), ['The page is ready.'], 1024);
@@ -144,31 +152,38 @@ try {
     const page = await open('article', '<nav>Documentation</nav><main><h1>Install the application</h1><p>The application runs on your computer. Your documents remain private.</p><p>Read <a id="guide" href="#guide">the installation guide</a> before continuing.</p><pre>npm install</pre><input id="draft" value="user draft"><button id="button" translate="no">Click</button></main><footer>Contact support</footer>');
     await page.evaluate(() => { qa.clicks = 0; document.querySelector('#button').addEventListener('click', () => qa.clicks++); document.querySelector('#draft').focus(); });
     await capture(page, 'article-before');
+    assert.equal(await page.evaluate(() => document.body.innerHTML === qa.original), true, 'the capture itself must not mutate authored HTML');
     const start = performance.now(), before = calls.length;
     const result = await page.evaluate(() => qa.start());
     const elapsedMs = performance.now() - start;
+    assert.equal(result.failed, 0);
+    const firstApplyMs = await page.evaluate(() => (qa.reports.find((r) => r.translated > 0)?.atMs ?? performance.now()) - qa.startAt);
     const text = await page.locator('main').innerText();
     assert.match(text, /[가-힣]/u, 'genuine Korean output reached the HTML');
     assert.equal(await page.locator('pre').innerText(), 'npm install');
     assert.equal(await page.locator('#draft').inputValue(), 'user draft');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'draft', 'translation preserves focus');
     assert.ok((await page.locator('#guide').innerText()).trim());
     assert.equal(await page.locator('#guide').getAttribute('href'), '#guide');
     await page.locator('#button').click(); assert.equal(await page.evaluate(() => qa.clicks), 1);
     await capture(page, 'article-translated');
+    const changedNodes = await page.evaluate(() => qa.nodes.filter(({ node, text }) => node.nodeValue !== text).length);
+    assert.equal(changedNodes, 7, 'all seven eligible text nodes changed through real inference');
     const after = calls.length, cacheStart = performance.now();
     await page.evaluate(() => qa.start());
     const cacheMs = performance.now() - cacheStart;
     assert.equal(calls.length, after, 'unchanged page does not infer again');
     const restore = await exactRestore(page);
-    assert.ok(restore.exactHtml && restore.exactText && restore.sameElements && restore.sameAttributes);
+    assert.ok(restore.exactHtml && restore.exactText && restore.sameElements && restore.sameAttributes, JSON.stringify(restore));
     await capture(page, 'article-restored'); await page.close();
-    return { elapsedMs, generations: after - before, cacheMs, restore, result, renderedText: text };
+    return { elapsedMs, firstApplyMs, generations: after - before, changedNodes, cacheMs, restore, result, renderedText: text };
   });
   await check('japanese-to-korean-restore', async () => {
     const page = await open('japanese', '<main><h1>利用案内</h1><p>このアプリはオフラインで動作します。</p><p>設定画面で言語を選択してください。</p></main>', 'ja');
     const start = performance.now(), before = calls.length;
-    await page.evaluate(() => qa.start());
+    const result = await page.evaluate(() => qa.start());
     const elapsedMs = performance.now() - start;
+    assert.equal(result.failed, 0);
     assert.match(await page.locator('main').innerText(), /[가-힣]/u);
     await capture(page, 'japanese-translated');
     const restore = await exactRestore(page); assert.ok(restore.exactHtml && restore.exactText);
