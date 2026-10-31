@@ -30,6 +30,16 @@ jobs:
           if(createHash('sha256').update(payload).digest('hex')!=='3a0a729539aa17a572810ed6dd3f2690bf9f2901f13b66b356de4e3729dd29f7')throw Error('transport integrity mismatch');
           const script=source.split("node --input-type=module <<'NODE'\n")[1].split('\n          NODE')[0].replace(match[0],`const payload=${JSON.stringify(payload)};`);
           execFileSync(process.execPath,['--input-type=module'],{input:script,stdio:['pipe','inherit','inherit']});
+          const records=JSON.parse(fs.readFileSync('/tmp/native-records.json','utf8'));
+          for(const [path,from,to,expected] of [
+            ['src/lib/localhost.ts','  function boundedResponse(instance: LlmInstance, prompt: string): Promise<string> {\n    let timer:', '  function boundedResponse(instance: LlmInstance, prompt: string): Promise<string> {\n    // Idle eviction measures quiet time, never the duration of active native work.\n    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }\n    let timer:', '8cb39fbfbbe2783130f166ae475ab4c94d87da15'],
+            ['test/localhost.test.ts','  AT.local.SOFTWARE_GENERATION_TIMEOUT_MS = 100;','  AT.local.SOFTWARE_GENERATION_TIMEOUT_MS = 100;\n  AT.local.IDLE_UNLOAD_MS = 15;','bdabe5142723ec9db20ccf2f866bcb6775fa0ce3']
+          ]) {
+            const text=fs.readFileSync(path,'utf8');if(!text.includes(from))throw Error('missing patch anchor');fs.writeFileSync(path,text.replace(from,to));
+            if(execFileSync('git',['hash-object',path],{encoding:'utf8'}).trim()!==expected)throw Error('idle fix integrity mismatch');
+            records.find(r=>r.path===path).after=expected;
+          }
+          fs.writeFileSync('/tmp/native-records.json',JSON.stringify(records));
           JS
       - run: npm ci --no-audit --no-fund
       - name: Typecheck and regression tests
