@@ -14,6 +14,8 @@ const extension = resolve(root, 'build/chrome');
 const output = resolve(process.env.NATIVE_QA_DIR || 'test-results/native-extension');
 await mkdir(output, { recursive: true });
 const token = process.env.HF_TOKEN || '';
+const maxTokens = Number(process.env.NATIVE_MAX_TOKENS || 1024);
+assert.ok(Number.isInteger(maxTokens) && maxTokens >= 128 && maxTokens <= 8192);
 const clean = (value) => token ? String(value).split(token).join('[REDACTED]') : String(value);
 const safeUrl = (value) => { try { const u = new URL(value); return u.origin + u.pathname; } catch { return clean(value); } };
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -46,7 +48,7 @@ const summary = {
   browserFlags: ['--use-angle=swiftshader', '--enable-unsafe-webgpu', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage'],
   softwareRendering: true, cpu: cpus()[0]?.model, logicalCpus: cpus().length, memoryBytes: totalmem(),
   inferenceDouble: false, productionCodeInjection: false, nativeInferenceBridge: false,
-  tracing: false, results: [], errors: [], consoleMessages: [], responses: [],
+  tracing: false, configuration: { maxTokens, appliedThrough: 'shipped options UI' }, results: [], errors: [], consoleMessages: [], responses: [],
   fullTranslationRestorePassed: false, stage: 'install-extension'
 };
 const save = () => writeFile(join(output, 'summary.json'), clean(JSON.stringify(summary, null, 2)));
@@ -96,8 +98,13 @@ try {
   assert.match(worker.url(), /^chrome-extension:\/\/[^/]+\/background\.js$/);
   const id = worker.url().split('/')[2]; summary.extensionId = id; summary.workerUrl = worker.url();
   await checkpoint('real-extension-service-worker-started', { workerUrl: worker.url() });
-  welcome = context.pages().find((p) => p.url() === `chrome-extension://${id}/welcome.html`) || await context.newPage();
-  if (!welcome.url().endsWith('/welcome.html')) await welcome.goto(`chrome-extension://${id}/welcome.html`);
+  // Observe the extension's own install page; do not open a competing copy.
+  const welcomeDeadline = Date.now() + 30000;
+  while (!welcome && Date.now() < welcomeDeadline) {
+    welcome = context.pages().find((p) => p.url() === `chrome-extension://${id}/welcome.html`);
+    if (!welcome) await pause(100);
+  }
+  assert.ok(welcome, 'the installed extension opened its own onboarding page');
   await welcome.waitForFunction(() => document.querySelector('#targetLang').options.length > 1 && document.querySelector('#status').textContent.length > 0);
   assert.match(await welcome.title(), /Autotranslate/); assert.equal(await welcome.locator('#start').isDisabled(), true);
   await welcome.locator('#targetLang').selectOption('ko');
@@ -109,6 +116,19 @@ try {
   });
   await capture(welcome, '01-installed-onboarding');
   await checkpoint('shipped-onboarding-rendered', { supported: summary.beforeModel.supported, adapter: summary.adapter });
+  if (maxTokens !== 1024) {
+    await stage('configure-context-through-shipped-options');
+    const setup = await context.newPage();
+    await setup.goto(`chrome-extension://${id}/options.html`);
+    await setup.waitForFunction(() => document.querySelector('#targetLang').options.length > 1);
+    await setup.locator('#localMaxTokens').fill(String(maxTokens));
+    await setup.locator('#save').click();
+    await setup.waitForFunction(() => document.querySelector('#saveStatus').dataset.kind === 'ok');
+    await setup.reload();
+    await setup.waitForFunction((n) => document.querySelector('#localMaxTokens').value === String(n), maxTokens);
+    await checkpoint('context-budget-set-through-original-ui', { maxTokens });
+    await setup.close();
+  }
   await stage('download-and-load-default-model');
   if (await welcome.locator('#download').isDisabled()) throw new Error(`Extension refused this browser: ${await welcome.locator('#support').innerText()}`);
   if (token) await welcome.locator('#modelToken').fill(token);
