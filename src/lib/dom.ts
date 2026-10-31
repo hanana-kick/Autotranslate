@@ -150,6 +150,7 @@ namespace AT.dom {
 
     // A restore record and a completed translation are different states.
     const originals = new Map<Text, Original>();
+    let completed = 0;
     const cache = new Map<string, { answers: string[]; bytes: number }>();
     let cacheBytes = 0;
     let generation = 0;
@@ -165,6 +166,7 @@ namespace AT.dom {
     }
 
     function remember(key: string, answers: string[]): void {
+      if (answers.some((answer) => AT.outputIssue(key, answer))) return;
       const bytes = 2 * (key.length + answers.reduce((sum, answer) => sum + answer.length, 0));
       if (bytes > MAX_CACHE_BYTES) return;
       const old = cache.get(key);
@@ -179,13 +181,18 @@ namespace AT.dom {
       }
     }
 
+    function forget(node: Text): void {
+      if (originals.get(node)?.complete) completed--;
+      originals.delete(node);
+    }
+
     function prune(): void {
-      for (const node of originals.keys()) if (node.isConnected === false) originals.delete(node);
+      for (const node of originals.keys()) if (node.isConnected === false) forget(node);
     }
 
     function stats(): { translated: number; cached: number; runs: number } {
       prune();
-      return { translated: [...originals.values()].filter((record) => record.complete).length,
+      return { translated: completed,
         cached: cache.size, runs: mergedRuns };
     }
     // Filled in by collect(): node -> run id, run id -> items.
@@ -197,7 +204,7 @@ namespace AT.dom {
     function itemFor(node: Text): Item {
       const known = originals.get(node);
       const source = known && known.applied === node.nodeValue ? known.source : (node.nodeValue ?? '');
-      if (known && known.applied !== node.nodeValue) originals.delete(node);
+      if (known && known.applied !== node.nodeValue) forget(node);
       return { node, source, ...splitWhitespace(source) };
     }
 
@@ -210,7 +217,7 @@ namespace AT.dom {
       // rewrote the text, forget the record and treat it as new.
       if (known) {
         if (known.applied === node.nodeValue) return !known.complete;
-        originals.delete(node);
+        forget(node);
       }
       return true;
     }
@@ -226,7 +233,11 @@ namespace AT.dom {
     function apply(item: Item, translated: string, complete = true): boolean {
       const body = translated.trim();
       if (!body || !owns(item)) return false;
+      const issue = AT.outputIssue(item.source, body);
+      if (issue) throw new Error('invalid translation output: ' + issue);
       const next = item.lead + body + item.trail;
+      const wasComplete = originals.get(item.node)?.complete === true;
+      if (wasComplete !== complete) completed += complete ? 1 : -1;
       originals.set(item.node, { source: item.source, text: item.source, applied: next, complete });
       if (item.node.nodeValue !== next) item.node.nodeValue = next;
       return true;
@@ -244,6 +255,34 @@ namespace AT.dom {
       runOf.clear();
       const start = root && root.nodeType === 9 ? (root as Document).documentElement : (root as Element | null);
       const nodes: Text[] = [];
+      const styles = new WeakMap<Element, CSSStyleDeclaration>();
+      const hidden = new WeakMap<Element, boolean>();
+      const view = (start?.ownerDocument ?? doc as unknown as Document)?.defaultView;
+      const style = (e: Element): CSSStyleDeclaration | null => {
+        if (!view?.getComputedStyle) return null;
+        let value = styles.get(e);
+        if (!value) { value = view.getComputedStyle(e); styles.set(e, value); }
+        return value;
+      };
+      const subtreeHidden = (e: Element): boolean => {
+        const cached = hidden.get(e);
+        if (cached !== undefined) return cached;
+        const css = style(e);
+        const own = css?.display === 'none' || css?.contentVisibility === 'hidden' || css?.opacity === '0';
+        const parent = e.parentElement;
+        const closedDetails = parent?.tagName === 'DETAILS' && !parent.hasAttribute('open') &&
+          e !== Array.from(parent.children).find((child) => child.tagName === 'SUMMARY');
+        const value = own || Boolean(closedDetails) || Boolean(parent && subtreeHidden(parent));
+        hidden.set(e, value);
+        return value;
+      };
+      const rendered = (node: Text): boolean => {
+        const parent = node.parentElement;
+        if (!parent || subtreeHidden(parent)) return false;
+        if (parent.tagName === 'DETAILS' && !parent.hasAttribute('open')) return false;
+        const css = style(parent);
+        return css?.visibility !== 'hidden' && css?.visibility !== 'collapse';
+      };
       if (!start) return nodes;
       let current: Item[] | null = null;
       const flush = () => {
@@ -260,7 +299,7 @@ namespace AT.dom {
           if (nodes.length >= limit) return;
           if (child.nodeType === 3) {
             const textNode = child as Text;
-            if (!accepted(textNode)) {
+            if (!accepted(textNode) || !rendered(textNode)) {
               // Whitespace and punctuation between inline elements get their own
               // text node; the run's key cannot carry them, so it has to end
               // here instead of welding the words on both sides.
@@ -272,7 +311,7 @@ namespace AT.dom {
             nodes.push(textNode);
           } else if (child.nodeType === 1) {
             const childElement = child as Element;
-            if (LEAF_TAGS[childElement.tagName]) { flush(); continue; }
+            if (LEAF_TAGS[childElement.tagName] || subtreeHidden(childElement)) { flush(); continue; }
             if (BLOCK_TAGS[childElement.tagName]) {
               flush();
               if (!isIgnoredElement(childElement)) visit(childElement);
@@ -346,7 +385,14 @@ namespace AT.dom {
         if (!Array.isArray(answers) || answers.length !== texts.length) {
           throw new Error('the model returned an unexpected number of results');
         }
-        return answers.map((answer) => typeof answer === 'string' ? answer.trim() : '');
+        return answers.map((answer, index) => {
+          const value = typeof answer === 'string' ? answer.trim() : '';
+          const issue = AT.outputIssue(texts[index] ?? '', value);
+          // An empty segment can coexist with valid partial results. It remains
+          // incomplete below; structural corruption must never enter any cache.
+          if (issue && issue !== 'empty-output') throw new Error('invalid translation output: ' + issue);
+          return value;
+        });
       };
       const write = (item: Item, answer: string, complete = true): void => {
         if (!cancelled() && apply(item, answer, complete)) wrote++;
@@ -364,6 +410,11 @@ namespace AT.dom {
         }
         if (cancelled() || !owns(item)) return;
         const complete = answers.length === parts.length && answers.every(Boolean);
+        if (!complete) {
+          failed++;
+          error ??= 'empty translation segment';
+          firstError ??= new Error(error);
+        }
         if (!answers.some(Boolean)) return;
         // A partial answer owns a restore record but is NOT complete. Its next
         // request is built from item.source, never from mixed-language DOM text.
@@ -391,6 +442,10 @@ namespace AT.dom {
             if (pieces) {
               // Validate the entire unit before writing any part of it.
               if (!cancelled() && items.every(owns)) {
+                for (let index = 0; index < items.length; index++) {
+                  const issue = AT.outputIssue(items[index]!.source, pieces[index]!);
+                  if (issue) throw Object.assign(new Error(issue), { reason: 'invalid-output' });
+                }
                 items.forEach((item, index) => write(item, pieces![index]!));
                 mergedRuns++;
               }
@@ -401,6 +456,12 @@ namespace AT.dom {
                 if (cancelled()) break;
                 await single(item, JSON.stringify(['run-fallback', items.map((part) => part.source)]));
               }
+              // A validated per-node fallback is also an aligned translation.
+              // Cache the whole run so repeated link fragments do not repeatedly
+              // spend a generation attempting markers the model already omitted.
+              if (!cancelled() && items.every((item) => owns(item) && originals.get(item.node)?.complete)) {
+                remember(key, items.map((item) => splitWhitespace(originals.get(item.node)!.applied).core));
+              }
             }
           }
         } catch (caught: unknown) {
@@ -409,7 +470,7 @@ namespace AT.dom {
           firstError ??= caught;
           error ??= String((caught as { message?: unknown })?.message ?? caught);
         }
-        if (wrote > before && !cancelled()) onApply?.(stats().translated);
+        if (wrote > before && !cancelled()) onApply?.(completed);
       }
       if (!cancelled() && failed > 0 && wrote === 0) throw firstError ?? new Error(error ?? 'translation failed');
       return { requested, translated: stats().translated, runs: mergedRuns, failed, error };
@@ -444,7 +505,7 @@ namespace AT.dom {
             node.nodeValue = entry.text;
             restored += 1;
           }
-          originals.delete(node);
+          forget(node);
         }
         // Keyed by source text alone, so it cannot survive a restore: the next
         // pass may be translating into a different language.

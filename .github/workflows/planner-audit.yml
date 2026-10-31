@@ -1,18 +1,19 @@
 name: Planner quality audit
 on:
   workflow_dispatch:
+  workflow_call:
   push:
-    branches: [fix/review-hardening-20261031]
+    branches: [main, fix/review-hardening-20261031]
     paths:
       - .github/workflows/planner-audit.yml
-      - test/optimization/planner-audit.mjs
+      - test/optimization/**
       - src/lib/targets.ts
       - src/lib/pipeline.ts
       - src/lib/dom.ts
 permissions:
   contents: read
 concurrency:
-  group: planner-audit-${{ github.ref }}
+  group: planner-audit-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   acceptance:
@@ -30,13 +31,14 @@ jobs:
       - run: npm run build
       - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
       - run: npx playwright install --with-deps chromium
-      - name: Audit actual native DOM request order and planning CPU cost
+      - name: Real DOM order, acceptance and planning CPU budget
         env:
           PLANNER_ENFORCE: '1'
         run: |
           set -euo pipefail
           mkdir -p test-results/planner
           node test/optimization/planner-audit.mjs 2>&1 | tee test-results/planner/run.log
+          node test/optimization/check-budget.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with:

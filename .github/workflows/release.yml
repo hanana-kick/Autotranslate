@@ -1,7 +1,7 @@
 name: Release
 
-# Publish only after both deterministic browser regressions AND real installed
-# extension inference/restoration pass. Gated model access uses HF_TOKEN.
+# Publishing requires real original-model E2E, deterministic browser regression,
+# planner acceptance, and the build action's type/unit/package checks.
 on:
   push:
     branches: [main]
@@ -18,16 +18,18 @@ jobs:
     uses: ./.github/workflows/browser.yml
     permissions:
       contents: read
-
+  planner:
+    uses: ./.github/workflows/planner-audit.yml
+    permissions:
+      contents: read
   native:
     uses: ./.github/workflows/native-extension.yml
     permissions:
       contents: read
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-
   release:
-    needs: [browser, native]
+    needs: [browser, native, planner]
     name: Package and publish
     runs-on: ubuntu-latest
     steps:
@@ -55,11 +57,11 @@ jobs:
             echo "Autotranslate $version, built from \`${GITHUB_SHA::12}\`."
             echo
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "- real installed extension: original SDK/model, translation and exact HTML restoration"
+            echo "- original SDK/model, static and dynamic translation and exact HTML restoration"
+            echo "- planner acceptance and bounded DOM regression checks"
             echo
-            echo "Chrome: unzip, then load the folder from chrome://extensions with"
-            echo "Developer mode on. Firefox: install the zip as a temporary add-on from"
-            echo "about:debugging, or sign it with web-ext."
+            echo "Chrome: unzip and load from chrome://extensions in Developer mode."
+            echo "Firefox: temporary installation from about:debugging, or sign with web-ext."
           } > "$notes"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" "${files[@]}" --clobber

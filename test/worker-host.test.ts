@@ -94,3 +94,26 @@ test('worker host: generation progress cannot indefinitely extend the phase dead
   const progress = setInterval(() => worker.send({ kind: 'status', status: { state: 'busy', supported: true, phase: 'generate', outputChars: 4 } }), 5);
   try { await failed; assert.equal(worker.terminated, true); } finally { clearInterval(progress); }
 });
+
+
+test('worker host: invalid output retries once with a fresh original worker', async () => {
+  const AT = fixture();
+  const request = AT.localhost.handle({ type: 'at/local-translate', modelId: 'fixture-model', texts: ['Hello.'], source: 'en', target: 'ko' });
+  await tick(); const first = FakeWorker.instances[0]!;
+  first.send({ kind: 'status', status: { state: 'error', reason: 'invalid-output', lastError: 'padding tokens' } });
+  await tick(); const second = FakeWorker.instances[1]!;
+  assert.equal(first.terminated, true);
+  assert.equal(second.url, first.url, 'the engine is never substituted');
+  second.reply({ translations: ['안녕하세요.'] });
+  assert.deepEqual((await request).translations, ['안녕하세요.']);
+  await AT.localhost.handle({ type: 'at/local-unload' });
+});
+
+test('worker host: corrupt retry fails, it never loops until green', async () => {
+  const AT = fixture();
+  const request = AT.localhost.handle({ type: 'at/local-translate', modelId: 'fixture-model', texts: ['Hello.'], source: 'en', target: 'ko' });
+  const failure = assert.rejects(request, /invalid|padding/);
+  await tick(); FakeWorker.instances[0]!.send({ kind: 'status', status: { state: 'error', reason: 'invalid-output', lastError: 'padding' } });
+  await tick(); FakeWorker.instances[1]!.send({ kind: 'status', status: { state: 'error', reason: 'invalid-output', lastError: 'padding' } });
+  await failure; assert.equal(FakeWorker.instances.length, 2);
+});

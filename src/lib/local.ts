@@ -139,6 +139,8 @@ namespace AT.local {
     softwareRendering?: boolean;
     /** Aggregate progress only: prompts and generated text are never reported. */
     outputChars?: number;
+    /** Bounded fresh-worker recoveries, not successful generations. */
+    recoveries?: number;
     lastProgressAt?: number;
   };
 
@@ -308,12 +310,15 @@ namespace AT.local {
     if (typeof reply !== 'string' || reply.length === 0) return null;
     const found: Record<string, string> = {};
     let current: number | null = null;
+    const seen = new Set<number>();
     let buffer: string[] = [];
     for (const line of reply.split('\n')) {
       const match = SEGMENT_START.exec(line);
       if (match) {
         if (current !== null) found[String(current)] = buffer.join('\n').trim();
         current = Number(match[1]);
+        if (current < 1 || current > count || seen.has(current)) return null;
+        seen.add(current);
         buffer = [line.slice(match[0].length)];
       } else if (current !== null) {
         buffer.push(line);
@@ -511,6 +516,7 @@ namespace AT.local {
       ...(input.phase === null || ['runtime', 'model-read', 'model-create', 'warmup', 'count', 'generate'].includes(String(input.phase))
         ? { phase: input.phase as ModelPhase | null } : {}),
       ...(typeof input.softwareRendering === 'boolean' ? { softwareRendering: input.softwareRendering } : {}),
+      ...(Number.isFinite(input.recoveries) ? { recoveries: Math.max(0, Number(input.recoveries)) } : {}),
       ...(Number.isFinite(input.outputChars) && Number(input.outputChars) >= 0
         ? { outputChars: Math.min(Math.round(Number(input.outputChars)), 1_000_000) } : {}),
       ...(Number.isFinite(input.lastProgressAt) && Number(input.lastProgressAt) >= 0
@@ -559,6 +565,7 @@ namespace AT.local {
     'model-missing': true,
     'model-load-failed': true,
     'generation-failed': true,
+    'invalid-output': true,
     'generation-timeout': true,
     'context-overflow': true,
     cancelled: true

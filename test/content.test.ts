@@ -511,7 +511,7 @@ test('the page context travels with the batch, and only when it says something',
   assert.equal(context.title, 'Headline', 'the title is read when no og:title is present');
 });
 
-test('the page content is translated before its chrome', async () => {
+test('visible content and chrome are translated before distant prose', async () => {
   // A menu label at the very top, a paragraph on screen, another far below.
   const env = environment();
   env.page.body.childNodes.length = 0;
@@ -539,8 +539,8 @@ test('the page content is translated before its chrome', async () => {
   const menuBatch = batches.find((batch: ATNamespace) => batch.texts.includes('Home'));
   assert.equal(menuBatch?.role, 'navigation');
   assert.ok(
-    batches.indexOf(farBatch) < batches.indexOf(menuBatch),
-    'the whole article, even far below, is finished before the menu'
+    batches.indexOf(menuBatch) < batches.indexOf(farBatch),
+    'visible menu is completed before the far-away article'
   );
 });
 
@@ -618,7 +618,7 @@ test('a translate decision translates every text and reports the count', async (
   const observer = env.observers[0];
   assert.ok(observer);
   assert.deepEqual(observer.targets, [env.page.documentElement]);
-  assert.deepEqual(observer.init, { childList: true, subtree: true, characterData: true });
+  assert.deepEqual(observer.init, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'open', 'style', 'class', 'aria-hidden', 'translate'] });
 });
 
 test('a repeated translate pass asks the provider nothing new', async () => {
@@ -1048,7 +1048,7 @@ test('a mutation re-scans the page and translates the new text', async () => {
     const observer = env.observers[0];
     assert.ok(observer);
     assert.deepEqual(observer.targets, [env.page.documentElement]);
-    assert.deepEqual(observer.init, { childList: true, subtree: true, characterData: true });
+    assert.deepEqual(observer.init, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'open', 'style', 'class', 'aria-hidden', 'translate'] });
 
     env.page.body.appendChild(env.page.make('p', {}, [t('Fresh content')]));
     env.mutate();

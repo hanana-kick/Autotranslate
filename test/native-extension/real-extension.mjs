@@ -7,8 +7,11 @@ import { execFileSync } from 'node:child_process';
 import { join, resolve, relative } from 'node:path';
 import { tmpdir, cpus, totalmem } from 'node:os';
 import { createServer } from 'node:http';
-import { chromium } from 'playwright';
-const root = process.cwd(), extension = resolve('build/chrome');
+import { chromium, firefox } from 'playwright';
+import { unusedPort, installFirefoxAddon } from './firefox-install.mjs';
+const family = process.env.QA_BROWSER || 'chromium';
+assert.ok(['chromium', 'firefox'].includes(family));
+const root = process.cwd(), extension = resolve(family === 'firefox' ? 'build/firefox' : 'build/chrome');
 const out = resolve(process.env.NATIVE_QA_DIR || 'test-results/native-extension');
 await mkdir(out, { recursive: true });
 const token = process.env.HF_TOKEN || '';
@@ -41,7 +44,7 @@ const browserFlags = backend === 'metal'
   : ['--use-angle=swiftshader',
       '--enable-unsafe-webgpu', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage'];
 const summary = { commit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
-  subject: 'Installed build/chrome with the shipped runtime and original model',
+  subject: 'Installed ' + (family === 'firefox' ? 'build/firefox' : 'build/chrome') + ' with the shipped runtime and original model', browserFamily: family,
   runtime: pkg.devDependencies['@mediapipe/tasks-genai'], model: 'translategemma-4b-it-int8-web.task',
   cpu: cpus()[0]?.model, logicalCpus: cpus().length, ram: totalmem(), platform: process.platform, backend, browserFlags,
   inferenceDouble: false, productionCodeInjection: false, nativeInferenceBridge: false,
@@ -55,14 +58,32 @@ const profile = await mkdtemp(join(tmpdir(), 'autotranslate-native-'));
 const watchdog = setTimeout(async () => { summary.failure = { stage: summary.stage, message: 'overall driver deadline' }; await save(); process.exit(2); }, 40 * 60000);
 async function capture(p, name) {
   if (!p || p.isClosed()) return;
-  await bound(p.screenshot({ path: join(out, name + '.png'), fullPage: true, caret: 'initial', timeout: 10000 }), 12000, 'screenshot');
+  await bound(p.bringToFront(), 10000, 'foreground screenshot page');
+  if (family === 'firefox') {
+    await bound(p.screenshot({ path: join(out, name + '.png'), fullPage: true, caret: 'initial', timeout: 30000 }), 35000, 'Firefox screenshot');
+    await writeFile(join(out, name + '.html'), clean(await bound(p.content(), 10000, 'HTML'))); return;
+  }
+  const session = await context.newCDPSession(p);
+  try {
+    const { cssContentSize } = await bound(session.send('Page.getLayoutMetrics'), 10000, 'layout metrics');
+    const clip = { x: 0, y: 0, width: Math.max(1, cssContentSize.width), height: Math.min(8192, Math.max(1, cssContentSize.height)), scale: 1 };
+    const { data } = await bound(session.send('Page.captureScreenshot', { format: 'png', fromSurface: true, captureBeyondViewport: true, clip }), 30000, 'browser compositor capture');
+    const png = Buffer.from(data, 'base64');
+    assert.ok(png.length > 100 && png.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])), 'a genuine PNG screenshot is required');
+    await writeFile(join(out, name + '.png'), png);
+  } finally { await session.detach().catch(() => {}); }
   await writeFile(join(out, name + '.html'), clean(await bound(p.content(), 10000, 'HTML')));
 }
 async function host(p) {
   return bound(p.evaluate(() => AT.sendMessage({ type: 'at/local-get-status' })), 10000, 'extension host status');
 }
 try {
-  context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: process.env.HEADED !== '1',
+  const firefoxPort = family === 'firefox' ? await unusedPort() : null;
+  context = family === 'firefox' ? await firefox.launchPersistentContext(profile, {
+    headless: process.env.HEADED !== '1', viewport: { width: 1200, height: 850 }, locale: 'en-US',
+    args: ['--start-debugger-server', String(firefoxPort)],
+    firefoxUserPrefs: { 'devtools.debugger.remote-enabled': true, 'devtools.debugger.prompt-connection': false, 'devtools.chrome.enabled': true, 'dom.webgpu.enabled': true }
+  }) : await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: process.env.HEADED !== '1',
     ignoreDefaultArgs: ['--disable-extensions'], viewport: { width: 1200, height: 850 }, locale: 'en-US',
     args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, ...browserFlags] });
   context.setDefaultTimeout(30000); summary.browser = context.browser().version();
@@ -71,11 +92,22 @@ try {
     p.on('console', (m) => { if (['error', 'warning'].includes(m.type())) summary.consoleMessages.push(clean(m.text()).slice(0, 2000)); });
   };
   context.on('page', observe); context.pages().forEach(observe);
-  const sw = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
-  assert.match(sw.url(), /^chrome-extension:\/\/[^/]+\/background\.js$/);
-  const id = sw.url().split('/')[2]; summary.extensionId = id;
+  let workerUrl = null;
+  if (family === 'firefox') {
+    summary.installation = await installFirefoxAddon(firefoxPort, extension);
+  } else {
+    const sw = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
+    assert.match(sw.url(), /^chrome-extension:\/\/[^/]+\/background\.js$/);
+    workerUrl = sw.url();
+  }
   const deadline = Date.now() + 30000;
-  while (!welcome && Date.now() < deadline) { welcome = context.pages().find((p) => p.url() === `chrome-extension://${id}/welcome.html`); if (!welcome) await sleep(100); }
+  while (!welcome && Date.now() < deadline) {
+    welcome = context.pages().find((p) => /^(?:chrome|moz)-extension:\/\/[^/]+\/welcome\.html$/.test(p.url()));
+    if (!welcome) await sleep(100);
+  }
+  assert.ok(welcome, 'installation must open the shipped onboarding');
+  const id = welcome.url().split('/')[2]; summary.extensionId = id;
+  const extensionOrigin = welcome.url().replace('/welcome.html', '');
   assert.ok(welcome, 'installation opens the real onboarding');
   await welcome.waitForFunction(() => document.querySelector('#targetLang').options.length > 1 && document.querySelector('#status').textContent.length > 0);
   assert.match(await welcome.title(), /Autotranslate/);
@@ -85,13 +117,16 @@ try {
       features: [...a.features], maxBufferSize: a.limits.maxBufferSize } : null;
   });
   assert.ok(summary.adapter, 'a real WebGPU adapter must be available');
-  if (backend === 'metal') assert.equal(summary.adapter.vendor, 'apple', 'Metal verification must not silently fall back to SwiftShader');
+  if (backend === 'metal' && family === 'chromium') assert.equal(summary.adapter.vendor, 'apple', 'Metal verification must not silently fall back to SwiftShader');
   await welcome.locator('#targetLang').selectOption('ko');
   await capture(welcome, '01-onboarding');
-  await passed('installed-extension-and-onboarding', { serviceWorker: sw.url(), adapter: summary.adapter });
+  await passed('installed-extension-and-onboarding', { serviceWorker: workerUrl, adapter: summary.adapter });
   // Choose the source through the real UI. Default context remains 1024.
-  options = await context.newPage(); await options.goto(`chrome-extension://${id}/options.html`);
-  await options.waitForFunction(() => document.querySelector('#sourceLang').options.length > 1);
+  options = await context.newPage(); await options.goto(`${extensionOrigin}/options.html`);
+  await options.waitForFunction(async () => {
+    const s = await AT.settings.load();
+    return document.querySelector('#sourceLang').value === s.sourceLang && document.querySelector('#targetLang').value === s.targetLang && document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled;
+  });
   await options.locator('#sourceLang').selectOption('en'); await options.locator('#targetLang').selectOption('ko');
   assert.equal(await options.locator('#localMaxTokens').inputValue(), '1024');
   await options.locator('#save').click(); await options.waitForFunction(() => document.querySelector('#saveStatus').dataset.kind === 'ok');
@@ -130,8 +165,11 @@ try {
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const origin = `http://127.0.0.1:${server.address().port}`; summary.fixtureUrl = origin;
   summary.translationCases = [];
-  options = await context.newPage(); await options.goto(`chrome-extension://${id}/options.html`);
-  await options.waitForFunction(() => document.querySelector('#sourceLang').options.length > 1);
+  options = await context.newPage(); await options.goto(`${extensionOrigin}/options.html`);
+  await options.waitForFunction(async () => {
+    const s = await AT.settings.load();
+    return document.querySelector('#sourceLang').value === s.sourceLang && document.querySelector('#targetLang').value === s.targetLang && document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled;
+  });
   for (const [name, selectors] of [['basic', ['#paragraph']], ['article', ['h1', '#paragraph', '#guide']]]) {
     await stage(`translate-${name}-through-extension`);
     page = await context.newPage(); const url = `${origin}/${name}`; await page.goto(url);
@@ -160,7 +198,10 @@ try {
     const start = performance.now();
     if (name === 'basic') await welcome.locator('#start').click();
     else {
-      await options.reload(); await options.waitForFunction(() => document.querySelector('#sourceLang').options.length > 1);
+      await options.reload(); await options.waitForFunction(async () => {
+    const s = await AT.settings.load();
+    return document.querySelector('#sourceLang').value === s.sourceLang && document.querySelector('#targetLang').value === s.targetLang && document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled;
+  });
       await options.locator('#enabled').setChecked(true); await options.locator('#save').click();
     }
     let complete = false;

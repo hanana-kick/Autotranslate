@@ -1,5 +1,5 @@
 // Planner-only audit. Identity responses isolate DOM/planning CPU costs; these
-// are NOT translations. Genuine inference is measured by cpu-real.mjs.
+// are NOT translations. Genuine inference is measured by the installed-extension workflow.
 // These adversarial acceptance cases are not a representative quality score.
 // The visible-UI case is an explicit alternative to the existing content-first
 // policy; other cases expose geometry, eligibility, semantics or budget limits.
@@ -19,6 +19,7 @@ async function run(name, html, options, accept, category='eligibility') {
   for(const file of ['constants','pagecontext','targets','dom','pipeline'])await page.addScriptTag({content:await readFile(join(root,'build/ts/src/lib',file+'.js'),'utf8')});
   if(options.scrollTo)await page.locator(options.scrollTo).scrollIntoViewIfNeeded();
   const report=await page.evaluate(async options=>{
+    const visibleTexts=[...document.querySelectorAll('p')].filter(e=>{const r=e.getBoundingClientRect();return r.bottom>=0&&r.top<=innerHeight&&r.right>=0&&r.left<=innerWidth;}).map(e=>e.textContent);
     const requests=[];let firstMs=null; const start=performance.now();
     const pipeline=AT.pipeline.create({doc:document,settings:()=>({maxNodes:options.maxNodes||600}),translate:async batch=>{
       firstMs??=performance.now()-start;
@@ -26,7 +27,7 @@ async function run(name, html, options, accept, category='eligibility') {
     }});
     const result=await pipeline.translate();const totalMs=performance.now()-start;
     const restoreStart=performance.now();pipeline.restore();const restoreMs=performance.now()-restoreStart;
-    return {result,requests,firstMs,totalMs,restoreMs,scrollY,viewport:{width:innerWidth,height:innerHeight}};
+    return {result,requests,firstMs,totalMs,restoreMs,visibleTexts,scrollY,viewport:{width:innerWidth,height:innerHeight}};
   },options);
   const verdict=accept(report);results.push({name,category,pass:verdict===true&&errors.length===0,expected:options.expected,actual:report,errors});
   if(options.screenshot)await page.screenshot({path:join(out,name+'.png'),fullPage:false,caret:'initial'});
@@ -48,7 +49,9 @@ await run('aria-navigation','<div role="navigation"><a role="link" href="#">Navi
 await run('deep-main','<main>'+'<div>'.repeat(16)+'<p>Deeply nested article</p>'+'</div>'.repeat(16)+'</main>',{expected:'main remains recognizable beyond twelve wrapper elements'},r=>roleFor(r,'Deeply nested article')==='article','semantics');
 await run('thread-root','<div class="thread-page"><main><h1>Thread title</h1><p>Original post</p></main></div>',{expected:'generic thread container does not classify the entire article as comments'},r=>roleFor(r,'Thread title')==='heading'&&roleFor(r,'Original post')==='article','semantics');
 await run('hidden-prefix-budget','<nav style="display:none">'+Array.from({length:100},(_,i)=>`<p>HIDDEN_MENU_${i}</p>`).join('')+'</nav><main><p>VISIBLE_ARTICLE</p></main>',{maxNodes:10,expected:'hidden navigation does not consume the collection window'},r=>first(r)==='VISIBLE_ARTICLE','budget');
-await run('scrolled-beyond-window','<main>'+Array.from({length:4500},(_,i)=>`<p id="row-${i}">Article row ${i}</p>`).join('')+'</main>',{scrollTo:'#row-4499',maxNodes:600,expected:'current viewport remains discoverable beyond the 4001-node collection cap'},r=>texts(r).slice(0,10).some(s=>s.includes('4499')),'budget');
+// The bottom target can be the 33rd visible row; do not confuse first ten
+// strings with the full visible cohort. Every visible row must precede offscreen rows.
+await run('scrolled-beyond-window','<main>'+Array.from({length:4500},(_,i)=>`<p id="row-${i}">Article row ${i}</p>`).join('')+'</main>',{scrollTo:'#row-4499',maxNodes:600,expected:'current viewport remains discoverable beyond the 4001-node collection cap'},r=>texts(r).slice(0,r.visibleTexts.length).includes('Article row 4499') && texts(r).slice(0,r.visibleTexts.length).every(s=>r.visibleTexts.includes(s)),'budget');
 await run('maxnodes-above-window','<main>'+Array.from({length:5002},(_,i)=>`<p>Repeated article ${i}</p>`).join('')+'</main>',{maxNodes:5000,expected:'a truncated scan must report remaining work'},r=>r.result.hasMore===true,'budget');
 await run('protected-regions','<main><p>Visible prose</p><pre>KEEP_CODE</pre><p translate="no">KEEP_NO</p><div contenteditable="true">KEEP_EDIT</div></main>',{expected:'protected text is never requested'},r=>!texts(r).some(s=>s.includes('KEEP')),'safety');
 await run('semantic-baseline','<nav>Menu label</nav><main><h1>Article title</h1><p>Article body</p><section role="comment">Reader comment</section></main>',{expected:'heading, article and explicit comment semantics remain distinct'},r=>roleFor(r,'Article title')==='heading'&&roleFor(r,'Article body')==='article'&&roleFor(r,'Reader comment')==='comment','semantics');

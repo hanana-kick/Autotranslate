@@ -162,7 +162,7 @@ export async function runDynamicPage({ context, options, host, capture, stage, p
     while (performance.now() < deadline) {
       last = await page.evaluate((selectors) => {
         const nodes = selectors ? selectors.map((s) => document.querySelector(s)) : [...document.querySelectorAll('[data-check]')];
-        return nodes.map((n) => ({ id: n?.id || '', text: n?.textContent || '', ok: !!n && /[가-힣]/u.test(n.textContent) }));
+        return nodes.map((n) => ({ id: n?.id || '', text: n?.textContent || '', ok: !!n && /[가-힣]/u.test(n.textContent) && !/^(?:\(없음\)|없음|N\/A)$/.test(n.textContent.trim()) && !/<(?:pad|end_of_turn|start_of_turn)>/.test(n.textContent) }));
       }, selectors || null);
       const status = await current();
       if (status.state === 'error') throw new Error(label + ': ' + status.lastError);

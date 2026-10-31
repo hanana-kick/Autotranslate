@@ -203,7 +203,12 @@ declare var __autotranslate: AT.content.Boot | undefined;
       state.timer = 0;
       state.dirty = false;
       runTick()
-        .catch((error) => AT.warn('dynamic translation failed', error))
+        .catch(async (error) => {
+          AT.warn('dynamic translation failed', error);
+          state.full = false; state.dirty = false; state.roots = [];
+          await report({ status: 'error', translated: state.pipeline?.stats().translated ?? 0,
+            error: String((error as Error)?.message ?? error) });
+        })
         .finally(() => {
           if (state.dirty) scheduleTick();
         });
@@ -249,6 +254,10 @@ declare var __autotranslate: AT.content.Boot | undefined;
         // Our own write: already translated, nothing to read.
         if (state.pipeline?.isTranslated(node)) continue;
         add(node.parentElement);
+        continue;
+      }
+      if (record.type === 'attributes') {
+        add(record.target as Element);
         continue;
       }
       if (record.type !== 'childList') continue;
@@ -309,7 +318,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.observer.observe(document.documentElement, {
       childList: true,
       subtree: true,
-      characterData: true
+      characterData: true,
+      attributes: true,
+      attributeFilter: ['hidden', 'open', 'style', 'class', 'aria-hidden', 'translate']
     });
   }
 
@@ -331,13 +342,17 @@ declare var __autotranslate: AT.content.Boot | undefined;
     const target = globalThis as unknown as ScrollTarget;
     if (typeof target.addEventListener !== 'function') return;
     target.addEventListener('scroll', scheduleViewportPass, { passive: true });
+    target.addEventListener('resize', scheduleViewportPass, { passive: true });
     state.scrollBound = true;
   }
 
   function stopViewportPass(): void {
     if (!state.scrollBound) return;
     const target = globalThis as unknown as ScrollTarget;
-    if (typeof target.removeEventListener === 'function') target.removeEventListener('scroll', scheduleViewportPass);
+    if (typeof target.removeEventListener === 'function') {
+      target.removeEventListener('scroll', scheduleViewportPass);
+      target.removeEventListener('resize', scheduleViewportPass);
+    }
     state.scrollBound = false;
   }
 
@@ -361,6 +376,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     let processed = 0;
     let translated = 0;
     let more = false;
+    let failure: string | null = null;
     try {
       for (const region of regions) {
         if (epoch !== state.epoch || state.stopped) break;
@@ -374,6 +390,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
         if (epoch !== state.epoch || state.stopped) break;
         processed += result.processedNodes;
         translated = result.translated;
+        if (result.failed || result.error) failure ??= result.error ?? 'translation incomplete';
         left -= Math.min(result.processedNodes, left);
         if (result.hasMore) more = true;
       }
@@ -387,7 +404,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     // Cached work may make no model requests at all, but still has DOM work
     // left. Continuation is the planner's decision, not a request-count guess.
     if (more) requestFullPass();
-    if (processed > 0) await report({ status: 'translated', translated });
+    if (processed > 0) await report({ status: failure ? 'error' : (more ? 'translating' : 'translated'), translated, error: failure });
   }
 
   /** Ask for one pass over the whole page (the queue has no regions). */
@@ -437,8 +454,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
       const result = await pipeline.translate();
       if (epoch !== state.epoch || state.stopped) return { status: 'cancelled' };
       if (result.hasMore) requestFullPass();
-      await report({ status: 'translated', translated: result.translated, error: result.error });
-      return { status: 'translated', translated: result.translated, requested: result.requested,
+      const status = result.failed || result.error ? 'error' : (result.hasMore ? 'translating' : 'translated');
+      await report({ status, translated: result.translated, error: result.error });
+      return { status, translated: result.translated, requested: result.requested,
         failed: result.failed, error: result.error };
     } finally {
       if (epoch === state.epoch) {

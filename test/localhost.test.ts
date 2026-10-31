@@ -17,7 +17,7 @@ test.afterEach(() => {
   else delete globals.navigator;
 });
 
-function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; oversized?: boolean; empty?: boolean; software?: boolean; delayed?: boolean } = {}) {
+function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; oversized?: boolean; empty?: boolean; software?: boolean; delayed?: boolean; corrupt?: boolean; streamCorrupt?: boolean } = {}) {
   resetGlobals();
   const deviceCalls: ATNamespace[] = [], devices: ATNamespace[] = [];
   const softwareAdapter = { info: { architecture: 'swiftshader' },
@@ -41,7 +41,7 @@ function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; 
         sizeInTokens: (value: string) => options.oversized && value.includes('oversized') ? 10_000 : 24,
         cancelProcessing() {},
         close() { this.closed = true; this.closeCount++; },
-        async generateResponse(prompt: string): Promise<string> {
+        async generateResponse(prompt: string, listener?: (partial: string, done: boolean) => void): Promise<string> {
           assert.equal(this.closed, false, 'a disposed runtime must not be reused');
           this.prompts.push(prompt);
           if (prompt.includes('Good morning.')) {
@@ -50,6 +50,8 @@ function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; 
           }
           if (options.delayed) await new Promise((resolve) => setTimeout(resolve, 45));
           if (number === 0 && options.firstGenerationHangs) return new Promise(() => {});
+          if (options.corrupt) return '<pad>'.repeat(946);
+          if (options.streamCorrupt) { listener?.('<pad>', false); return new Promise(() => {}); }
           return options.empty ? '' : '검증된 응답';
         }
       };
@@ -102,9 +104,9 @@ test('host: a timed-out instance is disposed before the next queued generation',
   assert.deepEqual(next.translations, ['검증된 응답']);
 });
 
-test('host: an empty answer stays empty so the DOM can retry instead of marking the source done', async () => {
+test('host: an empty native answer rejects without a successful translation', async () => {
   const { request } = host({ empty: true });
-  assert.deepEqual((await request()).translations, ['']);
+  await assert.rejects(request, /empty-output/);
 });
 
 
@@ -157,4 +159,18 @@ test('host: software prompt still uses the real token-budget guard', async () =>
   const { request, instances } = host({ software: true, oversized: true });
   await assert.rejects(() => request({ texts: ['oversized input'] }), /context|budget/i);
   assert.equal(instances[0]!.prompts.length, 1, 'only warmup, no overflowing generation');
+});
+
+
+test('host: padding tokens are rejected instead of becoming DOM text', async () => {
+  const { AT, request } = host({ corrupt: true });
+  await assert.rejects(request, /control-token/);
+  const status = await AT.localhost.status();
+  assert.equal(status.state, 'error'); assert.equal(status.reason, 'invalid-output');
+  assert.equal(status.generations, 0);
+});
+
+test('host: a streamed control token is rejected before a hanging generation finishes', async () => {
+  const { request } = host({ streamCorrupt: true });
+  await assert.rejects(request, /control-token/);
 });

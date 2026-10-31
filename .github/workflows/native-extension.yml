@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        repetition: ${{ fromJSON(inputs.backend == 'software' && '[1]' || '[1,2]') }}
+        repetition: ${{ fromJSON(inputs.backend == 'software' && '[1]' || '[1,2,3,4,5]') }}
     runs-on: ${{ inputs.backend == 'software' && 'ubuntu-latest' || 'macos-latest' }}
     timeout-minutes: ${{ inputs.backend == 'software' && 45 || 20 }}
     steps:
@@ -60,6 +60,7 @@ jobs:
         env:
           HEADED: '1'
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ENDURANCE_ROUNDS: ${{ matrix.repetition == 1 && '25' || '5' }}
         shell: bash
         run: |
           set -euo pipefail

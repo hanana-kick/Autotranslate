@@ -2,48 +2,42 @@
 
 ## Acceptance boundary
 
-`test/native-extension/real-extension.mjs` installs the built Manifest V3 extension in a fresh persistent Chromium profile and operates its shipped onboarding and Options UI. The service worker, offscreen document, inference Worker, locked `@mediapipe/tasks-genai@0.10.30` JavaScript/WASM assets, and default `translategemma-4b-it-int8-web.task` are real. There are no synthetic translation responses, capability replacements, production-module injection, external inference services or native bridges.
+`test/dynamic-extension/run-dynamic.mjs` installs the built extension in a fresh persistent profile and operates the shipped onboarding and Options UI. The service worker, offscreen document, inference Worker, locked `@mediapipe/tasks-genai@0.10.30` JavaScript/WASM assets and original `translategemma-4b-it-int8-web.task` are real. No inference double, production-module injection, external inference service, or alternative engine is used in native QA. The runner verifies vendor and installed-file hashes.
 
-The six checks are actual installation/onboarding, original-model download/load/warmup, basic-page translation, basic-page exact restoration/events, inline-article translation, and inline-article exact restoration/events. Both HTML fixtures must pass. The real host generation counter must increase. Code, user input and link destinations remain unchanged; restoration checks original HTML, text, attributes and element identities. Readiness alone is not an end-to-end pass.
+The original six static checks remain mandatory. Dynamic scenarios cover delayed insertion, same-Text-node edits, subtree replacement, continuous mutations, three infinite-scroll batches, SPA navigation, source changes during native inference, exact latest-source restoration, disabled insertion and re-enable. Two tabs then share the actual model across repeated node updates. One profile performs 25 rounds; the other profiles perform five rounds. This is bounded endurance coverage, not an hours-long soak.
 
-## Verified software execution and the production change
+## Product safety and scheduling changes
 
-Actions run `41202445967`, artifact `13044045302`, completed **all six checks** using Ubuntu, Chromium 143, a real SwiftShader software WebGPU adapter, the original SDK and original 3,896,377,344-byte task model. It performed seven page-translation generations, excluding warmup. Basic translation took 72.85 seconds; the inline article took 462.54 seconds. UI round-trip restoration was 0.379 and 4.098 seconds respectively. These are single-run observations including driver overhead, not native LiteRT CPU-backend benchmarks or linguistic-quality scores.
+Newly introduced model controls such as `<pad>`, excessive output and long repetition loops are rejected before successful caching or DOM writes. Literal controls present in the source are not automatically banned. Empty native final replies are errors. The supervisor terminates a corrupt worker and permits exactly one fresh-worker retry using the same SDK, model, prompt and device policy. A second failure is reported; it is never retried until a test turns green. `recoveries` records this recovery. This contains native corruption; it is not proof that the underlying intermittent SDK/driver cause has been identified.
 
-That run built an explicitly recorded source candidate: software adapters use a shorter instruction for **single-text** requests, retaining the source language, target language, complete input, normal Gemma turn markers and real token-budget check. Hardware adapters and numbered multi-text prompts retain the original prompt. No model weights, SDK files, context limit or GPU capability functions were replaced.
+Partial results remain incomplete and produce an error state rather than an unconditional page-wide success. Inline boundaries are validated before any piece is written, and verified fallback pieces are cached as an aligned unit. Statistics use an incremental completion count; detached records are pruned at batch boundaries. Hidden and closed-details content does not consume translation requests. Attribute/resize changes cause newly revealed text to be reconsidered.
 
-The exact tested production source blob is `b5adae752d050bcaac5aaa98451026278c2703dc`. Run `41204257647` reproduced this blob, passed **406/406** tests and built both browser packages. All **40 application-file SHA-256 values** in the resulting Chrome package match those installed during the successful CPU test, byte for byte. Its Chrome ZIP SHA-256 is `31e8ab9fe075542aaa3325f4e209cfc25f1ae570f589105b8d000d46399a2f72`. The verified source is promoted into the branch rather than left as a test-only runtime alteration.
+The planner uses actual text geometry and viewport priority before semantic tie-breakers. It reads the complete eligible discovery set before applying a bounded translation budget, avoiding the previous 4001-node discovery loss. A reusable Range avoids retaining thousands of live ranges. ARIA ancestor roles, native buttons and deep main/article structure are recognized without treating every generic thread container as a comment.
 
-Earlier unchanged long-instruction software runs failed inside the original native `LlmGpuCalculator` with `Timed out waiting for future: 5m`, followed by the extension deadline. They remain failed results. Changing precision, disabling cache rewind, or reducing the context to 256 did not resolve those recorded runs. The short-instruction result does not prove support for arbitrary long input or numbered batches on software WebGPU; those can still be expensive. CPU software rendering is functionally testable here, but is not claimed to be interactive-performance-ready.
+## Automation
 
-## Hardware execution
+- `native-extension.yml`: five fresh macOS/Metal profiles with static, dynamic and multitab original-model checks. Manual `backend=software` uses the real SwiftShader adapter and the same assertions; slower execution is not a native LiteRT CPU-backend benchmark.
+- `extended-qa.yml`: actual Firefox add-on installation and a separate public YouTube check. Firefox uses its temporary-add-on debugging protocol, not a replacement app. Live-site failures or access blocks remain failures and are documented separately from deterministic fixture success.
+- `planner-audit.yml`: 15 real-DOM acceptance cases, identity responses solely to isolate planner cost, plus coarse CPU budgets and exact request/progress counts. These results do not prove native inference performance.
+- `browser.yml`: deterministic provider doubles for control-flow, storage and browser API regressions. It cannot replace original-model E2E.
+- `release.yml`: requires native, browser and planner workflows before packaging/publishing. Version 0.1.3 avoids overwriting the existing 0.1.2 release.
 
-The initial complete hardware execution was the macOS job in Actions run `41202819104` (artifact `13042989173`), followed by two independent fresh profiles in `41203793648`. They used an Apple M2 Pro (Virtual) runner, Chromium 143.0.7499.4, a real Apple WebGPU adapter through Metal, the original SDK/model and default 1024-token context. Both pages translated and restored exactly. The exploratory matrix's other platform jobs did not pass; the entire exploratory matrix must not be described as successful.
-
-The maintained workflow repeats the hardware test twice. After any production-source promotion, its final run checks the committed application again. Current commit-specific results belong in the PR checks/evidence, not inferred from these historical run IDs.
-
-## Automation and reproducibility
-
-- `.github/workflows/native-extension.yml`: trusted-branch push, manual dispatch, and reusable workflow. Hardware uses macOS/Metal and two fresh profiles; manual `backend=software` uses Ubuntu/SwiftShader and one fresh profile with the same assertions.
-- `.github/workflows/release.yml`: publishing depends on both deterministic browser regression and actual original-model hardware E2E. Missing credentials or a failed native test blocks release.
-- `playwright@1.57.0` is pinned test-only tooling. Original SDK JavaScript/WASM assets are hash-checked against the installed locked dependency; installed file hashes are compared before and after testing.
-- `HF_TOKEN` must be an Actions secret authorized for the gated default model. Authenticated browser profiles, model weights and traces are never uploaded. Logs and HTML are redacted; an evidence scan rejects credentials before upload.
-- Temporary exporters, candidate workflows and the prior alternate-engine CPU workflow/script have been removed. Historical failed results are not relabelled as passes.
+Use Node 24. `HF_TOKEN` must be an Actions secret authorized for the gated model. Credentials, model weights, browser profiles and authenticated traces are never uploaded. Text evidence is redacted and scanned; screenshots come from the actual rendered pages. Chromium screenshots use bounded CDP capture without waiting for unrelated font/animation hooks. Capture failure remains a failure.
 
 ```sh
 npm ci
-npm run build:chrome
+npm run build
 npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
-npx playwright install chromium
-# HF_TOKEN is already supplied securely through the environment.
-HEADED=1 node test/native-extension/real-extension.mjs
-# Linux with a virtual display: xvfb-run -a node test/native-extension/real-extension.mjs
+npx playwright install chromium firefox
+HEADED=1 node test/dynamic-extension/run-dynamic.mjs
+# Optional live-site coverage, not a replay:
+HEADED=1 YOUTUBE_QA=1 node test/dynamic-extension/run-dynamic.mjs
+# Firefox package, same shipped SDK/model:
+HEADED=1 QA_BROWSER=firefox node test/dynamic-extension/run-dynamic.mjs
 ```
 
-Use Node 24 and an environment that permits extension installation; do not bypass managed-browser policies. The driver chooses Metal on macOS and SwiftShader elsewhere. Adapter identity is measured, not spoofed.
+## Evidence and limits
 
-## Evidence and remaining limits
+Current commit-specific outcomes belong in PR checks and artifacts; the existence of these workflows does not mean they passed. `summary.json` distinguishes static, dynamic, endurance and live-site outcomes, records environment/adapter/host state and generation counts, and preserves exact source restoration checks. The dynamic fixture is YouTube-like, not youtube.com. Live coverage is public search insertion and watch-page SPA navigation; logged-in variations and every site layout are not certified. Protocol validity is not a linguistic-quality score.
 
-`summary.json` records the exact commit, environment, adapter, UI configuration, host state, generation counts and each result. Before/translated/restored HTML and screenshots are actual browser output. The artifact includes the tested Chrome ZIP and SHA-256. `renderTiming` observes real DOM changes without altering extension functions; timing includes UI orchestration and is not a kernel-only benchmark.
-
-Firefox is build/package-tested only. The separate DOM planner audit still has **13 unmet conditions out of 15 deliberately adversarial fixtures**. Native inference/restoration success does not resolve those scheduling issues, certify translation quality, cover arbitrary websites, or prove long-input CPU performance. main merge and release are not authorized by these test runs.
+Historical alternate-engine tests are not evidence of this extension's operation. Earlier native runs with long software prompts, invalid output and screenshot deadlines remain failed; they are not relabelled by later fixes. Model startup readiness alone is never an end-to-end pass. Do not bypass managed-browser extension policies.

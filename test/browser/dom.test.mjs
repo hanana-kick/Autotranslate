@@ -169,3 +169,90 @@ check('new session results survive the preceding session arriving late', async (
   });
   assert.equal(await page.locator('#fixture p').textContent(), '新しい翻訳');
 });
+
+check('invalid provider output never reaches DOM or the successful cache', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture'); root.innerHTML = '<p>Hello.</p>';
+    let calls = 0;
+    const translator = AT.dom.createTranslator({ doc: document, translate: async () => ++calls === 1 ? ['<pad>'.repeat(946)] : ['안녕하세요.'] });
+    let rejected = false;
+    try { await translator.translateRoot(root); } catch { rejected = true; }
+    const initial = { rejected, text: root.textContent, ...translator.stats() };
+    await translator.translateRoot(root);
+    const final = root.textContent;
+    translator.restore(root);
+    return { initial, final, restored: root.textContent, calls };
+  });
+  assert.equal(result.initial.rejected, true);
+  assert.equal(result.initial.text, 'Hello.');
+  assert.equal(result.initial.translated, 0);
+  assert.equal(result.initial.cached, 0);
+  assert.equal(result.final, '안녕하세요.');
+  assert.equal(result.restored, 'Hello.');
+  assert.equal(result.calls, 2);
+});
+
+check('revealed text is translated by the observer without toggling or reinjection', async (page) => {
+  await page.locator('#fixture').evaluate(root => {
+    root.innerHTML = '<p>Visible original</p><div id="later" style="display:none"><p>Hidden original</p></div><details><summary>More text</summary><p id="detail">Closed detail</p></details>';
+  });
+  await contentHarness(page);
+  await page.evaluate(async () => {
+    AT.sendMessage = async message => {
+      if (message.type === AT.C.MSG.BATCH) {
+        requests.push({ message });
+        return { ok: true, translations: message.texts.map(s => '번역 ' + s) };
+      }
+      reports.push(message); return { ok: true };
+    };
+    await handlers[AT.C.MSG.CONTENT_TRANSLATE]({ settings });
+  });
+  assert.equal(await page.locator('#later p').textContent(), 'Hidden original');
+  assert.equal(await page.locator('#detail').textContent(), 'Closed detail');
+  await page.locator('#later').evaluate(e => { e.style.display = 'block'; });
+  await page.locator('details').evaluate(e => { e.open = true; });
+  await page.waitForFunction(() => document.querySelector('#later p').textContent.startsWith('번역 ') && document.querySelector('#detail').textContent.startsWith('번역 '));
+  await page.evaluate(() => handlers[AT.C.MSG.CONTENT_RESTORE]());
+  assert.equal(await page.locator('#later p').textContent(), 'Hidden original');
+  assert.equal(await page.locator('#detail').textContent(), 'Closed detail');
+});
+
+check('long-lived virtualized DOM keeps bounded records and no extra provider work', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture'); let calls = 0, peakRecords = 0;
+    const translator = AT.dom.createTranslator({ doc: document, translate: async texts => { calls += texts.length; return texts.map(s => '번역 ' + s); } });
+    for (let batch = 0; batch < 25; batch++) {
+      root.innerHTML = Array.from({ length: 100 }, (_, i) => `<p>Virtual row ${batch * 100 + i}</p>`).join('');
+      await translator.translateRoot(root, { limit: 100 });
+      peakRecords = Math.max(peakRecords, translator.stats().translated);
+    }
+    const before = calls;
+    await translator.translateRoot(root, { limit: 100 });
+    const steady = translator.stats();
+    root.replaceChildren(); translator.restore();
+    return { peakRecords, steady, final: translator.stats(), extraCalls: calls - before, calls };
+  });
+  assert.equal(result.calls, 2500);
+  assert.equal(result.extraCalls, 0);
+  assert.ok(result.peakRecords <= 100);
+  assert.ok(result.steady.cached <= 2048);
+  assert.equal(result.final.translated, 0);
+  assert.equal(result.final.cached, 0);
+});
+
+check('identical inline fallback units reuse the verified aligned cache', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = '<p>Read <a href="/guide">the guide</a> now.</p>'.repeat(2);
+    const calls = [];
+    const translator = AT.dom.createTranslator({ doc: document, translate: async texts => {
+      calls.push(...texts);
+      const dictionary = { 'Read': '읽으세요', 'the guide': '안내서', 'now.': '지금.' };
+      return texts.map(s => dictionary[s] || '마커 없이 안내서를 지금 읽으세요.');
+    } });
+    await translator.translateRoot(root);
+    return { calls, links: [...root.querySelectorAll('a')].map(a => a.textContent) };
+  });
+  assert.equal(result.calls.length, 4, 'one failed alignment plus three pieces; no second alignment failure');
+  assert.deepEqual(result.links, ['안내서', '안내서']);
+});

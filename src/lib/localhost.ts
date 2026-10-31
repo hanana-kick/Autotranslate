@@ -131,10 +131,10 @@ namespace AT.localhost {
     return Object.assign(new Error(message), { reason, code: L.codeForReason(reason) });
   }
 
-  function stopCompute(error = workerError('generation-failed', 'model operation cancelled')): void {
+  function stopCompute(error = workerError('generation-failed', 'model operation cancelled'), invalidate = true): void {
     const previous = compute;
     compute = null;
-    workerEpoch++;
+    if (invalidate) workerEpoch++;
     const active = pending;
     pending = null;
     if (active?.timer) clearTimeout(active.timer);
@@ -173,6 +173,7 @@ namespace AT.localhost {
   function workerCall(message: AT.Message): Promise<HostReply> {
     if (!compute) {
       if (typeof Worker === 'undefined') fail('runtime-load-failed', 'dedicated workers are unavailable');
+      const generationBase = generations;
       const worker = new Worker(AT.getURL('inference-worker.js'), { name: 'autotranslate-inference' });
       compute = worker;
       worker.onmessage = (event: MessageEvent) => {
@@ -180,11 +181,18 @@ namespace AT.localhost {
         const data = event.data as { kind?: string; status?: AT.local.LocalStatus; id?: number;
           reply?: HostReply; error?: { message?: string; reason?: string } };
         if (data.kind === 'status' && data.status) {
-          Object.assign(state, L.normalizeStatus(data.status));
+          const reported = L.normalizeStatus(data.status);
+          Object.assign(state, reported, { generations: generationBase + reported.generations });
           loadedBytes = state.loadedBytes;
           loadMs = state.loadMs;
           generations = state.generations;
           publish();
+          // Invalid streamed output can be reported while the native graph is
+          // still running. Its owner can terminate it without entering close().
+          if (state.reason === 'invalid-output') {
+            stopCompute(workerError('invalid-output', state.lastError ?? 'invalid model output'), false);
+            return;
+          }
           // Only the worker's real stage transitions renew the deadline. UI
           // status polling never sends work to the compute queue.
           armDeadline();
@@ -359,7 +367,7 @@ namespace AT.localhost {
 
   /** First generation on a freshly loaded model is ~8x slower; pay it here. */
   async function warmup(instance: LlmInstance): Promise<void> {
-    const answer = await boundedResponse(instance, L.wrapChatPrompt('Translate to Korean: Good morning.'));
+    const answer = await boundedResponse(instance, L.wrapChatPrompt('Translate to Korean: Good morning.'), 'Good morning.');
     if (!answer.trim()) throw new Error('model warmup returned an empty answer');
   }
 
@@ -464,6 +472,7 @@ namespace AT.localhost {
       // Keep the specific reason the loader failed with: `model-load-failed`
       // would hide whether WebGPU, the runtime or the file was at fault.
       const reason = (error as { reason?: string })?.reason ?? 'model-load-failed';
+      if (reason === 'invalid-output') fail(reason, error);
       teardown('load-failed');
       fail(reason, error);
     } finally {
@@ -483,16 +492,23 @@ namespace AT.localhost {
   }
 
   /** Includes warmup: no generation may hold the queue without a deadline. */
-  function boundedResponse(instance: LlmInstance, prompt: string): Promise<string> {
+  function boundedResponse(instance: LlmInstance, prompt: string, source: string): Promise<string> {
     // Idle eviction measures quiet time, never the duration of active native work.
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     return new Promise<string>((resolve, reject) => {
       timer = setTimeout(() => reject(new Error('generation timeout')), generationTimeout());
-      let lastPublished = 0;
+      let lastPublished = 0, streamed = '';
       instance.generateResponse(prompt, (partial, done) => {
         // Only counts/timestamps cross the worker boundary, never page content.
         if (partial) {
+          streamed += partial;
+          const issue = AT.outputIssue(source, streamed, true);
+          if (issue) {
+            const error = workerError('invalid-output', 'invalid model output: ' + issue);
+            state.state = 'error'; state.reason = 'invalid-output'; state.lastError = error.message;
+            publish(); reject(error); return;
+          }
           state.outputChars = Math.min((state.outputChars ?? 0) + partial.length, 1_000_000);
           state.lastProgressAt = Date.now();
         }
@@ -500,19 +516,23 @@ namespace AT.localhost {
           lastPublished = Date.now();
           publish();
         }
-      }).then(resolve, reject);
+      }).then((answer) => {
+        const issue = AT.outputIssue(source, answer);
+        if (issue) reject(workerError('invalid-output', 'invalid model output: ' + issue));
+        else resolve(answer);
+      }, reject);
     }).finally(() => {
       if (timer) clearTimeout(timer);
     });
   }
 
   /** A timed-out promise does not mean the native runtime has stopped. */
-  async function generate(prompt: string): Promise<string> {
+  async function generate(prompt: string, source: string): Promise<string> {
     const instance = llm;
     if (!instance) fail('no-model', 'no model is loaded');
     try {
       setPhase('generate');
-      const reply = await boundedResponse(instance, prompt);
+      const reply = await boundedResponse(instance, prompt, source);
       setPhase(null);
       generations += 1;
       touchIdleTimer();
@@ -524,6 +544,7 @@ namespace AT.localhost {
         // cancellation is best-effort
       }
       const message = String((error as { message?: unknown })?.message ?? error);
+      if ((error as { reason?: string }).reason === 'invalid-output') fail('invalid-output', error);
       // Never reuse the possibly still-busy graph after rejection or timeout.
       // The next queued request has to create a fresh, verified instance.
       teardown('generation-failed');
@@ -569,7 +590,7 @@ namespace AT.localhost {
       const tail = await translateChunk(source, target, texts.slice(middle), hint);
       return [...head, ...tail];
     }
-    const reply = await generate(batch);
+    const reply = await generate(batch, texts.join('\n'));
     if (texts.length === 1) return [reply.trim()];
     const parsed = L.parseNumbered(reply, texts.length);
     if (parsed) return parsed;
@@ -656,7 +677,19 @@ namespace AT.localhost {
       return enqueue(async () => {
         if (epoch !== workerEpoch) throw workerError('generation-failed', 'obsolete worker session');
         await checkSupport();
-        return workerCall(message);
+        try {
+          return await workerCall(message);
+        } catch (error) {
+          if ((error as { reason?: string }).reason !== 'invalid-output' || epoch !== workerEpoch) throw error;
+          // One bounded fresh-worker retry for corrupt native output. No change
+          // of model, SDK, prompt or GPU backend, and no retry loop on mutations.
+          stopCompute(workerError('invalid-output', 'discard corrupt native session'), false);
+          teardown('invalid-output-retry');
+          state.recoveries = (state.recoveries ?? 0) + 1;
+          publish();
+          AT.warn('invalid native output; retrying once with a fresh inference worker');
+          return await workerCall(message);
+        }
       });
     }
     switch (message?.type) {

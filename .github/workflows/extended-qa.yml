@@ -1,0 +1,58 @@
+name: Extended native compatibility
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['src/**', 'test/native-extension/**', 'test/dynamic-extension/**', '.github/workflows/extended-qa.yml']
+permissions:
+  contents: read
+concurrency:
+  group: extended-qa-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    name: Actual extension / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [firefox, youtube]
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund && npm run build
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npx playwright install --with-deps chromium firefox
+      - name: Original installed extension and model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HEADED: '1'
+          QA_BROWSER: ${{ matrix.target == 'firefox' && 'firefox' || 'chromium' }}
+          YOUTUBE_QA: ${{ matrix.target == 'youtube' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-extension
+          node test/dynamic-extension/run-dynamic.mjs 2>&1 | tee test-results/native-extension/execution.log
+      - name: Verify unchanged production bundle and safe evidence
+        id: evidence
+        if: always()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git diff --exit-code -- src scripts package.json package-lock.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import path from 'node:path';
+          function check(dir){if(!fs.existsSync(dir))return;for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())check(file);else if(/\.(json|log|html|txt)$/.test(file)){const s=fs.readFileSync(file,'utf8');if((process.env.HF_TOKEN&&s.includes(process.env.HF_TOKEN))||/hf_[A-Za-z0-9]{20,}/.test(s)){fs.rmSync(file);throw Error('credential-bearing evidence refused');}}}}
+          check('test-results/native-extension');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        with:
+          name: native-${{ matrix.target }}-${{ github.run_id }}
+          path: test-results/native-extension/
+          retention-days: 7

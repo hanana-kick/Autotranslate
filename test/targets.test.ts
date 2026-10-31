@@ -60,7 +60,7 @@ test('priority is viewport first, then a ring around it', () => {
   assert.equal(targets.priorityOf({ top: Number.NaN, bottom: 0 }, viewport), 'far', 'an unmeasured node is not urgent');
 });
 
-test('the page content is finished in reading order before its chrome', () => {
+test('visible chrome is scheduled before distant content', () => {
   // Content (article, headings, lists) first, top to bottom; menus and footers
   // afterwards, also top to bottom. That is what "the meaningful part is fully
   // translated" means when the page is longer than the budget.
@@ -75,8 +75,8 @@ test('the page content is finished in reading order before its chrome', () => {
   const groups = targets.plan(candidates, { band: 900 });
   assert.deepEqual(
     groups.map((group: { role: string; ids: string[] }) => `${group.role}:${group.ids.join(',')}`),
-    ['article:visible-body', 'heading:next-band', 'article:far-below', 'article:above-fold', 'navigation:visible-menu', 'footer:footer'],
-    'all content in reading order (top band first, above-the-fold last), then the chrome'
+    ['article:visible-body', 'navigation:visible-menu', 'heading:next-band', 'article:far-below', 'article:above-fold', 'footer:footer'],
+    'visibility first, with meaningful content first only within the same visibility class'
   );
   assert.equal(targets.isContent('article'), true);
   assert.equal(targets.isContent('heading'), true);
