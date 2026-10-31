@@ -1,0 +1,85 @@
+name: Verify successful software prompt promotion
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/verify-compact-promotion.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Reproduce exactly the CPU-tested source and add contract regressions
+        run: |
+          mkdir -p /tmp/compact-promotion
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'; import assert from 'node:assert/strict'; import {execFileSync} from 'node:child_process';
+          const hash=p=>execFileSync('git',['hash-object',p],{encoding:'utf8'}).trim();
+          assert.equal(hash('src/lib/localhost.ts'),'cb2da0f0b986e85cc716e5a4e7f961b032e25b33');
+          assert.equal(hash('test/localhost.test.ts'),'35bbb4fd0366cb647c9edbfe05cce80dd39bb366');
+          let s=fs.readFileSync('src/lib/localhost.ts','utf8');
+          const anchor='    const batch = L.buildBatchPrompt(source, target, texts, texts.length > 1 ? hint : null);';
+          assert.ok(s.includes(anchor));
+          s=s.replace(anchor,`    const batch = state.softwareRendering && texts.length === 1
+            ? L.wrapChatPrompt('Translate ' + (source ? AT.gemma.nameOf(source) + ' (' + source + ')' : 'the text') + ' to ' + AT.gemma.nameOf(target) + ' (' + target + '). Output only the translation.\\n\\n' + texts[0])
+            : L.buildBatchPrompt(source, target, texts, texts.length > 1 ? hint : null);`);
+          fs.writeFileSync('src/lib/localhost.ts',s);
+          assert.equal(hash('src/lib/localhost.ts'),'b5adae752d050bcaac5aaa98451026278c2703dc','exact source tested by real CPU extension run 41202445967');
+          fs.appendFileSync('test/localhost.test.ts', `
+          test('host: software single-input prompt preserves source, target and every input character', async () => {
+            const { AT, request, instances } = host({ software: true });
+            const text = 'line one\\n<at0>リンク</at0> & line two';
+            await request({ source: 'ja', target: 'ko', texts: [text] });
+            assert.equal(instances[0]!.prompts.at(-1), AT.local.wrapChatPrompt(
+              'Translate Japanese (ja) to Korean (ko). Output only the translation.\\n\\n' + text));
+          });
+          test('host: unknown source remains unknown in the software prompt', async () => {
+            const { AT, request, instances } = host({ software: true });
+            await request({ source: 'auto', target: 'ko', texts: ['Hello.'] });
+            assert.equal(instances[0]!.prompts.at(-1), AT.local.wrapChatPrompt(
+              'Translate the text to Korean (ko). Output only the translation.\\n\\nHello.'));
+          });
+          test('host: hardware keeps the original trained translation prompt', async () => {
+            const { AT, request, instances } = host();
+            await request();
+            assert.equal(instances[0]!.prompts.at(-1), AT.local.buildBatchPrompt('en', 'ko', ['Hello world'], null));
+          });
+          test('host: software prompt still uses the real token-budget guard', async () => {
+            const { request, instances } = host({ software: true, oversized: true });
+            await assert.rejects(() => request({ texts: ['oversized input'] }), /context|budget/i);
+            assert.equal(instances[0]!.prompts.length, 1, 'only warmup, no overflowing generation');
+          });
+          `);
+          JS
+          git diff -- src test/localhost.test.ts > /tmp/compact-promotion/promotion.patch
+      - run: npm ci --no-audit --no-fund
+      - name: Validate and build the exact promoted application
+        run: |
+          set -o pipefail
+          npm run ci 2>&1 | tee /tmp/compact-promotion/ci.log
+          cp dist/*-chrome.zip /tmp/compact-promotion/tested-application.zip
+      - name: Export verified Git objects without moving a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const root=`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/`;
+          async function api(path,body){const r=await fetch(root+path,{method:body?'POST':'GET',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(`${path}: ${r.status}`);return d;}
+          const parent=process.env.GITHUB_SHA,base=await api(`git/commits/${parent}`),entries=[];
+          for(const path of ['src/lib/localhost.ts','test/localhost.test.ts']){const b=await api('git/blobs',{content:fs.readFileSync(path,'utf8'),encoding:'utf-8'});entries.push({path,mode:'100644',type:'blob',sha:b.sha});}
+          const result={parent,baseTree:base.tree.sha,entries};console.log(JSON.stringify(result));fs.writeFileSync('/tmp/compact-promotion/blobs.json',JSON.stringify(result,null,2));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-compact-promotion-${{ github.run_id }}
+          path: /tmp/compact-promotion/
+          retention-days: 7
