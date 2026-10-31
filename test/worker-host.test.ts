@@ -84,3 +84,13 @@ test('worker host: stale messages cannot overwrite a new worker session', async 
   assert.equal((await AT.localhost.status()).generations, 7);
   current.reply(); await next; await AT.localhost.handle({ type: 'at/local-unload' });
 });
+
+
+test('worker host: generation progress cannot indefinitely extend the phase deadline', async () => {
+  const AT = fixture(); AT.local.GENERATION_TIMEOUT_MS = 35;
+  const loading = AT.localhost.handle(message); const failed = assert.rejects(loading, /timed out/);
+  await tick(); const worker = FakeWorker.instances[0]!;
+  worker.send({ kind: 'status', status: { state: 'busy', supported: true, phase: 'generate', outputChars: 0 } });
+  const progress = setInterval(() => worker.send({ kind: 'status', status: { state: 'busy', supported: true, phase: 'generate', outputChars: 4 } }), 5);
+  try { await failed; assert.equal(worker.terminated, true); } finally { clearInterval(progress); }
+});

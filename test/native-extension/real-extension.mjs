@@ -44,7 +44,7 @@ async function stage(name) { summary.stage = name; console.log(JSON.stringify({ 
 async function passed(name, detail = {}) { const item = { name, passed: true, ...detail }; summary.results.push(item); console.log(clean(JSON.stringify(item))); await save(); }
 let context, server, welcome, options, page;
 const profile = await mkdtemp(join(tmpdir(), 'autotranslate-native-'));
-const watchdog = setTimeout(async () => { summary.failure = { stage: summary.stage, message: 'overall driver deadline' }; await save(); process.exit(2); }, 22 * 60000);
+const watchdog = setTimeout(async () => { summary.failure = { stage: summary.stage, message: 'overall driver deadline' }; await save(); process.exit(2); }, 40 * 60000);
 async function capture(p, name) {
   if (!p || p.isClosed()) return;
   await bound(p.screenshot({ path: join(out, name + '.png'), fullPage: true, caret: 'initial', timeout: 10000 }), 12000, 'screenshot');
@@ -89,7 +89,7 @@ try {
   assert.equal(await welcome.locator('#download').isDisabled(), false);
   await welcome.locator('#download').click();
   const installStart = performance.now(); let ready = false, last = '';
-  while (performance.now() - installStart < 12 * 60000) {
+  while (performance.now() - installStart < 20 * 60000) {
     const at = performance.now();
     const ui = await bound(welcome.evaluate(() => ({ status: document.querySelector('#status').textContent,
       kind: document.querySelector('#status').dataset.kind, ready: !document.querySelector('#start').disabled,
@@ -108,65 +108,89 @@ try {
   await welcome.locator('#modelToken').fill(''); await capture(welcome, '02-model-ready');
   await passed('native-model-loaded-and-warmed', { elapsedMs: performance.now() - installStart, state: summary.loadedModel });
 
-  await stage('translate-original-html');
-  const html = '<!doctype html><html lang="en"><head><meta charset="utf-8"><title translate="no">Native extension test</title><style>body{font:18px/1.6 system-ui;max-width:800px;margin:40px auto;padding:20px}a{color:#1659a5}pre{background:#eee;padding:12px}</style></head><body><main><h1>Install the application</h1><p id="paragraph">Your documents remain private.</p><p>Read <a href="#guide" id="guide">the installation guide</a> before continuing.</p><pre>npm install</pre><input id="draft" value="user draft"><button id="click" translate="no" onclick="this.dataset.clicks=String(Number(this.dataset.clicks||0)+1)">Click</button></main></body></html>';
-  server = createServer((_req, res) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(html); });
+  const cases = new Map();
+  const shell = (body) => '<!doctype html><html lang="en"><head><meta charset="utf-8"><title translate="no">Native extension test</title><style>body{font:18px/1.6 system-ui;max-width:800px;margin:40px auto;padding:20px}a{color:#1659a5}pre{background:#eee;padding:12px}</style></head><body>' + body + '</body></html>';
+  const controls = '<pre>npm install</pre><input id="draft" value="user draft"><button id="click" translate="no" onclick="this.dataset.clicks=String(Number(this.dataset.clicks||0)+1)">Click</button>';
+  cases.set('/basic', shell('<main><p id="paragraph">Hello.</p>' + controls + '</main>'));
+  cases.set('/article', shell('<main><h1>Install the application</h1><p id="paragraph">Your documents remain private.</p><p>Read <a href="#guide" id="guide">the installation guide</a> before continuing.</p>' + controls + '</main>'));
+  server = createServer((req, res) => { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); res.end(cases.get(req.url) || shell('')); });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   const origin = `http://127.0.0.1:${server.address().port}`; summary.fixtureUrl = origin;
-  page = await context.newPage(); await page.goto(origin); assert.equal(await page.title(), 'Native extension test');
-  const original = await page.evaluateHandle(() => {
-    const elements = [...document.body.querySelectorAll('*')], nodes = []; const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n;
-    while ((n = w.nextNode())) nodes.push({ node: n, text: n.nodeValue });
-    return { html: document.body.innerHTML, nodes, elements, attrs: elements.map((e) => JSON.stringify([...e.attributes].map((a) => [a.name, a.value]))) };
-  });
-  await capture(page, '03-original');
+  summary.translationCases = [];
   options = await context.newPage(); await options.goto(`chrome-extension://${id}/options.html`);
   await options.waitForFunction(() => document.querySelector('#sourceLang').options.length > 1);
-  const tabId = await options.evaluate(async (origin) => (await AT.api.tabs.query({})).find((t) => t.url === origin + '/')?.id, origin);
-  assert.ok(tabId);
-  const start = performance.now(); await welcome.locator('#start').click(); let complete = false;
-  while (performance.now() - start < 10 * 60000) {
-    const render = await bound(page.evaluate(() => ({ heading: document.querySelector('h1').textContent, paragraph: document.querySelector('#paragraph').textContent, link: document.querySelector('#guide').textContent })), 10000, 'rendered HTML');
-    if (!summary.firstTextMs && /[가-힣]/u.test(render.heading)) summary.firstTextMs = performance.now() - start;
-    const state = await bound(options.evaluate((tabId) => AT.sendMessage({ type: 'at/get-state', tabId }), tabId), 10000, 'tab state');
-    summary.rendered = render; summary.tabState = state; await save();
-    console.log(clean(JSON.stringify({ elapsedMs: performance.now() - start, render, state: state.state })));
-    if (state.state?.status === 'error') throw new Error(state.state.error || 'extension translation failure');
-    if (state.state?.status === 'translated') { assert.ok(Object.values(render).every((s) => /[가-힣]/u.test(s))); complete = true; break; }
-    await sleep(3000);
-  }
-  assert.ok(complete, 'installed extension translated all fixture text');
-  summary.translateMs = performance.now() - start; summary.afterTranslate = (await host(options)).status;
-  assert.ok(summary.afterTranslate.generations > summary.loadedModel.generations);
-  assert.equal(await page.locator('pre').innerText(), 'npm install'); assert.equal(await page.locator('#draft').inputValue(), 'user draft');
-  assert.equal(await page.locator('#guide').getAttribute('href'), '#guide');
-  await capture(page, '04-translated'); await passed('native-page-translation', { ms: summary.translateMs, firstTextMs: summary.firstTextMs, rendered: summary.rendered, generations: summary.afterTranslate.generations });
+  for (const [name, selectors] of [['basic', ['#paragraph']], ['article', ['h1', '#paragraph', '#guide']]]) {
+    await stage(`translate-${name}-through-extension`);
+    page = await context.newPage(); const url = `${origin}/${name}`; await page.goto(url);
+    assert.equal(await page.title(), 'Native extension test');
+    const original = await page.evaluateHandle(() => {
+      const elements = [...document.body.querySelectorAll('*')], nodes = []; const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n;
+      while ((n = w.nextNode())) nodes.push({ node: n, text: n.nodeValue });
+      return { html: document.body.innerHTML, nodes, elements, attrs: elements.map((e) => JSON.stringify([...e.attributes].map((a) => [a.name, a.value]))) };
+    });
+    await capture(page, `${name}-before`);
+    const tabId = await options.evaluate(async (url) => (await AT.api.tabs.query({})).find((t) => t.url === url)?.id, url);
+    assert.ok(tabId);
+    const beforeHost = (await host(options)).status;
+    const result = { name, telemetry: [] }; summary.translationCases.push(result);
+    const start = performance.now();
+    if (name === 'basic') await welcome.locator('#start').click();
+    else {
+      await options.reload(); await options.waitForFunction(() => document.querySelector('#sourceLang').options.length > 1);
+      await options.locator('#enabled').setChecked(true); await options.locator('#save').click();
+    }
+    let complete = false;
+    while (performance.now() - start < 30 * 60000) {
+      const render = await bound(page.evaluate((selectors) => Object.fromEntries(selectors.map((s) => [s, document.querySelector(s).textContent])), selectors), 10000, 'rendered HTML');
+      if (!result.firstTextMs && Object.values(render).some((s) => /[가-힣]/u.test(s))) result.firstTextMs = performance.now() - start;
+      const state = await bound(options.evaluate((tabId) => AT.sendMessage({ type: 'at/get-state', tabId }), tabId), 10000, 'tab state');
+      result.rendered = render; result.tabState = state;
+      result.telemetry.push({ elapsedMs: performance.now() - start, render, tab: state.state, host: state.local?.status });
+      await save();
+      console.log(clean(JSON.stringify({ name, elapsedMs: performance.now() - start, render, state: state.state, host: state.local?.status })));
+      if (state.state?.status === 'error') throw new Error(state.state.error || 'extension translation failure');
+      if (state.state?.status === 'translated') { assert.ok(Object.values(render).every((s) => /[가-힣]/u.test(s))); complete = true; break; }
+      await sleep(3000);
+    }
+    assert.ok(complete, `installed extension translated all ${name} fixture text`);
+    result.translateMs = performance.now() - start; result.afterTranslate = (await host(options)).status;
+    assert.ok(result.afterTranslate.generations > beforeHost.generations);
+    assert.equal(await page.locator('pre').innerText(), 'npm install'); assert.equal(await page.locator('#draft').inputValue(), 'user draft');
+    if (name === 'article') assert.equal(await page.locator('#guide').getAttribute('href'), '#guide');
+    await capture(page, `${name}-translated`);
+    await passed(`${name}-native-page-translation`, { ms: result.translateMs, firstTextMs: result.firstTextMs, rendered: result.rendered, generations: result.afterTranslate.generations - beforeHost.generations });
 
-  await stage('restore-from-real-options');
-  // Reload avoids overwriting settings with the pre-onboarding UI snapshot.
-  await options.reload(); await options.waitForFunction(() => document.querySelector('#enabled').checked);
-  const restoreAt = performance.now(); await options.locator('#enabled').setChecked(false); await options.locator('#save').click();
-  await page.waitForFunction(() => document.querySelector('#paragraph').textContent === 'Your documents remain private.');
-  const restored = await original.evaluate((o) => ({ html: document.body.innerHTML === o.html,
-    text: o.nodes.every(({ node, text }) => node.nodeValue === text), elements: o.elements.every((e, i) => e === document.body.querySelectorAll('*')[i]),
-    attributes: o.elements.every((e, i) => JSON.stringify([...e.attributes].map((a) => [a.name, a.value])) === o.attrs[i]) }));
-  assert.ok(Object.values(restored).every(Boolean), JSON.stringify(restored)); summary.restoreMs = performance.now() - restoreAt;
-  await capture(page, '05-restored'); await page.locator('#click').click(); assert.equal(await page.locator('#click').getAttribute('data-clicks'), '1');
-  await passed('exact-html-restoration-and-events', { ...restored, ms: summary.restoreMs });
+    await stage(`restore-${name}-through-extension-options`);
+    await options.reload(); await options.waitForFunction(() => document.querySelector('#enabled').checked);
+    const restoreAt = performance.now(); await options.locator('#enabled').setChecked(false); await options.locator('#save').click();
+    await page.waitForFunction(() => !/[가-힣]/u.test(document.querySelector('#paragraph').textContent));
+    const restored = await original.evaluate((o) => ({ html: document.body.innerHTML === o.html,
+      text: o.nodes.every(({ node, text }) => node.nodeValue === text), elements: o.elements.every((e, i) => e === document.body.querySelectorAll('*')[i]),
+      attributes: o.elements.every((e, i) => JSON.stringify([...e.attributes].map((a) => [a.name, a.value])) === o.attrs[i]) }));
+    assert.ok(Object.values(restored).every(Boolean), JSON.stringify(restored)); result.restoreMs = performance.now() - restoreAt;
+    await capture(page, `${name}-restored`); await page.locator('#click').click(); assert.equal(await page.locator('#click').getAttribute('data-clicks'), '1');
+    await passed(`${name}-exact-html-restoration-and-events`, { ...restored, ms: result.restoreMs });
+    result.passed = true;
+    if (name === 'basic') summary.basicTranslationRestorePassed = true;
+    await original.dispose(); await page.close(); page = null; await save();
+  }
   assert.deepEqual(summary.errors, []); summary.fullTranslationRestorePassed = true;
+
 } catch (error) {
   summary.failure = { stage: summary.stage, message: clean(error.message) }; process.exitCode = 1; console.error(JSON.stringify(summary.failure)); await save();
   for (const [p, name] of [[welcome, 'FAIL-onboarding'], [options, 'FAIL-options'], [page, 'FAIL-page']]) {
-    if (p && !p.isClosed()) { await p.locator('#modelToken').fill('').catch(() => {}); await capture(p, name).catch(() => {}); }
+    if (p && !p.isClosed()) { if (await p.locator('#modelToken').count()) await p.locator('#modelToken').fill('').catch(() => {}); await capture(p, name).catch(() => {}); }
   }
 } finally {
   summary.installedFilesUnchanged = JSON.stringify(before) === JSON.stringify(await inventory(extension));
   if (!summary.installedFilesUnchanged) { summary.fullTranslationRestorePassed = false; process.exitCode = 1; }
   await writeFile(join(out, 'installed-files-before.json'), JSON.stringify(before, null, 2));
   await writeFile(join(out, 'installed-files-after.json'), JSON.stringify(await inventory(extension), null, 2));
-  await save(); clearTimeout(watchdog);
+  await save();
   if (context) await bound(context.close(), 15000, 'browser shutdown').catch(() => {});
   if (server) { server.closeAllConnections(); await new Promise((r) => server.close(r)); }
-  await rm(profile, { recursive: true, force: true }).catch(() => {});
-  console.log(JSON.stringify({ fullTranslationRestorePassed: summary.fullTranslationRestorePassed, installedFilesUnchanged: summary.installedFilesUnchanged, failure: summary.failure }));
+  await bound(rm(profile, { recursive: true, force: true }), 10000, 'profile cleanup').catch(() => {});
+  clearTimeout(watchdog);
+  await new Promise((resolve) => process.stdout.write(JSON.stringify({ fullTranslationRestorePassed: summary.fullTranslationRestorePassed, installedFilesUnchanged: summary.installedFilesUnchanged, failure: summary.failure }) + '\n', resolve));
+  process.exit(process.exitCode || (summary.fullTranslationRestorePassed ? 0 : 1));
 }

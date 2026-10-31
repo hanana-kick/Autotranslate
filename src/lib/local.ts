@@ -51,6 +51,8 @@ namespace AT.local {
   export const IDLE_UNLOAD_MS = 10 * 60 * 1000;
   /** One generation on a 4B model over 1500 characters is slow but bounded. */
   export const GENERATION_TIMEOUT_MS = 180000;
+  /** Real software WebGPU is much slower; do not repeatedly discard valid work. */
+  export const SOFTWARE_GENERATION_TIMEOUT_MS = 15 * 60 * 1000;
   /** Progress is forwarded to the background at most this often. */
   export const DOWNLOAD_PROGRESS_INTERVAL_MS = 500;
 
@@ -133,6 +135,11 @@ namespace AT.local {
     generations: number;
     lastError: string | null;
     phase?: ModelPhase | null;
+    /** Detected from the actual browser adapter, not a testing override. */
+    softwareRendering?: boolean;
+    /** Aggregate progress only: prompts and generated text are never reported. */
+    outputChars?: number;
+    lastProgressAt?: number;
   };
 
   /** A download the options page is running right now, for the popup badge. */
@@ -503,6 +510,11 @@ namespace AT.local {
       generations: Number.isFinite(generations) && generations >= 0 ? Math.round(generations) : 0,
       ...(input.phase === null || ['runtime', 'model-read', 'model-create', 'warmup', 'count', 'generate'].includes(String(input.phase))
         ? { phase: input.phase as ModelPhase | null } : {}),
+      ...(typeof input.softwareRendering === 'boolean' ? { softwareRendering: input.softwareRendering } : {}),
+      ...(Number.isFinite(input.outputChars) && Number(input.outputChars) >= 0
+        ? { outputChars: Math.min(Math.round(Number(input.outputChars)), 1_000_000) } : {}),
+      ...(Number.isFinite(input.lastProgressAt) && Number(input.lastProgressAt) >= 0
+        ? { lastProgressAt: Math.round(Number(input.lastProgressAt)) } : {}),
       lastError: typeof input.lastError === 'string' ? input.lastError.slice(0, 300) : null
     };
   }

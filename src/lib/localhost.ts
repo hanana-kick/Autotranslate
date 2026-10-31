@@ -114,6 +114,7 @@ namespace AT.localhost {
     resolve: (reply: HostReply) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout> | null;
+    deadlinePhase?: string;
   };
   let pending: Pending | null = null;
 
@@ -146,10 +147,14 @@ namespace AT.localhost {
 
   function armDeadline(): void {
     if (!pending) return;
-    if (pending.timer) clearTimeout(pending.timer);
     const phase = state.phase;
+    const key = `${phase ?? 'worker-start'}:${state.softwareRendering === true}`;
+    // Progress/status updates must not renew the absolute deadline of a phase.
+    if (pending.deadlinePhase === key) return;
+    pending.deadlinePhase = key;
+    if (pending.timer) clearTimeout(pending.timer);
     const generation = phase === 'generate' || phase === 'warmup';
-    const ms = generation ? L.GENERATION_TIMEOUT_MS : L.MODEL_LOAD_TIMEOUT_MS;
+    const ms = generation ? generationTimeout() : L.MODEL_LOAD_TIMEOUT_MS;
     pending.timer = setTimeout(() => computeFailed(
       generation ? 'generation-timeout' : 'model-load-failed',
       "native " + (phase ?? "worker-start") + " timed out after " + ms + " ms; inference worker terminated"
@@ -200,7 +205,15 @@ namespace AT.localhost {
     });
   }
 
+  function generationTimeout(): number {
+    return state.softwareRendering ? L.SOFTWARE_GENERATION_TIMEOUT_MS : L.GENERATION_TIMEOUT_MS;
+  }
+
   function setPhase(phase: AT.local.ModelPhase | null): void {
+    if (phase === 'generate' || phase === 'warmup') {
+      state.outputChars = 0;
+      state.lastProgressAt = 0;
+    }
     state.phase = phase;
     publish();
   }
@@ -292,6 +305,9 @@ namespace AT.localhost {
     if (!gpu?.requestAdapter) fail('no-webgpu', 'WebGPU is not available');
     const adapter = await gpu.requestAdapter();
     if (!adapter) fail('no-webgpu', 'no WebGPU adapter was found');
+    const actual = adapter as { isFallbackAdapter?: boolean; info?: { architecture?: string; description?: string } };
+    state.softwareRendering = actual.isFallbackAdapter === true ||
+      /swiftshader|llvmpipe|lavapipe/i.test(`${actual.info?.architecture ?? ''} ${actual.info?.description ?? ''}`);
     state.supported = true;
     state.reason = null;
     // A probe that failed once must not keep the host reporting an error for the
@@ -430,10 +446,23 @@ namespace AT.localhost {
 
   /** Includes warmup: no generation may hold the queue without a deadline. */
   function boundedResponse(instance: LlmInstance, prompt: string): Promise<string> {
+    // Idle eviction measures quiet time, never the duration of active native work.
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     return new Promise<string>((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('generation timeout')), L.GENERATION_TIMEOUT_MS);
-      instance.generateResponse(prompt).then(resolve, reject);
+      timer = setTimeout(() => reject(new Error('generation timeout')), generationTimeout());
+      let lastPublished = 0;
+      instance.generateResponse(prompt, (partial, done) => {
+        // Only counts/timestamps cross the worker boundary, never page content.
+        if (partial) {
+          state.outputChars = Math.min((state.outputChars ?? 0) + partial.length, 1_000_000);
+          state.lastProgressAt = Date.now();
+        }
+        if (done || Date.now() - lastPublished >= 1000) {
+          lastPublished = Date.now();
+          publish();
+        }
+      }).then(resolve, reject);
     }).finally(() => {
       if (timer) clearTimeout(timer);
     });

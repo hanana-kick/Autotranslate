@@ -17,9 +17,9 @@ test.afterEach(() => {
   else delete globals.navigator;
 });
 
-function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; oversized?: boolean; empty?: boolean } = {}) {
+function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; oversized?: boolean; empty?: boolean; software?: boolean; delayed?: boolean } = {}) {
   resetGlobals();
-  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { gpu: { requestAdapter: async () => ({}) } } });
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { gpu: { requestAdapter: async () => (options.software ? { info: { architecture: 'swiftshader' } } : {}) } } });
   const AT = load('lib/constants.js', 'lib/gemma.js', 'lib/local.js', 'lib/modelstore.js', 'lib/localhost.js');
   current = AT;
   const instances: ATNamespace[] = [];
@@ -38,6 +38,7 @@ function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; 
             if (options.warmupFails) throw new Error('warmup failed');
             return '좋은 아침입니다.';
           }
+          if (options.delayed) await new Promise((resolve) => setTimeout(resolve, 45));
           if (number === 0 && options.firstGenerationHangs) return new Promise(() => {});
           return options.empty ? '' : '검증된 응답';
         }
@@ -94,4 +95,13 @@ test('host: a timed-out instance is disposed before the next queued generation',
 test('host: an empty answer stays empty so the DOM can retry instead of marking the source done', async () => {
   const { request } = host({ empty: true });
   assert.deepEqual((await request()).translations, ['']);
+});
+
+
+test('host: real software-adapter classification selects a bounded longer generation budget', async () => {
+  const { AT, request } = host({ software: true, delayed: true });
+  AT.local.SOFTWARE_GENERATION_TIMEOUT_MS = 100;
+  AT.local.IDLE_UNLOAD_MS = 15;
+  assert.deepEqual((await request()).translations, ['검증된 응답']);
+  assert.equal((await AT.localhost.status()).softwareRendering, true);
 });
