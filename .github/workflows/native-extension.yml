@@ -2,6 +2,11 @@ name: Real installed extension
 
 on:
   workflow_dispatch:
+    inputs:
+      max_tokens:
+        description: Context budget set through the shipped options UI, not a runtime patch
+        default: '1024'
+        type: string
   push:
     branches: [fix/review-hardening-20261031]
     paths:
@@ -17,6 +22,7 @@ concurrency:
 
 jobs:
   original-runtime:
+    name: Original extension / UI context ${{ inputs.max_tokens || '256' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -37,9 +43,21 @@ jobs:
         env:
           HEADED: '1'
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          NATIVE_MAX_TOKENS: ${{ inputs.max_tokens || '256' }}
         run: |
           set -euo pipefail
           mkdir -p test-results/native-extension
+          (
+            while true; do
+              date -u +%Y-%m-%dT%H:%M:%SZ
+              free -m
+              ps -C chrome -o pid,ppid,pcpu,pmem,rss,etime,comm || true
+              cat /sys/fs/cgroup/memory.events 2>/dev/null || true
+              sleep 10
+            done
+          ) > test-results/native-extension/resources.log 2>&1 &
+          monitor=$!
+          trap 'kill "$monitor" 2>/dev/null || true' EXIT
           xvfb-run -a node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
       - name: Ensure production sources were not changed by validation
         if: always()
@@ -48,10 +66,8 @@ jobs:
         if: always()
         shell: bash
         run: |
-          # Playwright DOM snapshots serialize password input values. Options can
-          # refill the saved HF token even after the onboarding field is cleared.
-          # Keep redacted logs, HTML, screenshots and hashes; never upload traces
-          # of an authenticated extension profile.
+          # Authenticated browser snapshots can serialize password fields.
+          # Preserve redacted observations, never authenticated profile traces.
           find test-results/native-extension -type f -name '*trace*.zip' -delete
       - name: Preserve actual results including failures
         if: always()
