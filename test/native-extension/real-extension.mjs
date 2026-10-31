@@ -23,7 +23,7 @@ async function inventory(dir) {
   const files = {};
   async function walk(path) { for (const e of await readdir(path, { withFileTypes: true })) {
     const file = join(path, e.name); if (e.isDirectory()) await walk(file);
-    else files[relative(dir, file)] = createHash('sha256').update(await readFile(file)).digest('hex');
+    else files[relative(dir, file).replaceAll('\\', '/')] = createHash('sha256').update(await readFile(file)).digest('hex');
   } }
   await walk(dir); return Object.fromEntries(Object.entries(files).sort());
 }
@@ -31,11 +31,19 @@ const before = await inventory(extension);
 const pkg = JSON.parse(await readFile('package.json', 'utf8'));
 const vendor = await inventory(join(root, 'node_modules/@mediapipe/tasks-genai'));
 assert.equal(before['vendor/mediapipe/genai_bundle.js'], vendor['genai_bundle.mjs']);
+for (const [name, hash] of Object.entries(before)) {
+  if (name.startsWith('vendor/mediapipe/wasm/')) assert.equal(hash, vendor[name.replace('vendor/mediapipe/', '')], `original SDK asset: ${name}`);
+}
 assert.ok(!Object.keys(before).some((p) => /qa-capabilities|fixtures|runtime-double/.test(p)));
+const backend = process.platform === 'darwin' ? 'metal' : 'swiftshader';
+const browserFlags = backend === 'metal'
+  ? ['--use-angle=metal', '--enable-unsafe-webgpu']
+  : ['--use-angle=swiftshader',
+      '--enable-unsafe-webgpu', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage'];
 const summary = { commit: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   subject: 'Installed build/chrome with the shipped runtime and original model',
   runtime: pkg.devDependencies['@mediapipe/tasks-genai'], model: 'translategemma-4b-it-int8-web.task',
-  cpu: cpus()[0]?.model, logicalCpus: cpus().length, ram: totalmem(),
+  cpu: cpus()[0]?.model, logicalCpus: cpus().length, ram: totalmem(), platform: process.platform, backend, browserFlags,
   inferenceDouble: false, productionCodeInjection: false, nativeInferenceBridge: false,
   tracing: false, configuration: { maxTokens: 1024 }, results: [], errors: [], consoleMessages: [],
   telemetry: [], fullTranslationRestorePassed: false, stage: 'install' };
@@ -56,8 +64,7 @@ async function host(p) {
 try {
   context = await chromium.launchPersistentContext(profile, { channel: 'chromium', headless: process.env.HEADED !== '1',
     ignoreDefaultArgs: ['--disable-extensions'], viewport: { width: 1200, height: 850 }, locale: 'en-US',
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, '--use-angle=swiftshader',
-      '--enable-unsafe-webgpu', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage'] });
+    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`, ...browserFlags] });
   context.setDefaultTimeout(30000); summary.browser = context.browser().version();
   const observe = (p) => {
     p.on('pageerror', (e) => summary.errors.push(clean(e.message)));
@@ -72,7 +79,13 @@ try {
   assert.ok(welcome, 'installation opens the real onboarding');
   await welcome.waitForFunction(() => document.querySelector('#targetLang').options.length > 1 && document.querySelector('#status').textContent.length > 0);
   assert.match(await welcome.title(), /Autotranslate/);
-  summary.adapter = await welcome.evaluate(async () => { const a = await navigator.gpu?.requestAdapter(); return a ? { vendor: a.info?.vendor, architecture: a.info?.architecture } : null; });
+  summary.adapter = await welcome.evaluate(async () => {
+    const a = await navigator.gpu?.requestAdapter();
+    return a ? { vendor: a.info?.vendor, architecture: a.info?.architecture, description: a.info?.description,
+      features: [...a.features], maxBufferSize: a.limits.maxBufferSize } : null;
+  });
+  assert.ok(summary.adapter, 'a real WebGPU adapter must be available');
+  if (backend === 'metal') assert.equal(summary.adapter.vendor, 'apple', 'Metal verification must not silently fall back to SwiftShader');
   await welcome.locator('#targetLang').selectOption('ko');
   await capture(welcome, '01-onboarding');
   await passed('installed-extension-and-onboarding', { serviceWorker: sw.url(), adapter: summary.adapter });
@@ -133,6 +146,17 @@ try {
     assert.ok(tabId);
     const beforeHost = (await host(options)).status;
     const result = { name, telemetry: [] }; summary.translationCases.push(result);
+    // Observe rendered mutations without changing the page or any extension API.
+    const renderTiming = await page.evaluateHandle((selectors) => {
+      const timing = { started: performance.now(), firstMs: null, allMs: null };
+      const observer = new MutationObserver(() => {
+        const translated = selectors.map((s) => /[가-힣]/u.test(document.querySelector(s).textContent));
+        if (timing.firstMs === null && translated.some(Boolean)) timing.firstMs = performance.now() - timing.started;
+        if (timing.allMs === null && translated.every(Boolean)) timing.allMs = performance.now() - timing.started;
+      });
+      observer.observe(document.body, { subtree: true, characterData: true, childList: true });
+      return { timing, observer };
+    }, selectors);
     const start = performance.now();
     if (name === 'basic') await welcome.locator('#start').click();
     else {
@@ -142,18 +166,21 @@ try {
     let complete = false;
     while (performance.now() - start < 30 * 60000) {
       const render = await bound(page.evaluate((selectors) => Object.fromEntries(selectors.map((s) => [s, document.querySelector(s).textContent])), selectors), 10000, 'rendered HTML');
-      if (!result.firstTextMs && Object.values(render).some((s) => /[가-힣]/u.test(s))) result.firstTextMs = performance.now() - start;
       const state = await bound(options.evaluate((tabId) => AT.sendMessage({ type: 'at/get-state', tabId }), tabId), 10000, 'tab state');
       result.rendered = render; result.tabState = state;
       result.telemetry.push({ elapsedMs: performance.now() - start, render, tab: state.state, host: state.local?.status });
       await save();
-      console.log(clean(JSON.stringify({ name, elapsedMs: performance.now() - start, render, state: state.state, host: state.local?.status })));
       if (state.state?.status === 'error') throw new Error(state.state.error || 'extension translation failure');
       if (state.state?.status === 'translated') { assert.ok(Object.values(render).every((s) => /[가-힣]/u.test(s))); complete = true; break; }
-      await sleep(3000);
+      await sleep(backend === 'metal' ? 200 : 3000);
     }
     assert.ok(complete, `installed extension translated all ${name} fixture text`);
-    result.translateMs = performance.now() - start; result.afterTranslate = (await host(options)).status;
+    result.translateMs = performance.now() - start;
+    result.renderTiming = await renderTiming.evaluate(({ timing, observer }) => { observer.disconnect(); return timing; });
+    await renderTiming.dispose();
+    result.firstTextMs = result.renderTiming.firstMs;
+    assert.ok(result.firstTextMs !== null, 'actual translated DOM mutations were observed');
+    result.afterTranslate = (await host(options)).status;
     assert.ok(result.afterTranslate.generations > beforeHost.generations);
     assert.equal(await page.locator('pre').innerText(), 'npm install'); assert.equal(await page.locator('#draft').inputValue(), 'user draft');
     if (name === 'article') assert.equal(await page.locator('#guide').getAttribute('href'), '#guide');
