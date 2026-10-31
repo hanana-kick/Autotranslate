@@ -1,0 +1,28 @@
+name: TODO workspace
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/todo-workspace.yml']
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund
+      - run: |
+          mkdir -p /tmp/todo-workspace
+          git archive HEAD | gzip > /tmp/todo-workspace/source.tar.gz
+          git rev-parse HEAD > /tmp/todo-workspace/commit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: todo-source
+          path: /tmp/todo-workspace/
+          retention-days: 2
