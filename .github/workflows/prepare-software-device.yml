@@ -1,0 +1,134 @@
+name: Prepare portable software device
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/prepare-software-device.yml']
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply verified software-device proposal
+        run: |
+          mkdir -p /tmp/device-evidence
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import {execFileSync} from 'node:child_process';
+          const hash=(p)=>execFileSync('git',['hash-object',p],{encoding:'utf8'}).trim();
+          if(hash('src/lib/localhost.ts')!=='8cb39fbfbbe2783130f166ae475ab4c94d87da15'||hash('test/localhost.test.ts')!=='bdabe5142723ec9db20ccf2f866bcb6775fa0ce3')throw Error('base changed');
+          let s=fs.readFileSync('src/lib/localhost.ts','utf8');
+          s=s.replace('  let llm: LlmInstance | null = null;',`  let llm: LlmInstance | null = null;
+            type GpuDevice = { destroy: () => void };
+            type GpuAdapter = {
+              isFallbackAdapter?: boolean;
+              info?: { architecture?: string; description?: string };
+              features: { has: (feature: string) => boolean };
+              limits: { maxBufferSize: number; maxStorageBufferBindingSize: number; maxStorageBuffersPerShaderStage: number };
+              requestDevice: (options: Record<string, unknown>) => Promise<GpuDevice>;
+            };
+            let ownedDevice: GpuDevice | null = null;`);
+          s=s.replace('    llm = null;\n    loadedId = null;',`    llm = null;
+              ownedDevice?.destroy();
+              ownedDevice = null;
+              loadedId = null;`);
+          const anchor='  async function instantiate(record: AT.modelstore.ModelRecord, maxTokens: number): Promise<LlmInstance> {';
+          s=s.replace(anchor,`  /** Software WebGPU uses portable kernels rather than GPU subgroup kernels.
+             * The SDK and model are unchanged; this is its public gpuOptions.device API. */
+            async function softwareGpuOptions(): Promise<Record<string, unknown>> {
+              if (!state.softwareRendering) return {};
+              const gpu = (globalThis.navigator as unknown as {
+                gpu: { requestAdapter: (options: Record<string, unknown>) => Promise<GpuAdapter | null> }
+              }).gpu;
+              const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
+              if (!adapter) fail('no-webgpu', 'the inference adapter is no longer available');
+              const software = adapter.isFallbackAdapter === true ||
+                /swiftshader|llvmpipe|lavapipe/i.test(
+                  String(adapter.info?.architecture ?? '') + ' ' + String(adapter.info?.description ?? ''));
+              state.softwareRendering = software;
+              if (!software) return {}; // Keep the original SDK's hardware selection.
+              const requiredFeatures = adapter.features.has('shader-f16') ? ['shader-f16'] : [];
+              ownedDevice = await adapter.requestDevice({
+                requiredFeatures,
+                requiredLimits: {
+                  maxBufferSize: adapter.limits.maxBufferSize,
+                  maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+                  maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage
+                }
+              });
+              AT.log('software WebGPU device enabled features', requiredFeatures);
+              return { gpuOptions: { device: ownedDevice, adapterInfo: adapter.info } };
+            }
+
+          `+anchor);
+          s=s.replace('options({ modelAssetBuffer: blob.stream().getReader() })','options({ modelAssetBuffer: blob.stream().getReader(), ...await softwareGpuOptions() })');
+          fs.writeFileSync('src/lib/localhost.ts',s);
+          let t=fs.readFileSync('test/localhost.test.ts','utf8');
+          t=t.replace('  resetGlobals();\n  Object.defineProperty',`  resetGlobals();
+            const deviceCalls: ATNamespace[] = [], devices: ATNamespace[] = [];
+            const softwareAdapter = { info: { architecture: 'swiftshader' },
+              features: new Set(['subgroups']),
+              limits: { maxBufferSize: 1073741824, maxStorageBufferBindingSize: 1073741824, maxStorageBuffersPerShaderStage: 32 },
+              async requestDevice(options: ATNamespace) {
+                deviceCalls.push(options);
+                const device = { destroyed: false, destroy() { this.destroyed = true; } };
+                devices.push(device); return device;
+              }
+            };
+            Object.defineProperty`);
+          t=t.replace("options.software ? { info: { architecture: 'swiftshader' } } : {}","options.software ? softwareAdapter : {}");
+          t=t.replace('return { AT, instances, request };','return { AT, instances, request, deviceCalls, devices };');
+          t+=`\n
+          test('host: software devices retain actual limits but do not enable subgroup kernels', async () => {
+            const { AT, request, instances, deviceCalls, devices } = host({ software: true });
+            await request();
+            assert.equal(deviceCalls.length, 1);
+            assert.deepEqual(deviceCalls[0]!.requiredFeatures, []);
+            assert.equal(deviceCalls[0]!.requiredLimits.maxBufferSize, 1073741824);
+            assert.equal(instances[0]!.settings.baseOptions.gpuOptions.device, devices[0]);
+            AT.localhost.unload('test-device-lifetime');
+            assert.equal(devices[0]!.destroyed, true);
+          });
+
+          test('host: hardware keeps the locked SDK default GPU device configuration', async () => {
+            const { request, instances, deviceCalls } = host();
+            await request();
+            assert.equal(deviceCalls.length, 0);
+            assert.equal(instances[0]!.settings.baseOptions.gpuOptions, undefined);
+          });
+          `;
+          fs.writeFileSync('test/localhost.test.ts',t);
+          if(hash('src/lib/localhost.ts')!=='cb2da0f0b986e85cc716e5a4e7f961b032e25b33'||hash('test/localhost.test.ts')!=='35bbb4fd0366cb647c9edbfe05cce80dd39bb366')throw Error('proposal integrity mismatch');
+          JS
+      - run: npm ci --no-audit --no-fund
+      - name: Validate source and device ownership contracts
+        run: |
+          npm run typecheck
+          npm run pretest
+          node --test test/localhost.test.ts test/worker-host.test.ts
+          npm run build:chrome
+      - name: Export exact source blobs without moving a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const root=`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/`;
+          async function api(path,body){const r=await fetch(root+path,{method:body?'POST':'GET',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(`${path}: ${r.status}`);return d;}
+          const parent=process.env.GITHUB_SHA,base=await api(`git/commits/${parent}`),entries=[];
+          for(const path of ['src/lib/localhost.ts','test/localhost.test.ts']){const b=await api('git/blobs',{content:fs.readFileSync(path,'utf8'),encoding:'utf-8'});entries.push({path,mode:'100644',type:'blob',sha:b.sha});}
+          const result={parent,baseTree:base.tree.sha,entries};console.log(JSON.stringify(result));fs.writeFileSync('/tmp/device-evidence/blobs.json',JSON.stringify(result,null,2));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: device-proposal-${{ github.run_id }}
+          path: /tmp/device-evidence/
+          retention-days: 3
