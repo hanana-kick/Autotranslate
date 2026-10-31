@@ -173,8 +173,13 @@ if (typeof self.importScripts === 'function') {
 
   async function getSettings({ force = false }: { force?: boolean } = {}): Promise<AT.settings.Settings> {
     if (force || !settingsCache) {
-      settingsCache = await AT.settings.load();
-      AT.debug = settingsCache.debug;
+      const revision = policyEpoch;
+      const loaded = await AT.settings.load();
+      // A storage event is newer than a read which started before that event.
+      // Never let a delayed old read replace an authoritative enabled/target edit.
+      if (revision !== policyEpoch) return getSettings();
+      settingsCache = loaded;
+      AT.debug = loaded.debug;
     }
     return settingsCache;
   }
@@ -236,9 +241,10 @@ if (typeof self.importScripts === 'function') {
 
   async function translateTab(
     tabId?: number,
-    { force = false, decision, revision }: { force?: boolean; decision?: AT.background.Plan; revision?: number } = {}
+    { force = false, decision, revision, policy }: { force?: boolean; decision?: AT.background.Plan;
+      revision?: number; policy?: AT.settings.Settings } = {}
   ): Promise<AT.MessageResult> {
-    const settings = await getSettings();
+    const settings = policy ?? await getSettings();
     const tab = await activeTab(tabId);
     if (!tab?.id) throw new Error('no active tab');
     if (!isInjectable(tab.url)) throw new Error('this page cannot be translated');
@@ -257,6 +263,7 @@ if (typeof self.importScripts === 'function') {
     pending.targetLang = settings.targetLang;
     pending.error = null;
     await updateBadge(tab.id);
+    if (revision !== undefined && revision !== policyEpoch) return { status: 'cancelled' };
     let response: AT.background.ContentReply | undefined;
     try {
       response = (await api.tabs.sendMessage(tab.id, {
@@ -636,7 +643,7 @@ if (typeof self.importScripts === 'function') {
           await api.tabs.sendMessage(id, { type: C.MSG.CONTENT_RESTORE });
           if (revision === policyEpoch) tabStates.delete(id);
         } else {
-          await translateTab(id, { decision, revision });
+          await translateTab(id, { decision, revision, policy: settings });
         }
       } catch {
         // A tab without a listener has nothing to restore.
@@ -653,9 +660,12 @@ if (typeof self.importScripts === 'function') {
     const revision = ++policyEpoch;
     const edited = changes[C.STORAGE_KEY];
     const previous = edited?.oldValue ? AT.settings.normalize(edited.oldValue) : null;
-    settingsCache = null;
-    void getSettings()
-      .then(async (settings) => {
+    // onChanged supplies the committed snapshot. Reading storage again here can
+    // race unrelated tab reads and silently cancel a rapid OFF -> ON transition.
+    settingsCache = edited?.newValue ? AT.settings.normalize(edited.newValue) : null;
+    const committed = settingsCache;
+    const next = committed ? Promise.resolve(committed) : getSettings();
+    void next.then(async (settings) => {
         if (revision !== policyEpoch) return;
         // Whatever was resident was loaded for the model the user had chosen;
         // keeping it after they picked another one would translate with a model

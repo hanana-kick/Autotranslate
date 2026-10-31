@@ -58,7 +58,7 @@ namespace AT.pipeline {
 
   export type PageTranslator = {
     /** First pass over the page: metadata, plan, translate. */
-    translate: () => Promise<Result>;
+    translate: (budget?: number) => Promise<Result>;
     /** Another pass over what is still untranslated (scroll, mutations).
      *  `budget` caps how many nodes this pass may take, so background work on a
      *  page that keeps mutating cannot hold the model for minutes. */
@@ -340,7 +340,7 @@ namespace AT.pipeline {
     }
 
     return {
-      translate: () => schedule(null, true),
+      translate: (budget) => schedule(null, true, budget),
       refresh: (root, budget) => schedule(root ?? null, false, budget),
       isTranslated(node: Text) {
         return translator ? translator.holds(node) : false;

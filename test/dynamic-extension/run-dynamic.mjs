@@ -1,6 +1,5 @@
-// Extend the established installed-package test driver, not the application.
-// The original static cases, SDK checks, credentials handling and package hashes
-// remain mandatory. Failure in any dynamic case fails the complete run.
+// Extend the installed-package test driver, never the application or runtime.
+// Static, dynamic, endurance and requested live-site checks remain mandatory.
 import assert from 'node:assert/strict';
 import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
@@ -12,6 +11,20 @@ source = source.replace("from './firefox-install.mjs'", "from './test/native-ext
 source = "import { runYouTube } from './test/native-extension/youtube.mjs';\nimport { runEndurance } from './test/native-extension/endurance.mjs';\nimport { runDynamicPage } from './test/dynamic-extension/dynamic-page.mjs';\n" + source;
 source = source.replace(anchor,
   '  await runDynamicPage({ context, options, host, capture, stage, passed, summary, save, out });\n  await runEndurance({ context, options, host, capture, stage, passed, summary, save });\n  if (process.env.YOUTUBE_QA === "1") await runYouTube({ context, options, host, capture, stage, passed, summary, save });\n' + anchor);
+// A disconnected automation target must not hold diagnostic collection until
+// the CI job dies and drops the artifact. This never converts failure to pass.
+const failure = "    if (p && !p.isClosed()) { if (await p.locator('#modelToken').count()) await p.locator('#modelToken').fill('').catch(() => {}); await capture(p, name).catch(() => {}); }";
+assert.ok(source.includes(failure));
+source = source.replace(failure, `    if (p && !p.isClosed()) {
+      try {
+        const count = await bound(p.locator('#modelToken').count(), 3000, 'failure token field check');
+        if (count) await bound(p.locator('#modelToken').fill(''), 3000, 'failure credential removal');
+        await bound(capture(p, name), 45000, 'failure evidence capture');
+      } catch (captureError) {
+        summary.captureErrors ??= [];
+        summary.captureErrors.push({ name, message: clean(captureError.message) });
+      }
+    }`);
 const file = resolve('.native-dynamic-run.mjs');
 await writeFile(file, source);
 try { await import(pathToFileURL(file).href); }

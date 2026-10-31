@@ -889,7 +889,7 @@ test('the card is laid out for the target language and is never translated', asy
 // --- the mutation observer ---------------------------------------------------
 
 test('a page with more text than one tick may take finishes on its own', async () => {
-  // The first pass honours `maxNodes`, so a longer page is left partly
+  // The first pass honours both `maxNodes` and the scheduler slice, so a longer page is left partly
   // translated. A quiet page has no mutation to wake it, so the pass that spent
   // its whole budget schedules the next one instead of waiting.
   const many = Array.from({ length: 120 }, (_, index) => `Paragraph number ${index}`);
@@ -898,7 +898,7 @@ test('a page with more text than one tick may take finishes on its own', async (
   try {
     await env.send(translateMessage(snapshot({ maxNodes: 40 })));
     const translated = pageTexts(env.page.body).filter((text) => text.startsWith('»'));
-    assert.equal(translated.length, 40, 'the first pass is bounded by maxNodes');
+    assert.equal(translated.length, Math.min(40, env.AT.C.OBSERVER_BATCH_NODES), 'the initial pass yields at the scheduler slice');
     assert.ok(clock.pending.length > 0, 'the spent budget schedules the next tick without a mutation');
 
     // Nothing new in the DOM: only the self-scheduled ticks can finish it.

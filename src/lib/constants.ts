@@ -63,7 +63,7 @@ namespace AT {
     // Hard ceiling on DOM text nodes touched per run; keeps huge feeds cheap.
     DEFAULT_MAX_NODES: 600,
     // Ceiling for nodes translated by the MutationObserver in one tick.
-    OBSERVER_BATCH_NODES: 40,
+    OBSERVER_BATCH_NODES: 16,
     // Longer texts are split into sentences before they are sent: about 50
     // Latin tokens, well inside a sentence's worth of meaning. Only a text
     // longer than this pays for the extra round trip.

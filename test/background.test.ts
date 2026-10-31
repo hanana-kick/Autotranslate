@@ -1040,3 +1040,25 @@ test('policy: requests from an obsolete model/language snapshot never reach infe
   assert.match(reply.error, /changed|obsolete|stale/i);
   assert.equal(env.recorded.inline.messages.length, 0);
 });
+
+
+test('a storage ON event outranks an older in-flight settings read', async () => {
+  const env = environment({ settings: { enabled: false }, tab: { id: 7, url: 'https://news.example.com/article' } });
+  const old = env.AT.settings.normalize({ enabled: false });
+  const next = env.AT.settings.normalize({ ...old, enabled: true });
+  const pending = deferred<ATNamespace>();
+  const load = env.AT.settings.load;
+  let started = false;
+  env.AT.settings.load = () => { started = true; return pending.promise; };
+  const query = env.send({ type: env.AT.C.MSG.GET_STATE, tabId: 7 });
+  for (let i = 0; i < 10 && !started; i++) await new Promise(r => setImmediate(r));
+  assert.ok(started);
+  env.recorded.storage.settings = next;
+  env.AT.settings.load = load;
+  await fire(env.events.storageChanged, { settings: { oldValue: old, newValue: next } }, 'local');
+  pending.resolve(old); await query;
+  await env.send({ type: env.AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
+  const messages = env.recorded.tabMessages.filter(e => e.message.type === env.AT.C.MSG.CONTENT_TRANSLATE);
+  assert.ok(messages.length > 0);
+  assert.ok(messages.every(e => e.message.settings.enabled === true), 'stale read must not disable a committed ON command');
+});

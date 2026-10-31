@@ -54,17 +54,27 @@ export async function runYouTube({ context, options, host, capture, stage, passe
       if (inserted) break;
     }
     assert.ok(inserted, 'YouTube must actually insert a new result; a static page does not count');
+    const target = await additions.evaluate((o) => {
+      const item = o.state.items.find(({node,source}) => node.isConnected && /[A-Za-z]/.test(source) && !/[가-힣]/u.test(source));
+      return item ? { href: item.node.getAttribute('href'), source: item.source } : null;
+    });
+    assert.ok(target, 'a newly inserted original English result is required');
+    await page.locator('a#video-title[href=' + JSON.stringify(target.href) + ']').first().scrollIntoViewIfNeeded();
+    const shownAt = performance.now();
     const until = Date.now() + 180000; let translated = false;
     while (Date.now() < until) {
-      translated = await additions.evaluate((o) => o.state.items.some(({ node, source }) => node.isConnected && node.textContent !== source && /[가-힣]/u.test(node.textContent) && !/<pad>/.test(node.textContent)));
+      translated = await additions.evaluate((o, target) => o.state.items.some(({ node, source }) => node.isConnected && node.getAttribute('href') === target.href && node.textContent !== source && /[가-힣]/u.test(node.textContent) && !/<pad>/.test(node.textContent)), target);
       if (translated) break; await page.waitForTimeout(250);
     }
     assert.ok(translated, 'newly inserted real YouTube title must auto-translate');
+    result.insertedTitle = target; result.insertedLatencyMs = performance.now() - shownAt;
     result.coverage.push('live-infinite-scroll-auto-translated');
     await additions.evaluate((o) => o.observer.disconnect());
     await capture(page, 'youtube-02-dynamic-search-translated');
     await page.evaluate(() => window.scrollTo(0, 0));
-    const video = page.locator('a#video-title').filter({ hasText: /./ }).first();
+    const videoID = new URL(result.watchHref, 'https://www.youtube.com').searchParams.get('v');
+    assert.match(videoID, /^[\w-]+$/);
+    const video = page.locator('a#video-title[href*=' + JSON.stringify('v=' + videoID) + ']').first();
     await video.click(); await page.waitForURL(/\/watch\?/, { timeout: 45000 });
     const timeOrigin = await page.evaluate(() => performance.timeOrigin);
     assert.equal(timeOrigin, result.timeOrigin, 'navigation must be YouTube SPA, not a full page reload');
@@ -76,7 +86,7 @@ export async function runYouTube({ context, options, host, capture, stage, passe
     await toggle(false);
     await page.waitForFunction(() => !/[가-힣]/u.test(document.querySelector('ytd-watch-metadata h1')?.textContent || ''), null, { timeout: 20000 });
     result.restoredTitle = await title.innerText();
-    assert.ok(result.restoredTitle.trim().length > 3 && !/<pad>/.test(result.restoredTitle));
+    assert.equal(result.restoredTitle.replace(/\s+/g, ' ').trim(), result.originalTitle.replace(/\s+/g, ' ').trim(), 'restore the exact title for the same real video');
     result.coverage.push('live-watch-title-restored');
     result.host = (await host(options)).status;
     await capture(page, 'youtube-04-watch-restored');

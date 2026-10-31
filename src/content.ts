@@ -451,7 +451,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     startObserver();
     startViewportPass();
     try {
-      const result = await pipeline.translate();
+      // Yield the initial pass too: a large feed must not pin an obsolete
+      // viewport plan while newly inserted, visible text waits behind it.
+      const result = await pipeline.translate(C.OBSERVER_BATCH_NODES);
       if (epoch !== state.epoch || state.stopped) return { status: 'cancelled' };
       if (result.hasMore) requestFullPass();
       const status = result.failed || result.error ? 'error' : (result.hasMore ? 'translating' : 'translated');

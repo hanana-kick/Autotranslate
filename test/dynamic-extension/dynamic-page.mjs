@@ -165,6 +165,9 @@ export async function runDynamicPage({ context, options, host, capture, stage, p
         return nodes.map((n) => ({ id: n?.id || '', text: n?.textContent || '', ok: !!n && /[가-힣]/u.test(n.textContent) && !/^(?:\(없음\)|없음|N\/A)$/.test(n.textContent.trim()) && !/<(?:pad|end_of_turn|start_of_turn)>/.test(n.textContent) }));
       }, selectors || null);
       const status = await current();
+      const tab = await options.evaluate((tabId) => AT.sendMessage({ type: 'at/get-state', tabId }), tabId);
+      result.lastObserved = { label, host: status, tab, rendered: last };
+      if (tab.state?.status === 'error') throw new Error(label + ': ' + tab.state.error);
       if (status.state === 'error') throw new Error(label + ': ' + status.lastError);
       if (last.length && last.every((n) => n.ok) && status.state === 'ready') {
         const item = { name: label, passed: true, elapsedMs: performance.now() - since, rendered: last, generations: status.generations };
