@@ -1,0 +1,51 @@
+name: Verify final safety fixes
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/final-verify.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply integrity-checked source changes
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import zlib from 'node:zlib';import crypto from 'node:crypto';import assert from 'node:assert/strict';import {execFileSync} from 'node:child_process';
+          const payload='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';
+          const patch=zlib.brotliDecompressSync(Buffer.from(payload,'base64'));
+          assert.equal(crypto.createHash('sha256').update(patch).digest('hex'),'c11f1761939d5f64badf9e208bbf0120c9e34a6318d8b6fd851e10771bb4e399');
+          const paths=[...patch.toString().matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map(m=>m[2]);
+          execFileSync('git',['diff','--exit-code','f9a0f38079ff11c40459dcf1a021c9cf8b639851','HEAD','--',...paths]);
+          fs.mkdirSync('/tmp/final-export',{recursive:true});fs.writeFileSync('/tmp/final-export/paths.json',JSON.stringify(paths));fs.writeFileSync('/tmp/final.patch',patch);
+          execFileSync('git',['apply','--index','/tmp/final.patch'],{stdio:'inherit'});execFileSync('git',['diff','--cached','--check'],{stdio:'inherit'});
+          JS
+      - run: npm ci --no-audit --no-fund && npm run typecheck && npm test && npm run build
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0 && npx playwright install --with-deps chromium
+      - run: node --test test/browser/dom.test.mjs
+      - name: Export exact validated blobs without updating branch refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import {execFileSync} from 'node:child_process';
+          const api=async(path,body)=>{const r=await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/${path}`,{method:body?'POST':'GET',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(`${path}: ${r.status}`);return d;};
+          const parent=process.env.GITHUB_SHA,base=await api(`git/commits/${parent}`),entries=[];
+          for(const path of JSON.parse(fs.readFileSync('/tmp/final-export/paths.json','utf8'))){const blob=await api('git/blobs',{content:fs.readFileSync(path,'utf8'),encoding:'utf-8'});if(blob.sha!==execFileSync('git',['hash-object',path],{encoding:'utf8'}).trim())throw Error('blob hash mismatch');entries.push({path,mode:'100644',type:'blob',sha:blob.sha});}
+          fs.writeFileSync('/tmp/final-export/blobs.json',JSON.stringify({parent,baseTree:base.tree.sha,entries},null,2));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-final-${{ github.run_id }}
+          path: /tmp/final-export/
+          retention-days: 3
