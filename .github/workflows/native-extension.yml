@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: native-extension-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   original-runtime:
@@ -44,11 +44,22 @@ jobs:
       - name: Ensure production sources were not changed by validation
         if: always()
         run: git diff --exit-code -- src package.json package-lock.json scripts
+      - name: Remove potentially credential-bearing browser traces
+        if: always()
+        shell: bash
+        run: |
+          # Playwright DOM snapshots serialize password input values. Options can
+          # refill the saved HF token even after the onboarding field is cleared.
+          # Keep redacted logs, HTML, screenshots and hashes; never upload traces
+          # of an authenticated extension profile.
+          find test-results/native-extension -type f -name '*trace*.zip' -delete
       - name: Preserve actual results including failures
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: native-extension-${{ github.run_id }}
-          path: test-results/native-extension/
+          name: native-extension-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            test-results/native-extension/
+            !test-results/native-extension/*trace*.zip
           if-no-files-found: error
           retention-days: 14
