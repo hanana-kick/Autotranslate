@@ -1,0 +1,54 @@
+name: Real installed extension
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths:
+      - '.github/workflows/native-extension.yml'
+      - 'test/native-extension/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-extension-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  original-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:chrome
+      - name: Install test driver only
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npx playwright install --with-deps chromium
+      - name: Run installed extension - no mocked inference or capability replacement
+        shell: bash
+        env:
+          HEADED: '1'
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-extension
+          xvfb-run -a node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
+      - name: Ensure production sources were not changed by validation
+        if: always()
+        run: git diff --exit-code -- src package.json package-lock.json scripts
+      - name: Preserve actual results including failures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-extension-${{ github.run_id }}
+          path: test-results/native-extension/
+          if-no-files-found: error
+          retention-days: 14
