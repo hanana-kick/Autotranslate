@@ -1,0 +1,46 @@
+name: Planner quality audit
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths:
+      - .github/workflows/planner-audit.yml
+      - test/optimization/planner-audit.mjs
+      - src/lib/targets.ts
+      - src/lib/pipeline.ts
+      - src/lib/dom.ts
+permissions:
+  contents: read
+concurrency:
+  group: planner-audit-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npx playwright install --with-deps chromium
+      - name: Audit actual native DOM request order and planning CPU cost
+        env:
+          PLANNER_ENFORCE: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/planner
+          node test/optimization/planner-audit.mjs 2>&1 | tee test-results/planner/run.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: planner-audit-${{ github.run_id }}
+          path: test-results/planner/
+          retention-days: 14
+          if-no-files-found: error
