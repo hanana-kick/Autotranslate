@@ -1,0 +1,66 @@
+name: Native SDK candidate verification
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/native-candidate.yml']
+permissions:
+  contents: read
+jobs:
+  candidate:
+    strategy:
+      fail-fast: false
+      matrix:
+        option: [disable-rewind, float32]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare explicit production-source candidate before building
+        env:
+          CANDIDATE: ${{ matrix.option }}
+        run: |
+          mkdir -p test-results/native-extension
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import assert from 'node:assert/strict';
+          import {execFileSync} from 'node:child_process';
+          const path='src/lib/localhost.ts';
+          assert.equal(execFileSync('git',['hash-object',path],{encoding:'utf8'}).trim(),'cb2da0f0b986e85cc716e5a4e7f961b032e25b33');
+          const source=fs.readFileSync(path,'utf8');
+          const option=process.env.CANDIDATE==='disable-rewind'?'disableRewinding':'forceF32';
+          const anchor='      baseOptions,\n      // maxTokens';
+          assert.ok(source.includes(anchor));
+          fs.writeFileSync(path,source.replace(anchor,`      baseOptions,\n      ${option}: state.softwareRendering === true,\n      // maxTokens`));
+          fs.writeFileSync('test-results/native-extension/candidate.json',JSON.stringify({candidate:process.env.CANDIDATE,originalSourceBlob:'cb2da0f0b986e85cc716e5a4e7f961b032e25b33',changedSourceBlob:execFileSync('git',['hash-object',path],{encoding:'utf8'}).trim(),runtimeUnchanged:true,modelUnchanged:true},null,2));
+          JS
+          git diff -- src > test-results/native-extension/candidate.patch
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck && npm run pretest && node --test test/localhost.test.ts test/worker-host.test.ts
+      - run: npm run build:chrome
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npx playwright install --with-deps chromium
+      - name: Execute actual installed candidate with original model and UI
+        env:
+          HEADED: '1'
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          (while true; do date -u; free -m; ps -eo pid,ppid,comm,pcpu,rss,stat --sort=-pcpu | head -18; sleep 10; done) > test-results/native-extension/resources.txt &
+          monitor=$!
+          trap 'kill "$monitor" 2>/dev/null || true' EXIT
+          xvfb-run -a node test/diagnostics/run-native-diagnostic.mjs 2>&1 | tee test-results/native-extension/execution.log
+      - name: Preserve only public evidence
+        if: always()
+        run: find test-results/native-extension -type f -name '*trace*.zip' -delete
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-candidate-${{ matrix.option }}-${{ github.run_id }}
+          path: test-results/native-extension/
+          retention-days: 7
