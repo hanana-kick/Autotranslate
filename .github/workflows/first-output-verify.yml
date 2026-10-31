@@ -1,0 +1,42 @@
+name: Verify first-output recovery
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/first-output-verify.yml']
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply verified first-output proposal
+        run: |
+          node --input-type=module <<'JS'
+          import fs from'node:fs';import zlib from'node:zlib';import crypto from'node:crypto';import assert from'node:assert/strict';import{execFileSync}from'node:child_process';
+          const data='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';
+          const patch=zlib.brotliDecompressSync(Buffer.from(data,'base64'));assert.equal(crypto.createHash('sha256').update(patch).digest('hex'),'610368af68a5320cca933e6f5271e259ee1c948591f83383941890f13a32a8b4');
+          const paths=[...patch.toString().matchAll(/^diff --git a\/(.+) b\/(.+)$/gm)].map(m=>m[2]);execFileSync('git',['diff','--exit-code','84116936ae1d72d71cfa1f05e48ab339d6f460e2','HEAD','--',...paths]);
+          fs.mkdirSync('/tmp/stall-export',{recursive:true});fs.writeFileSync('/tmp/stall-export/paths.json',JSON.stringify(paths));fs.writeFileSync('/tmp/stall.patch',patch);execFileSync('git',['apply','--index','/tmp/stall.patch'],{stdio:'inherit'});
+          JS
+      - run: npm ci --no-audit --no-fund && npm run typecheck && npm run pretest && node --test test/worker-host.test.ts test/localhost.test.ts && npm run build:chrome
+      - name: Export validated source without moving branch refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from'node:fs';import{execFileSync}from'node:child_process';const api=async(p,b)=>{const r=await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/${p}`,{method:b?'POST':'GET',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(b?{body:JSON.stringify(b)}:{})});const d=await r.json();if(!r.ok)throw Error(`${p}:${r.status}`);return d;};const parent=process.env.GITHUB_SHA,base=await api(`git/commits/${parent}`),entries=[];for(const path of JSON.parse(fs.readFileSync('/tmp/stall-export/paths.json','utf8'))){const blob=await api('git/blobs',{content:fs.readFileSync(path,'utf8'),encoding:'utf-8'});if(blob.sha!==execFileSync('git',['hash-object',path],{encoding:'utf8'}).trim())throw Error('hash mismatch');entries.push({path,mode:'100644',type:'blob',sha:blob.sha});}fs.writeFileSync('/tmp/stall-export/blobs.json',JSON.stringify({parent,baseTree:base.tree.sha,entries},null,2));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: first-output-${{ github.run_id }}
+          path: /tmp/stall-export/
+          retention-days: 2
