@@ -1,0 +1,59 @@
+name: Validate native adjustment
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/native-adjustment-publish.yml']
+permissions:
+  contents: write
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Restore verified transport and apply the original validation script
+        run: |
+          mkdir -p /tmp/native-adjustment
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import {execFileSync} from 'node:child_process';
+          import {createHash} from 'node:crypto';
+          const source=fs.readFileSync('.github/workflows/native-adjustment.yml','utf8');
+          const match=source.match(/const payload='([^']+)';/);
+          if(!match)throw Error('missing staged payload');
+          const payload=match[1].replace(/u\+PSJcM\+6MZ8ds[\s\S]*?u\+PSJ90/,'u+PSJ90').replace('ON+36t4lan','ON+32t4lan').replace('23mHTop','23mSHTop');
+          if(createHash('sha256').update(payload).digest('hex')!=='3a0a729539aa17a572810ed6dd3f2690bf9f2901f13b66b356de4e3729dd29f7')throw Error('transport integrity mismatch');
+          const script=source.split("node --input-type=module <<'NODE'\n")[1].split('\n          NODE')[0].replace(match[0],`const payload=${JSON.stringify(payload)};`);
+          execFileSync(process.execPath,['--input-type=module'],{input:script,stdio:['pipe','inherit','inherit']});
+          JS
+      - run: npm ci --no-audit --no-fund
+      - name: Typecheck and regression tests
+        run: |
+          npm run typecheck
+          npm run pretest
+          node --test test/worker-host.test.ts test/localhost.test.ts test/local.test.ts
+          node --check test/native-extension/real-extension.mjs
+          npm run build:chrome
+      - name: Export verified file blobs without moving branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const root=`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/`;
+          async function api(path,body){const r=await fetch(root+path,{method:body?'POST':'GET',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(`${path}: ${r.status}`);return d;}
+          const parent=process.env.GITHUB_SHA,base=await api(`git/commits/${parent}`),entries=[];
+          for(const x of JSON.parse(fs.readFileSync('/tmp/native-records.json','utf8'))){const b=await api('git/blobs',{content:fs.readFileSync(x.path,'utf8'),encoding:'utf-8'});if(b.sha!==x.after)throw Error('blob mismatch');entries.push({path:x.path,mode:'100644',type:'blob',sha:b.sha});}
+          const result={parent,baseTree:base.tree.sha,entries};console.log(JSON.stringify(result));fs.writeFileSync('/tmp/native-adjustment/blobs.json',JSON.stringify(result,null,2));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-adjustment-${{ github.run_id }}
+          path: /tmp/native-adjustment/
+          retention-days: 3
