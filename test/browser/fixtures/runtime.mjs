@@ -11,7 +11,8 @@ function translate(text, japanese) {
   return (japanese ? ja : ko)[text.trim()] ?? (japanese ? `訳:${text}` : `번역:${text}`);
 }
 export const LlmInference = { async createFromOptions(_files, options) {
-  const state = globalThis.__qa; state.instances++;
+  await globalThis.__qaReady;
+  const state = globalThis.__qa; state.instances++; globalThis.__qaPublish?.();
   // Consume the real OPFS reader, making stream/byte-contract failures visible.
   const reader = options.baseOptions.modelAssetBuffer;
   let bytes = 0;
@@ -29,8 +30,8 @@ export const LlmInference = { async createFromOptions(_files, options) {
         if (state.failWarmup) throw new Error('fixture warmup rejected');
         return '좋은 아침입니다.';
       }
-      state.prompts.push(prompt);
-      if (state.hold) await new Promise((resolve) => state.pending.push(resolve));
+      state.prompts.push(prompt); globalThis.__qaPublish?.();
+      if (state.hold) await new Promise((resolve) => { state.pending.push(resolve); globalThis.__qaPublish?.(); });
       const japanese = /Japanese \(ja\)|into Japanese/.test(prompt);
       const body = prompt.split('\n<end_of_turn>')[0];
       if (body.includes('\nSegments:\n')) {

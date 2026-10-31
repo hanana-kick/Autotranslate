@@ -104,6 +104,11 @@ namespace AT.local {
     }
   }
 
+  /** Current native operation, reported before entering synchronous WASM. */
+  export type ModelPhase = 'runtime' | 'model-read' | 'model-create' | 'warmup' | 'count' | 'generate';
+  /** Enforced by the document outside the inference worker. */
+  export const MODEL_LOAD_TIMEOUT_MS = 300000;
+
   export type ModelState = 'unloaded' | 'loading' | 'ready' | 'busy' | 'error';
 
   /** One model file the user downloaded; `size` is bytes. */
@@ -127,6 +132,7 @@ namespace AT.local {
     loadMs: number | null;
     generations: number;
     lastError: string | null;
+    phase?: ModelPhase | null;
   };
 
   /** A download the options page is running right now, for the popup badge. */
@@ -495,6 +501,8 @@ namespace AT.local {
       loadedBytes: Number.isFinite(size) && size >= 0 ? Math.round(size) : 0,
       loadMs: Number.isFinite(loadMs) && loadMs >= 0 ? Math.round(loadMs) : null,
       generations: Number.isFinite(generations) && generations >= 0 ? Math.round(generations) : 0,
+      ...(input.phase === null || ['runtime', 'model-read', 'model-create', 'warmup', 'count', 'generate'].includes(String(input.phase))
+        ? { phase: input.phase as ModelPhase | null } : {}),
       lastError: typeof input.lastError === 'string' ? input.lastError.slice(0, 300) : null
     };
   }

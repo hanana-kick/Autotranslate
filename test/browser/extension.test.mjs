@@ -41,6 +41,8 @@ test.before(async () => {
   const original = await readFile(join(extension, 'offscreen.html'), 'utf8');
   assert.ok(!original.includes('qa-capabilities'), 'release build contains no test capabilities');
   await cp(join(ROOT, 'test/browser/fixtures/capabilities.js'), join(extension, 'qa-capabilities.js'));
+  const workerEntry = join(extension, 'inference-worker.js');
+  await writeFile(workerEntry, "importScripts('qa-capabilities.js');\n" + await readFile(workerEntry, 'utf8'));
   await cp(join(ROOT, 'test/browser/fixtures/runtime.mjs'), join(extension, 'vendor/mediapipe/genai_bundle.js'));
   await writeFile(join(extension, 'offscreen.html'), original.replace('<body>', '<body><script src="qa-capabilities.js"></script>'));
   server = createServer((request, response) => {

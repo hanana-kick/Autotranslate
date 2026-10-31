@@ -1,30 +1,24 @@
 name: Real installed extension
-
 on:
   workflow_dispatch:
-    inputs:
-      max_tokens:
-        description: Context budget set through the shipped options UI, not a runtime patch
-        default: '1024'
-        type: string
   push:
-    branches: [fix/review-hardening-20261031]
+    branches: [main, fix/review-hardening-20261031]
     paths:
+      - 'src/**'
+      - 'scripts/**'
+      - 'package*.json'
       - '.github/workflows/native-extension.yml'
       - 'test/native-extension/**'
-
 permissions:
   contents: read
-
 concurrency:
   group: native-extension-${{ github.ref }}
-  cancel-in-progress: true
-
+  cancel-in-progress: false
 jobs:
   original-runtime:
-    name: Original extension / UI context ${{ inputs.max_tokens || '256' }}
+    name: Installed extension / original model / default context
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
@@ -35,47 +29,28 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - run: npm run build:chrome
-      - name: Install test driver only
+      - name: Install browser test driver
         run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
       - run: npx playwright install --with-deps chromium
-      - name: Run installed extension - no mocked inference or capability replacement
-        shell: bash
+      - name: Actual extension download, inference and HTML restoration
         env:
           HEADED: '1'
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          NATIVE_MAX_TOKENS: ${{ inputs.max_tokens || '256' }}
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p test-results/native-extension
-          (
-            while true; do
-              date -u +%Y-%m-%dT%H:%M:%SZ
-              free -m
-              ps -C chrome -o pid,ppid,pcpu,pmem,rss,etime,comm || true
-              cat /sys/fs/cgroup/memory.events 2>/dev/null || true
-              sleep 10
-            done
-          ) > test-results/native-extension/resources.log 2>&1 &
-          monitor=$!
-          trap 'kill "$monitor" 2>/dev/null || true' EXIT
           xvfb-run -a node test/native-extension/real-extension.mjs 2>&1 | tee test-results/native-extension/execution.log
-      - name: Ensure production sources were not changed by validation
+      - name: Verify production files remained unchanged
         if: always()
         run: git diff --exit-code -- src package.json package-lock.json scripts
-      - name: Remove potentially credential-bearing browser traces
+      - name: No authenticated browser traces
         if: always()
-        shell: bash
-        run: |
-          # Authenticated browser snapshots can serialize password fields.
-          # Preserve redacted observations, never authenticated profile traces.
-          find test-results/native-extension -type f -name '*trace*.zip' -delete
-      - name: Preserve actual results including failures
+        run: find test-results/native-extension -type f -name '*trace*.zip' -delete
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
           name: native-extension-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            test-results/native-extension/
-            !test-results/native-extension/*trace*.zip
+          path: test-results/native-extension/
           if-no-files-found: error
           retention-days: 14

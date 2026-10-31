@@ -9,6 +9,9 @@
 // placements install a reporter for the status, so the rest of the extension
 // sees one shape.
 //
+// In a document, handle() supervises a dedicated worker. The worker loads the
+// SAME host, bundled runtime and OPFS model. Synchronous WASM never runs in the
+// extension UI renderer; deadlines and unload remain responsive outside it.
 // Load after lib/constants.js, lib/browser.js, lib/local.js and
 // lib/modelstore.js; the MediaPipe module itself arrives at runtime.
 namespace AT.localhost {
@@ -100,6 +103,108 @@ namespace AT.localhost {
     lastError: null
   };
 
+  // The worker is a production isolation boundary, not a second inference engine.
+  // Unit tests of the native host execute without a document, just as the worker.
+  const documentHost = typeof document !== 'undefined';
+  let compute: Worker | null = null;
+  let workerEpoch = 0;
+  let nextRequestId = 0;
+  type Pending = {
+    id: number;
+    resolve: (reply: HostReply) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout> | null;
+  };
+  let pending: Pending | null = null;
+
+  function workerError(reason: string, message: string): Error & { reason: string; code: string } {
+    return Object.assign(new Error(message), { reason, code: L.codeForReason(reason) });
+  }
+
+  function stopCompute(error = workerError('generation-failed', 'model operation cancelled')): void {
+    const previous = compute;
+    compute = null;
+    workerEpoch++;
+    const active = pending;
+    pending = null;
+    if (active?.timer) clearTimeout(active.timer);
+    // terminate() does not wait for a blocked native generateResponse()/close().
+    previous?.terminate();
+    active?.reject(error);
+  }
+
+  function computeFailed(reason: string, detail: string): void {
+    const phase = state.phase;
+    stopCompute(workerError(reason, detail));
+    teardown('worker-failed');
+    state.state = 'error';
+    state.reason = reason;
+    state.lastError = detail.slice(0, 300);
+    state.phase = phase ?? null;
+    publish();
+  }
+
+  function armDeadline(): void {
+    if (!pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    const phase = state.phase;
+    const generation = phase === 'generate' || phase === 'warmup';
+    const ms = generation ? L.GENERATION_TIMEOUT_MS : L.MODEL_LOAD_TIMEOUT_MS;
+    pending.timer = setTimeout(() => computeFailed(
+      generation ? 'generation-timeout' : 'model-load-failed',
+      "native " + (phase ?? "worker-start") + " timed out after " + ms + " ms; inference worker terminated"
+    ), ms);
+  }
+
+  function workerCall(message: AT.Message): Promise<HostReply> {
+    if (!compute) {
+      if (typeof Worker === 'undefined') fail('runtime-load-failed', 'dedicated workers are unavailable');
+      const worker = new Worker(AT.getURL('inference-worker.js'), { name: 'autotranslate-inference' });
+      compute = worker;
+      worker.onmessage = (event: MessageEvent) => {
+        if (compute !== worker) return; // a terminated session cannot publish late replies
+        const data = event.data as { kind?: string; status?: AT.local.LocalStatus; id?: number;
+          reply?: HostReply; error?: { message?: string; reason?: string } };
+        if (data.kind === 'status' && data.status) {
+          Object.assign(state, L.normalizeStatus(data.status));
+          loadedBytes = state.loadedBytes;
+          loadMs = state.loadMs;
+          generations = state.generations;
+          publish();
+          // Only the worker's real stage transitions renew the deadline. UI
+          // status polling never sends work to the compute queue.
+          armDeadline();
+          return;
+        }
+        if (data.kind !== 'reply' || !pending || data.id !== pending.id) return;
+        const active = pending;
+        pending = null;
+        if (active.timer) clearTimeout(active.timer);
+        if (data.error) active.reject(workerError(data.error.reason ?? 'generation-failed', data.error.message ?? 'worker failed'));
+        else active.resolve(data.reply ?? {});
+      };
+      worker.onerror = (event: ErrorEvent) => {
+        event.preventDefault();
+        if (compute === worker) computeFailed('runtime-load-failed', event.message || 'inference worker crashed');
+      };
+      worker.onmessageerror = () => {
+        if (compute === worker) computeFailed('runtime-load-failed', 'invalid inference worker response');
+      };
+    }
+    return new Promise<HostReply>((resolve, reject) => {
+      const id = ++nextRequestId;
+      pending = { id, resolve, reject, timer: null };
+      armDeadline();
+      try { compute!.postMessage({ id, placement: state.target, message }); }
+      catch (error) { computeFailed('runtime-load-failed', String((error as Error)?.message ?? error)); }
+    });
+  }
+
+  function setPhase(phase: AT.local.ModelPhase | null): void {
+    state.phase = phase;
+    publish();
+  }
+
   /** The one thing a placement supplies: where a status change goes. */
   export function install(place: Placement, report: (status: AT.local.LocalStatus) => void): AT.local.LocalStatus {
     state.target = place;
@@ -170,6 +275,7 @@ namespace AT.localhost {
     loadMs = null;
     loading = null;
     state.state = 'unloaded';
+    state.phase = null;
     state.modelId = null;
     state.modelName = null;
     // A reason belongs to a state, not to the host: the next load starts with
@@ -233,6 +339,7 @@ namespace AT.localhost {
   async function instantiate(record: AT.modelstore.ModelRecord, maxTokens: number): Promise<LlmInstance> {
     const active = module as GenaiModule;
     const assets = fileset as WasmFileset;
+    setPhase('model-read');
     const blob = await AT.modelstore.read(record.id);
     if (!blob) fail('model-missing', `no stored file for model ${record.id}`);
     const options = (baseOptions: Record<string, unknown>): Record<string, unknown> => ({
@@ -246,6 +353,7 @@ namespace AT.localhost {
     });
     // The stored file is streamed into the runtime: a 3.6 GiB model must not
     // be copied into the JS heap, and reading it by URL would fetch it again.
+    setPhase('model-create');
     return await active.LlmInference.createFromOptions(
       assets,
       options({ modelAssetBuffer: blob.stream().getReader() })
@@ -276,13 +384,16 @@ namespace AT.localhost {
     publish();
     const started = Date.now();
     loading = (async () => {
+      setPhase('runtime');
       await loadRuntime();
       if (llm) teardown('switch');
       const instance = await instantiate(record as AT.modelstore.ModelRecord, budget);
       // Own the instance before warming it, so a failed verification also frees
       // its allocated weights. Readiness means inference succeeded, not just load.
       llm = instance;
+      setPhase('warmup');
       await warmup(instance);
+      setPhase(null);
       loadedId = record.id;
       loadedMaxTokens = budget;
       loadedBytes = record.size;
@@ -333,7 +444,9 @@ namespace AT.localhost {
     const instance = llm;
     if (!instance) fail('no-model', 'no model is loaded');
     try {
+      setPhase('generate');
       const reply = await boundedResponse(instance, prompt);
+      setPhase(null);
       generations += 1;
       touchIdleTimer();
       return reply;
@@ -418,6 +531,7 @@ namespace AT.localhost {
   }
 
   export function unload(cause = 'requested'): AT.local.LocalStatus {
+    if (documentHost) stopCompute();
     teardown(cause);
     return state;
   }
@@ -464,6 +578,18 @@ namespace AT.localhost {
   /** One entry point for both placements: the offscreen document's message
    *  handlers and the background's direct calls dispatch through here. */
   export async function handle(message: AT.Message): Promise<HostReply> {
+    if (documentHost) {
+      if (message.type === C.MSG.LOCAL_QUERY || message.type === C.MSG.LOCAL_STATUS) return { status: await status() };
+      // Control-plane cancellation must never queue behind native computation.
+      if (message.type === C.MSG.LOCAL_UNLOAD) return { status: unload('requested') };
+      if (![C.MSG.LOCAL_TRANSLATE, C.MSG.LOCAL_LOAD, C.MSG.LOCAL_COUNT].includes(message.type)) return {};
+      const epoch = workerEpoch;
+      return enqueue(async () => {
+        if (epoch !== workerEpoch) throw workerError('generation-failed', 'obsolete worker session');
+        await checkSupport();
+        return workerCall(message);
+      });
+    }
     switch (message?.type) {
       case C.MSG.LOCAL_TRANSLATE:
         return await translate(message as TranslateRequest);
@@ -500,6 +626,9 @@ namespace AT.localhost {
     const source = AT.gemma.isLang(request.source) ? request.source : null;
     // The measured cost of the instruction without any text, for packing.
     const empty = source ? L.buildTranslatePrompt(source, target, '') : L.buildAutoPrompt(target, '');
-    return { counts: texts.map((text) => tokenCount(text)), overhead: tokenCount(empty) };
+    setPhase('count');
+    const result = { counts: texts.map((text) => tokenCount(text)), overhead: tokenCount(empty) };
+    setPhase(null);
+    return result;
   }
 }
