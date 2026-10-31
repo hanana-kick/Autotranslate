@@ -1,0 +1,66 @@
+name: Native extension driver diagnosis
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['.github/workflows/native-driver-diagnostic.yml']
+permissions:
+  contents: read
+jobs:
+  mesa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund && npm run build:chrome
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npx playwright install --with-deps chromium
+      - name: Install actual software Vulkan driver
+        run: sudo apt-get install -y mesa-vulkan-drivers vulkan-tools
+      - name: Select and report Vulkan driver
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-extension
+          ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' -print -quit)
+          test -n "$ICD"
+          echo "VK_DRIVER_FILES=$ICD" >> "$GITHUB_ENV"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          VK_DRIVER_FILES="$ICD" VK_ICD_FILENAMES="$ICD" vulkaninfo --summary > test-results/native-extension/vulkan.txt 2>&1
+      - name: Set browser driver options only - never modify the extension
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          let script = fs.readFileSync('test/native-extension/real-extension.mjs','utf8');
+          const from = "'--use-angle=swiftshader',\n      '--enable-unsafe-webgpu', '--enable-unsafe-swiftshader', '--disable-dev-shm-usage'";
+          if (!script.includes(from)) throw Error('test launch configuration changed');
+          script = script.replace(from, "'--use-angle=vulkan', '--enable-features=Vulkan,VulkanFromANGLE', '--ozone-platform=x11', '--enable-unsafe-webgpu', '--disable-dev-shm-usage'");
+          script = script.replace("{ vendor: a.info?.vendor, architecture: a.info?.architecture }", "{ vendor: a.info?.vendor, architecture: a.info?.architecture, description: a.info?.description, features: [...a.features] }");
+          script = script.replace("await welcome.locator('#targetLang').selectOption('ko');", "console.log(JSON.stringify({actualAdapter:summary.adapter})); assert.match(JSON.stringify(summary.adapter), /mesa|llvmpipe|lavapipe/i, 'the browser must actually use the Mesa driver'); await welcome.locator('#targetLang').selectOption('ko');");
+          fs.writeFileSync('.native-driver-diagnostic.mjs', script);
+          JS
+      - name: Genuine installed extension model download and translation-restoration
+        env:
+          HEADED: '1'
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          LP_NUM_THREADS: '4'
+        shell: bash
+        run: |
+          set -euo pipefail
+          (while :; do date -u +%FT%TZ; grep -E 'MemAvailable|SwapFree' /proc/meminfo; ps -eo pid,ppid,pcpu,rss,comm --sort=-pcpu | head -15; sleep 10; done) > test-results/native-extension/resources.txt &
+          SAMPLER=$!
+          trap 'kill "$SAMPLER" 2>/dev/null || true' EXIT
+          xvfb-run -a node .native-driver-diagnostic.mjs 2>&1 | tee test-results/native-extension/execution.log
+      - name: Production files unchanged
+        if: always()
+        run: git diff --exit-code -- src scripts package.json package-lock.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-mesa-${{ github.run_id }}
+          path: test-results/native-extension/
+          retention-days: 7
