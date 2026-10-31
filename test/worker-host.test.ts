@@ -117,3 +117,37 @@ test('worker host: corrupt retry fails, it never loops until green', async () =>
   await tick(); FakeWorker.instances[1]!.send({ kind: 'status', status: { state: 'error', reason: 'invalid-output', lastError: 'padding' } });
   await failure; assert.equal(FakeWorker.instances.length, 2);
 });
+
+
+test('worker host: cold warmup has a startup budget and one bounded fresh-worker recovery', async () => {
+  const AT = fixture(); AT.local.MODEL_LOAD_TIMEOUT_MS = 40; AT.local.GENERATION_TIMEOUT_MS = 20;
+  const request = AT.localhost.handle(message); await tick(); const first = FakeWorker.instances[0]!;
+  first.send({ kind: 'status', status: { state: 'loading', supported: true, phase: 'warmup' } });
+  await new Promise(r => setTimeout(r, 25));
+  assert.equal(first.terminated, false, 'cold warmup does not use the shorter generation deadline');
+  await new Promise(r => setTimeout(r, 25)); await tick();
+  const second = FakeWorker.instances[1]!; assert.ok(second); assert.equal(first.terminated, true);
+  second.reply({ status: { state: 'ready' } }); await request;
+  assert.equal((await AT.localhost.status()).recoveries, 1);
+  await AT.localhost.handle({ type: 'at/local-unload' });
+});
+
+test('worker host: a repeated cold warmup failure is final, never retried until green', async () => {
+  const AT = fixture(); AT.local.MODEL_LOAD_TIMEOUT_MS = 25; AT.local.GENERATION_TIMEOUT_MS = 20;
+  const request = AT.localhost.handle(message); const rejected = assert.rejects(request, /warmup.*timed out/);
+  await tick(); FakeWorker.instances[0]!.send({ kind: 'status', status: { state: 'loading', supported: true, phase: 'warmup' } });
+  await new Promise(r => setTimeout(r, 30)); await tick();
+  FakeWorker.instances[1]!.send({ kind: 'status', status: { state: 'loading', supported: true, phase: 'warmup' } });
+  await rejected; assert.equal(FakeWorker.instances.length, 2);
+  assert.ok(FakeWorker.instances.every(w => w.terminated));
+  assert.equal((await AT.localhost.status()).state, 'error');
+});
+
+test('worker host: unload during a recovered warmup cannot restart a cancelled session', async () => {
+  const AT = fixture(); const request = AT.localhost.handle(message);
+  const rejected = assert.rejects(request, /cancelled/); await tick();
+  FakeWorker.instances[0]!.send({ kind: 'status', status: { state: 'error', reason: 'warmup-timeout', lastError: 'warmup timeout' } });
+  await tick(); const second = FakeWorker.instances[1]!; assert.ok(second);
+  await AT.localhost.handle({ type: 'at/local-unload' }); await rejected;
+  assert.equal(second.terminated, true); assert.equal(FakeWorker.instances.length, 2);
+});

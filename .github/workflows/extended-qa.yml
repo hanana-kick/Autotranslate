@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: extended-qa-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   native:
     name: Actual extension / ${{ matrix.target }}

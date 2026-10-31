@@ -567,6 +567,7 @@ namespace AT.local {
     'generation-failed': true,
     'invalid-output': true,
     'generation-timeout': true,
+    'warmup-timeout': true,
     'context-overflow': true,
     cancelled: true
   };

@@ -145,7 +145,9 @@ namespace AT.localhost {
 
   function computeFailed(reason: string, detail: string): void {
     const phase = state.phase;
-    stopCompute(workerError(reason, detail));
+    // A cold warmup failure may be retried once by the request supervisor.
+    // Explicit unload and all ordinary inference failures still invalidate work.
+    stopCompute(workerError(reason, detail), reason !== 'warmup-timeout');
     teardown('worker-failed');
     state.state = 'error';
     state.reason = reason;
@@ -165,7 +167,7 @@ namespace AT.localhost {
     const generation = phase === 'generate' || phase === 'warmup';
     const ms = generation ? generationTimeout() : L.MODEL_LOAD_TIMEOUT_MS;
     pending.timer = setTimeout(() => computeFailed(
-      generation ? 'generation-timeout' : 'model-load-failed',
+      phase === 'warmup' ? 'warmup-timeout' : generation ? 'generation-timeout' : 'model-load-failed',
       "native " + (phase ?? "worker-start") + " timed out after " + ms + " ms; inference worker terminated"
     ), ms);
   }
@@ -189,8 +191,8 @@ namespace AT.localhost {
           publish();
           // Invalid streamed output can be reported while the native graph is
           // still running. Its owner can terminate it without entering close().
-          if (state.reason === 'invalid-output') {
-            stopCompute(workerError('invalid-output', state.lastError ?? 'invalid model output'), false);
+          if (state.reason === 'invalid-output' || state.reason === 'warmup-timeout') {
+            stopCompute(workerError(state.reason, state.lastError ?? 'invalid native session'), false);
             return;
           }
           // Only the worker's real stage transitions renew the deadline. UI
@@ -223,7 +225,12 @@ namespace AT.localhost {
   }
 
   function generationTimeout(): number {
-    return state.softwareRendering ? L.SOFTWARE_GENERATION_TIMEOUT_MS : L.GENERATION_TIMEOUT_MS;
+    if (state.softwareRendering) return L.SOFTWARE_GENERATION_TIMEOUT_MS;
+    // The first generation also compiles/tunes kernels; it is startup work,
+    // not the steady-state inference deadline. Both remain strictly bounded.
+    return state.phase === 'warmup'
+      ? Math.max(L.MODEL_LOAD_TIMEOUT_MS, L.GENERATION_TIMEOUT_MS)
+      : L.GENERATION_TIMEOUT_MS;
   }
 
   function setPhase(phase: AT.local.ModelPhase | null): void {
@@ -500,7 +507,10 @@ namespace AT.localhost {
     if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
     let timer: ReturnType<typeof setTimeout> | undefined;
     return new Promise<string>((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error('generation timeout')), generationTimeout());
+      timer = setTimeout(() => reject(workerError(
+        state.phase === 'warmup' ? 'warmup-timeout' : 'generation-timeout',
+        state.phase === 'warmup' ? 'model warmup timeout' : 'generation timeout'
+      )), generationTimeout());
       let lastPublished = 0, streamed = '';
       instance.generateResponse(prompt, (partial, done) => {
         // Only counts/timestamps cross the worker boundary, never page content.
@@ -685,14 +695,16 @@ namespace AT.localhost {
         try {
           return await workerCall(message);
         } catch (error) {
-          if ((error as { reason?: string }).reason !== 'invalid-output' || epoch !== workerEpoch) throw error;
-          // One bounded fresh-worker retry for corrupt native output. No change
-          // of model, SDK, prompt or GPU backend, and no retry loop on mutations.
-          stopCompute(workerError('invalid-output', 'discard corrupt native session'), false);
-          teardown('invalid-output-retry');
+          const reason = (error as { reason?: string }).reason;
+          if (!['invalid-output', 'warmup-timeout'].includes(reason ?? '') || epoch !== workerEpoch) throw error;
+          // Exactly one recovery per request, shared by corrupt output and cold
+          // warmup failure. Steady-state timeouts are never automatically retried.
+          // The model, SDK, prompt and GPU policy remain unchanged.
+          stopCompute(workerError(reason!, 'discard failed native session'), false);
+          teardown('native-session-retry');
           state.recoveries = (state.recoveries ?? 0) + 1;
           publish();
-          AT.warn('invalid native output; retrying once with a fresh inference worker');
+          AT.warn('native session failed; retrying once with a fresh inference worker', reason);
           return await workerCall(message);
         }
       });
