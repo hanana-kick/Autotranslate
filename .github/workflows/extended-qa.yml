@@ -17,7 +17,7 @@ jobs:
       matrix:
         target: [firefox, youtube]
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,13 +28,18 @@ jobs:
       - run: npm ci --no-audit --no-fund && npm run build
       - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
       - run: npx playwright install --with-deps chromium firefox
-      - name: Pinned official Firefox driver
+      - name: Pinned official Firefox UI test driver
         if: matrix.target == 'firefox'
         run: |
           set -euo pipefail
           curl -fL --retry 3 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-macos-aarch64.tar.gz -o "$RUNNER_TEMP/geckodriver.tar.gz"
           echo "d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5  $RUNNER_TEMP/geckodriver.tar.gz" | shasum -a 256 -c -
           tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP"
+          # Firefox 153+ requires the documented opt-in for extension UI tests.
+          # This affects only the fresh CI WebDriver session, not addon privileges.
+          mv "$RUNNER_TEMP/geckodriver" "$RUNNER_TEMP/geckodriver-real"
+          printf '#!/bin/sh\nexec "%s/geckodriver-real" --allow-system-access "$@"\n' "$RUNNER_TEMP" > "$RUNNER_TEMP/geckodriver"
+          chmod +x "$RUNNER_TEMP/geckodriver"
       - name: Original installed extension and model
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

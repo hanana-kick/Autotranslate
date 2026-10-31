@@ -151,3 +151,42 @@ test('worker host: unload during a recovered warmup cannot restart a cancelled s
   await AT.localhost.handle({ type: 'at/local-unload' }); await rejected;
   assert.equal(second.terminated, true); assert.equal(FakeWorker.instances.length, 2);
 });
+
+
+test('worker host: a missing first token causes exactly one original-worker recovery', async () => {
+  const AT=fixture(); AT.local.FIRST_OUTPUT_TIMEOUT_MS=25;
+  const req=AT.localhost.handle({type:'at/local-translate',modelId:'fixture-model',texts:['Hello.'],source:'en',target:'ko'});
+  await tick(); const first=FakeWorker.instances[0]!;
+  first.send({kind:'status',status:{state:'busy',phase:'generate',supported:true,outputChars:0}});
+  const poll=setInterval(()=>first.send({kind:'status',status:{state:'busy',phase:'generate',supported:true,outputChars:0}}),5);
+  await new Promise(r=>setTimeout(r,35));clearInterval(poll);await tick();
+  const second=FakeWorker.instances[1]!;assert.ok(second);assert.equal(first.terminated,true);
+  assert.deepEqual(second.messages[0]!.message,first.messages[0]!.message);
+  second.reply({translations:['안녕하세요.']});assert.deepEqual((await req).translations,['안녕하세요.']);
+  assert.equal((await AT.localhost.status()).recoveries,1);await AT.localhost.handle({type:'at/local-unload'});
+});
+
+test('worker host: actual first output clears only the first-output timer',async()=>{
+  const AT=fixture();AT.local.FIRST_OUTPUT_TIMEOUT_MS=20;AT.local.GENERATION_TIMEOUT_MS=80;
+  const req=AT.localhost.handle(message);await tick();const worker=FakeWorker.instances[0]!;
+  worker.send({kind:'status',status:{state:'busy',phase:'generate',supported:true,outputChars:0}});
+  await new Promise(r=>setTimeout(r,10));worker.send({kind:'status',status:{state:'busy',phase:'generate',supported:true,outputChars:3}});
+  await new Promise(r=>setTimeout(r,25));assert.equal(worker.terminated,false);worker.reply();await req;
+  await AT.localhost.handle({type:'at/local-unload'});
+});
+
+test('worker host: a second missing-first-token failure is final',async()=>{
+  const AT=fixture();AT.local.FIRST_OUTPUT_TIMEOUT_MS=15;
+  const req=AT.localhost.handle(message);const failed=assert.rejects(req,/produced no output/);
+  await tick();FakeWorker.instances[0]!.send({kind:'status',status:{state:'busy',phase:'generate',supported:true,outputChars:0}});
+  await new Promise(r=>setTimeout(r,25));await tick();FakeWorker.instances[1]!.send({kind:'status',status:{state:'busy',phase:'generate',supported:true,outputChars:0}});
+  await failed;assert.equal(FakeWorker.instances.length,2);assert.ok(FakeWorker.instances.every(w=>w.terminated));
+});
+
+test('worker host: software generation retains its explicit long deadline',async()=>{
+  const AT=fixture();AT.local.FIRST_OUTPUT_TIMEOUT_MS=10;AT.local.SOFTWARE_GENERATION_TIMEOUT_MS=100;
+  const req=AT.localhost.handle(message);await tick();const worker=FakeWorker.instances[0]!;
+  worker.send({kind:'status',status:{state:'busy',phase:'generate',supported:true,softwareRendering:true,outputChars:0}});
+  await new Promise(r=>setTimeout(r,25));assert.equal(worker.terminated,false);worker.reply();await req;
+  await AT.localhost.handle({type:'at/local-unload'});
+});

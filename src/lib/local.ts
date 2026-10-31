@@ -51,6 +51,8 @@ namespace AT.local {
   export const IDLE_UNLOAD_MS = 10 * 60 * 1000;
   /** One generation on a 4B model over 1500 characters is slow but bounded. */
   export const GENERATION_TIMEOUT_MS = 180000;
+  /** Hardware ready-model first-output deadline, supervised outside native work. */
+  export const FIRST_OUTPUT_TIMEOUT_MS = 60000;
   /** Real software WebGPU is much slower; do not repeatedly discard valid work. */
   export const SOFTWARE_GENERATION_TIMEOUT_MS = 15 * 60 * 1000;
   /** Progress is forwarded to the background at most this often. */
@@ -568,6 +570,7 @@ namespace AT.local {
     'invalid-output': true,
     'generation-timeout': true,
     'warmup-timeout': true,
+    'generation-stalled': true,
     'context-overflow': true,
     cancelled: true
   };

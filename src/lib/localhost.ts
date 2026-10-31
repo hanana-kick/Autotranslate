@@ -124,6 +124,7 @@ namespace AT.localhost {
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout> | null;
     deadlinePhase?: string;
+    firstOutputTimer?: ReturnType<typeof setTimeout> | null;
   };
   let pending: Pending | null = null;
 
@@ -138,6 +139,7 @@ namespace AT.localhost {
     const active = pending;
     pending = null;
     if (active?.timer) clearTimeout(active.timer);
+    if (active?.firstOutputTimer) clearTimeout(active.firstOutputTimer);
     // terminate() does not wait for a blocked native generateResponse()/close().
     previous?.terminate();
     active?.reject(error);
@@ -147,7 +149,7 @@ namespace AT.localhost {
     const phase = state.phase;
     // A cold warmup failure may be retried once by the request supervisor.
     // Explicit unload and all ordinary inference failures still invalidate work.
-    stopCompute(workerError(reason, detail), reason !== 'warmup-timeout');
+    stopCompute(workerError(reason, detail), !['warmup-timeout', 'generation-stalled'].includes(reason));
     teardown('worker-failed');
     state.state = 'error';
     state.reason = reason;
@@ -160,6 +162,16 @@ namespace AT.localhost {
     if (!pending) return;
     const phase = state.phase;
     const key = `${phase ?? 'worker-start'}:${state.softwareRendering === true}`;
+    // A ready hardware graph must produce a first token within a bounded
+    // interval. Observe outside the worker: a blocked native call cannot run
+    // its own timer. Duplicate status messages must not extend this interval.
+    if (phase !== 'generate' || state.softwareRendering || (state.outputChars ?? 0) > 0) {
+      if (pending.firstOutputTimer) clearTimeout(pending.firstOutputTimer);
+      pending.firstOutputTimer = null;
+    } else if (!pending.firstOutputTimer) {
+      pending.firstOutputTimer = setTimeout(() => computeFailed('generation-stalled',
+        'native generation produced no output within ' + L.FIRST_OUTPUT_TIMEOUT_MS + ' ms; inference worker terminated'), L.FIRST_OUTPUT_TIMEOUT_MS);
+    }
     // Progress/status updates must not renew the absolute deadline of a phase.
     if (pending.deadlinePhase === key) return;
     pending.deadlinePhase = key;
@@ -204,6 +216,7 @@ namespace AT.localhost {
         const active = pending;
         pending = null;
         if (active.timer) clearTimeout(active.timer);
+        if (active.firstOutputTimer) clearTimeout(active.firstOutputTimer);
         if (data.error) active.reject(workerError(data.error.reason ?? 'generation-failed', data.error.message ?? 'worker failed'));
         else active.resolve(data.reply ?? {});
       };
@@ -696,9 +709,10 @@ namespace AT.localhost {
           return await workerCall(message);
         } catch (error) {
           const reason = (error as { reason?: string }).reason;
-          if (!['invalid-output', 'warmup-timeout'].includes(reason ?? '') || epoch !== workerEpoch) throw error;
+          if (!['invalid-output', 'warmup-timeout', 'generation-stalled'].includes(reason ?? '') || epoch !== workerEpoch) throw error;
           // Exactly one recovery per request, shared by corrupt output and cold
-          // warmup failure. Steady-state timeouts are never automatically retried.
+          // warmup failure or missing first output. Ordinary total-generation
+          // timeouts are final; no request can recover more than once.
           // The model, SDK, prompt and GPU policy remain unchanged.
           stopCompute(workerError(reason!, 'discard failed native session'), false);
           teardown('native-session-retry');

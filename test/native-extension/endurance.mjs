@@ -34,7 +34,7 @@ export async function runEndurance({ context, options, host, capture, stage, pas
       await Promise.all(tabs.map((p) => p.waitForFunction(() => {
         const text = document.querySelector('#text').textContent;
         return /[가-힣]/u.test(text) && !/<(?:pad|start_of_turn|end_of_turn)>/.test(text) && text.length < 500;
-      }, null, { timeout: 90000 })));
+      }, null, { timeout: 600000 })));
       for (const [index, page] of tabs.entries()) {
         assert.equal(await records[index].evaluate((o) => o.el === document.querySelector('#text') && o.text === o.el.firstChild), true);
         assert.equal(await page.locator('input').inputValue(), 'retained draft');

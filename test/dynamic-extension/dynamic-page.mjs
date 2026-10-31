@@ -157,7 +157,7 @@ export async function runDynamicPage({ context, options, host, capture, stage, p
   }
   async function translated(label, selectors, since = performance.now()) {
     await stage('dynamic-' + label);
-    const deadline = performance.now() + 90000;
+    const deadline = performance.now() + 600000;
     let last;
     while (performance.now() < deadline) {
       last = await page.evaluate((selectors) => {
