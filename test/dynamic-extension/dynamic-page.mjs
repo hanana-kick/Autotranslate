@@ -1,6 +1,7 @@
 // Real-page behavior with the installed extension. Only fixture DOM is changed;
 // inference, extension globals, extension messages and network are not replaced.
 import assert from 'node:assert/strict';
+import { setTabEnabledUI } from '../native-extension/tab-control.mjs';
 import { createServer } from 'node:http';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -133,28 +134,7 @@ export async function runDynamicPage({ context, options, host, capture, stage, p
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const current = async () => (await host(options)).status;
   let tabId;
-  async function enabled(value) {
-    // Language choices exist before the asynchronous model/store hydration.
-    // Read persisted state, then wait for that state to be rendered before acting.
-    // A checkbox changed before render() would otherwise be overwritten by load.
-    const previous = await options.evaluate(async () => {
-      const s = await AT.settings.load();
-      return { enabled: s.enabled, localModelId: s.localModelId, sourceLang: s.sourceLang, targetLang: s.targetLang };
-    });
-    await options.reload();
-    await options.waitForFunction((s) =>
-      document.querySelector('#localModel').value === s.localModelId &&
-      document.querySelector('#enabled').checked === s.enabled &&
-      document.querySelector('#sourceLang').value === s.sourceLang &&
-      document.querySelector('#targetLang').value === s.targetLang, previous);
-    await options.locator('#enabled').setChecked(value);
-    assert.equal(await options.locator('#enabled').isChecked(), value);
-    await options.locator('#save').click();
-    await options.waitForFunction(async (value) =>
-      document.querySelector('#saveStatus').dataset.kind === 'ok' &&
-      document.querySelector('#enabled').checked === value &&
-      (await AT.settings.load()).enabled === value, value);
-  }
+  async function enabled(value) { await setTabEnabledUI(options, tabId, value); }
   async function translated(label, selectors, since = performance.now()) {
     await stage('dynamic-' + label);
     const deadline = performance.now() + 600000;

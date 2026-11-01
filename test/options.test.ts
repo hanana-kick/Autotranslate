@@ -14,7 +14,8 @@ const LIBS = [
   'lib/local.js',
   'lib/modelstore.js',
   'lib/modelflow.js',
-  'lib/settings.js'
+  'lib/settings.js',
+  'lib/ui.js'
 ];
 
 const host = globalThis as ATNamespace;
@@ -166,6 +167,7 @@ function makeEl(tagName: string, id = ''): Stub {
 }
 
 type StubDocument = {
+  body: { dataset: Record<string, string> };
   fields: Record<string, Stub>;
   listeners: Record<string, Listener[]>;
   createElement(tagName: string): Stub;
@@ -177,6 +179,8 @@ type StubDocument = {
 // id, tag and the data-i18n key options.html puts on the button.
 const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['enabled', 'input'],
+  ['tabHost', 'p'],
+  ['tabStatus', 'p'],
   ['showBadge', 'input'],
   ['debug', 'input'],
   ['testEngine', 'button', 'options_test'],
@@ -219,6 +223,7 @@ function makeDocument(): StubDocument {
   const fields: Record<string, Stub> = {};
   const doc: StubDocument = {
     fields,
+    body: { dataset: {} },
     listeners: {},
     createElement: (tagName) => makeEl(tagName),
     getElementById: (id) => fields[id],

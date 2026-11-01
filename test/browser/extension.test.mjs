@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { setTabEnabledUI, tabIdFor, optionsReady } from '../native-extension/tab-control.mjs';
 import { cp, mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -27,8 +28,14 @@ async function fixture(path, html) {
   await page.goto(`${origin}${path}`);
   return page;
 }
+async function select(page, value) { await setTabEnabledUI(control, await tabIdFor(control, page), value); }
 async function stopPolicy() {
   if (!control || control.isClosed()) return;
+  await control.evaluate(async () => {
+    for (const tab of await AT.api.tabs.query({})) if (tab.id != null && /^https?:/.test(tab.url || '')) {
+      await AT.sendMessage({type:AT.C.MSG.SET_TAB_ENABLED,tabId:tab.id,enabled:false});
+    }
+  });
   await policy({ enabled: false, siteRules: [] });
   await model({ release: true, failWarmup: false }).catch(() => {});
   for (const page of context.pages()) if (page !== control) await page.close();
@@ -131,27 +138,28 @@ check('file picker installs through the real UI and starts the extension', async
   await page.waitForFunction(() => !document.querySelector('#start').disabled);
   await screenshot(page, 'model-ready');
   await page.locator('#start').click();
-  await until(async () => (await control.evaluate(() => AT.settings.load())).enabled, 'onboarding starts translation');
+  await until(async () => !!(await control.evaluate(() => AT.settings.load())).localModelId, 'onboarding stores a working model');
+  assert.equal((await control.evaluate(() => AT.settings.load())).enabled,false,'setup must not auto-enroll tabs');
   const settings = await control.evaluate(() => AT.settings.load());
   assert.equal(settings.targetLang, 'ko'); assert.ok(settings.localModelId);
 });
 
 check('background to offscreen to content translates links safely then restores all nodes', async () => {
   const page = await fixture('/inline', '<p>Read <a href="/privacy" class="policy">privacy policy</a> before you continue.</p>');
-  await policy({ enabled: true, sourceLang: 'en', targetLang: 'ja' });
+  await policy({ sourceLang: 'en', targetLang: 'ja' }); await select(page, true);
   await page.waitForFunction(() => document.querySelector('a').textContent === 'プライバシーポリシー');
   assert.equal(await page.locator('a').getAttribute('href'), '/privacy');
   assert.equal(await page.locator('a').getAttribute('class'), 'policy');
   await screenshot(page, 'extension-inline-translated');
-  await policy({ enabled: false });
+  await select(page, false);
   await page.waitForFunction(() => document.querySelector('p').textContent === 'Read privacy policy before you continue.');
 });
 
 check('turning off during native host work restores without waiting for inference', async () => {
   const page = await fixture('/cancel', '<p>Original text</p>');
-  await model({ hold: true }); await policy({ enabled: true, targetLang: 'ko' });
+  await model({ hold: true }); await policy({ sourceLang: 'en', targetLang: 'ko' }); await select(page, true);
   await until(async () => (await model()).pending === 1, 'inference held');
-  const start = Date.now(); await policy({ enabled: false });
+  const start = Date.now(); await select(page, false);
   const tab = await control.evaluate(async (url) => (await AT.api.tabs.query({})).find((item) => item.url === url), page.url());
   await until(async () => (await control.evaluate((id) => AT.api.tabs.sendMessage(id, { type: AT.C.MSG.CONTENT_STATE }), tab.id)).status === 'idle', 'immediate restore ack');
   assert.ok(Date.now() - start < 2500);
@@ -162,7 +170,7 @@ check('turning off during native host work restores without waiting for inferenc
 
 check('native MutationObserver catches content inserted during the initial inference', async () => {
   const page = await fixture('/mutation', '<p>First paragraph</p>');
-  await model({ hold: true }); await policy({ enabled: true, targetLang: 'ko' });
+  await model({ hold: true }); await policy({ sourceLang: 'en', targetLang: 'ko' }); await select(page, true);
   await until(async () => (await model()).pending === 1, 'inference held');
   await page.evaluate(() => document.querySelector('main').insertAdjacentHTML('beforeend', '<p id="inserted">Inserted during inference</p>'));
   await model({ release: true });
@@ -183,7 +191,7 @@ check('failed replacement keeps the selected model and both native files recover
 
 check('a terminated service worker restores already translated tabs after restart', async () => {
   const page = await fixture('/restart', '<p>Original text</p>');
-  await policy({ enabled: true, targetLang: 'ko' });
+  await policy({ sourceLang:'en', targetLang: 'ko' }); await select(page, true);
   await page.waitForFunction(() => document.querySelector('p').textContent === '원문 번역');
   const session = await context.newCDPSession(control);
   let version;
@@ -194,9 +202,50 @@ check('a terminated service worker restores already translated tabs after restar
   await until(() => version?.runningStatus === 'running', 'running worker version');
   await session.send('ServiceWorker.stopWorker', { versionId: version.versionId });
   await until(() => version?.runningStatus === 'stopped', 'worker termination');
-  await policy({ enabled: false });
+  const recovered = await control.evaluate(id => AT.sendMessage({type:AT.C.MSG.GET_STATE,tabId:id}),await tabIdFor(control,page));
+  assert.equal(recovered.tabEnabled,true,'service-worker sleep does not reset the explicit choice');
+  await select(page, false);
   await page.waitForFunction(() => document.querySelector('p').textContent === 'Original text');
   await session.detach();
+});
+
+check('two same-site tabs require independent consent, including after activation and reload', async () => {
+  const a=await fixture('/consent-a','<p>Original text</p>');
+  const b=await fixture('/consent-b','<p>Original text</p>');
+  await policy({enabled:true, sourceLang:'en',targetLang:'ko',siteRules:[{pattern:'127.0.0.1',action:'always'}]});
+  await a.bringToFront(); await b.bringToFront(); await b.waitForTimeout(350);
+  assert.equal(await a.locator('p').innerText(),'Original text'); assert.equal(await b.locator('p').innerText(),'Original text');
+  await select(a,true); await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
+  assert.equal(await b.locator('p').innerText(),'Original text');
+  await a.reload(); await a.bringToFront();await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
+  await select(b,true);await b.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
+  await select(a,false);await a.waitForFunction(()=>document.querySelector('p').textContent==='Original text');
+  assert.equal(await b.locator('p').innerText(),'원문 번역');
+  await a.reload();await a.waitForTimeout(350);assert.equal(await a.locator('p').innerText(),'Original text');
+  await screenshot(control,'options-bound-tab-off');
+});
+
+check('separate options window remains bound to the originating tab and disables a closed target', async () => {
+  const a=await fixture('/window-a','<p>Original text</p>');const b=await fixture('/window-b','<p>Original text</p>');
+  await policy({sourceLang:'en',targetLang:'ko'});
+  const id=await tabIdFor(control,a);
+  const created=context.waitForEvent('page',p=>p!==a&&p!==b&&p!==control);
+  assert.equal(await control.evaluate(id=>AT.ui.openPage('options.html','window',id),id),'window');
+  const panel=await created;await optionsReady(panel);
+  assert.equal(new URL(panel.url()).searchParams.get('tabId'),String(id));
+  const kind=await panel.evaluate(async()=>{const t=(await AT.api.tabs.query({active:true,currentWindow:true}))[0];return (await AT.api.windows.get(t.windowId)).type;});
+  assert.equal(kind,'popup','real separate browser window, not tabs.create');
+  await b.bringToFront();await panel.bringToFront();
+  await panel.locator('#enabled').check();await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
+  assert.equal(await b.locator('p').innerText(),'Original text');
+  await panel.setViewportSize({width:390,height:780});assert.ok(await panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  await screenshot(panel,'options-separate-window');
+  await a.close();await panel.waitForFunction(()=>document.querySelector('#enabled').disabled&&!document.querySelector('#enabled').checked);
+});
+
+check('unbound options cannot silently choose an active web tab', async () => {
+  await control.goto('chrome-extension://'+extensionId+'/options.html');await optionsReady(control);
+  assert.equal(await control.locator('#enabled').isDisabled(),true);assert.equal(await control.locator('#enabled').isChecked(),false);
 });
 
 test('extension UI and injected pages have no uncaught JavaScript errors', () => { assert.deepEqual(errors, []); });

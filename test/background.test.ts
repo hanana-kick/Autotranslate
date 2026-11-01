@@ -89,6 +89,8 @@ type WorkerScope = {
 };
 
 type EnvironmentOptions = {
+  selectedTabs?: number[];
+  session?: ATNamespace;
   settings?: ATNamespace;
   tab?: Tab;
   tabs?: Tab[];
@@ -172,6 +174,8 @@ function environment({
   settings,
   tab,
   tabs,
+  selectedTabs = [],
+  session = {},
   withImportScripts = true,
   withOffscreen = false,
   inlineHost,
@@ -195,6 +199,7 @@ function environment({
     storage: settings ? { settings } : {}
   };
 
+  session['translationTargets.v1'] ??= [...selectedTabs];
   let hasHostDocument = resident === true;
   const events: Events = { installed: [], startup: [], menuClicks: [], updated: [], removed: [], activated: [], storageChanged: [], messages: [] };
 
@@ -241,6 +246,13 @@ function environment({
       getMessage: (key: string) => `[${key}]`
     },
     storage: {
+      session: {
+        get: async (key: string) => ({ [key]: structuredClone(session[key]) }),
+        set: async (items: ATNamespace) => {
+          Object.assign(session, structuredClone(items));
+          for (const listener of events.storageChanged) listener(Object.fromEntries(Object.keys(items).map(key => [key, { newValue: items[key] }])), 'session');
+        }
+      },
       local: {
         get: async (key: string) => (recorded.storage[key] === undefined ? {} : { [key]: recorded.storage[key] }),
         set: async (value: ATNamespace) => {
@@ -276,6 +288,7 @@ function environment({
         return tabReply(message, tab);
       }
     },
+    windows: { create: async (details: ATNamespace) => { recorded.created.push(details); return { id: 99 }; } },
     scripting: {
       executeScript: async (details: ATNamespace) => {
         recorded.injected.push(details);
@@ -322,10 +335,17 @@ function environment({
   // A Firefox background page is the host: the module is part of the page (it
   // is in the manifest's scripts) and the background calls it directly.
   if (inlineHost === 'stub') AT.localhost = inlineHostStub(recorded.inline);
-  const send = dispatch;
+  const send = async (message: ATNamespace, sender?: ATNamespace) => {
+    const response = await dispatch(message, sender ?? (message.type === 'at/batch' ? { tab: tab ?? { id: selectedTabs[0] ?? 7, url: 'https://example.com/' } } : {}));
+    // Compatibility command returns an acknowledgement now; yield before legacy
+    // assertions about eventual content messages. SET_TAB_ENABLED tests inspect
+    // the immediate acknowledgement separately.
+    if (message.type === 'at/translate-tab') await new Promise(resolve => setImmediate(resolve));
+    return response;
+  };
   const browser = surface;
   const types = () => recorded.tabMessages.map((entry) => entry.message.type);
-  return { AT, browser, recorded, events, send, fire, types };
+  return { AT, browser, recorded, events, send, fire, types, session };
 }
 
 /** A host that has the model resident, in the shape `normalizeStatus` accepts. */
@@ -399,7 +419,7 @@ test('install seeds settings, opens onboarding and registers the context menu', 
     'the token budget starts at the model default'
   );
   assert.deepEqual(recorded.storage.settings.siteRules, []);
-  assert.deepEqual(recorded.created, [{ url: 'welcome.html', active: true }], 'the first run opens the setup page');
+  assert.deepEqual(recorded.created, [{ url: 'welcome.html', type: 'popup', width: 520, height: 820, focused: true }], 'the first run opens the setup page');
   assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS);
   for (const item of recorded.menus) {
     assert.match(item.title, /^\[menu.+\]$/, `menu title must come from i18n: ${item.id}`);
@@ -415,7 +435,7 @@ test('install seeds settings, opens onboarding and registers the context menu', 
 });
 
 test('content batches reach the host once per unique text', async () => {
-  const { AT, send, recorded } = environment({
+  const { AT, send, recorded } = environment({ selectedTabs: [7], tab: { id: 7, url: 'https://example.com/' },
     inlineHost: 'stub',
     settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' }
   });
@@ -428,7 +448,7 @@ test('content batches reach the host once per unique text', async () => {
 });
 
 test('host failures reach the content script as an error, not a half translation', async () => {
-  const { AT, send } = environment({
+  const { AT, send } = environment({ selectedTabs: [7], tab: { id: 7, url: 'https://example.com/' },
     settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' },
     withOffscreen: true,
     resident: true,
@@ -445,14 +465,14 @@ test('host failures reach the content script as an error, not a half translation
 
 test('navigation injects the content script and asks it to translate', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', title: 'News', ping: false, translated: 3 };
-  const { AT, events, recorded, types } = environment({ tab, settings: { enabled: true } });
+  const { AT, events, recorded, types } = environment({ selectedTabs: [7], tab, settings: { enabled: true } });
   await fire(events.updated, 7, { status: 'complete' }, tab);
 
   assert.equal(recorded.injected.length, 1);
   assert.deepEqual(recorded.injected[0], { target: { tabId: 7 }, files: CONTENT_FILES });
   const translate = recorded.tabMessages.find((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE);
   assert.equal(translate!.tabId, 7);
-  assert.deepEqual(translate!.message.decision, { action: 'translate', reason: 'auto' }, 'the switch alone means translate');
+  assert.deepEqual(translate!.message.decision, { action: 'translate', reason: 'selected-tab' }, 'the switch alone means translate');
   assert.deepEqual(
     translate!.message.settings,
     {
@@ -474,20 +494,20 @@ test('navigation injects the content script and asks it to translate', async () 
 
 test('an existing content script is not injected twice', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', translated: 2 };
-  const { events, recorded, types } = environment({ tab, settings: { enabled: true } });
+  const { events, recorded, types } = environment({ selectedTabs: [7], tab, settings: { enabled: true } });
   await fire(events.updated, 7, { status: 'complete' }, tab);
   assert.deepEqual(recorded.injected, [], 'the ping answered, so no injection');
   assert.deepEqual(types(), ['at/content-ping', 'at/content-translate']);
 });
 
-test('the master switch and site rules suppress translation', async () => {
+test('unselected tabs and excluded sites suppress translation', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article' };
   const cases: [ATNamespace, string][] = [
     [{ enabled: false }, 'disabled'],
     [{ enabled: true, siteRules: [{ pattern: 'news.example.com', action: 'never' }] }, 'site-never']
   ];
   for (const [settings, reason] of cases) {
-    const { events, recorded } = environment({ tab, settings });
+    const { events, recorded } = environment({ tab, settings, selectedTabs: settings.enabled ? [7] : [] });
     await fire(events.updated, 7, { status: 'complete' }, tab);
     assert.deepEqual(recorded.injected, [], `${reason} must not inject`);
     assert.deepEqual(recorded.tabMessages, [], `${reason} must not message the tab`);
@@ -496,7 +516,7 @@ test('the master switch and site rules suppress translation', async () => {
 
 test('a site rule of always forces translation without detection', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', ping: false };
-  const { AT, events, recorded } = environment({
+  const { AT, events, recorded } = environment({ selectedTabs: [7],
     tab,
     settings: { enabled: true, siteRules: [{ pattern: 'news.example.com', action: 'always' }] }
   });
@@ -586,7 +606,7 @@ test('site rules are canonicalised, replaced and removed by host', async () => {
 });
 
 test('the badge follows reported content-script state', async () => {
-  const { AT, send, recorded } = environment();
+  const { AT, send, recorded } = environment({ tab: { id: 3, url: 'https://example.com/' }, selectedTabs: [3] });
   await send({ type: AT.C.MSG.STATE_CHANGED, status: 'translated', translated: 4 }, { tab: { id: 3 } });
   assert.deepEqual(recorded.badges.at(-2), { tabId: 3, text: AT.C.BADGE_TEXT });
   assert.equal(recorded.badges.at(-1)!.color, AT.C.BADGE_COLOR);
@@ -600,7 +620,7 @@ test('the badge follows reported content-script state', async () => {
 });
 
 test('hidden badges stay off even for translated pages', async () => {
-  const { AT, send, recorded } = environment({ settings: { showBadge: false } });
+  const { AT, send, recorded } = environment({ settings: { showBadge: false }, tab: { id: 4, url: 'https://example.com/' }, selectedTabs: [4] });
   await send({ type: AT.C.MSG.STATE_CHANGED, status: 'translated', translated: 9 }, { tab: { id: 4 } });
   assert.deepEqual(recorded.badges, [{ tabId: 4, text: '' }]);
 });
@@ -610,17 +630,16 @@ test('the popup translate and restore messages drive the tab', async () => {
   const { AT, send, types } = environment({ tab });
   const translated = await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
   assert.equal(translated.ok, true);
-  assert.equal(translated.status, 'translated');
-  assert.equal(translated.translated, 3);
-  assert.equal(translated.reason, 'manual', 'popup clicks are forced, not detected');
+  assert.equal(translated.status, 'translating');
+  assert.equal(translated.enabled, true, 'the command acknowledges explicit consent without waiting for inference');
 
   const restored = await send({ type: AT.C.MSG.RESTORE_TAB, tabId: 7 });
   assert.equal(restored.status, 'idle');
-  assert.deepEqual(types(), ['at/content-ping', 'at/content-translate', 'at/content-ping', 'at/content-restore']);
+  assert.deepEqual(types(), ['at/content-ping', 'at/content-translate', 'at/content-restore']);
 
   const missing = await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 8 });
   assert.equal(missing.ok, false);
-  assert.match(missing.error, /no active tab/);
+  assert.match(missing.error, /no active tab|cannot be translated/);
 });
 
 test('a message nothing answers is reported instead of hanging', async () => {
@@ -830,7 +849,7 @@ test('the real host reaches the vendored runtime once WebGPU answers', async () 
 });
 
 test('page context from the content script is normalised before the engine sees it', async () => {
-  const { AT, recorded, send } = environment({
+  const { AT, recorded, send } = environment({ selectedTabs: [7], tab: { id: 7, url: 'https://example.com/' },
     inlineHost: 'stub',
     settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' }
   });
@@ -989,43 +1008,35 @@ test('a prepared model stays warm across unrelated settings edits', async () => 
 
 const settlePolicy = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-test('policy: a fresh worker restores open tabs without an in-memory tab registry', async () => {
+test('policy: a restarted worker recovers selected targets without enrolling other open tabs', async () => {
   const tabs = [{ id: 7, url: 'https://a.example/page' }, { id: 8, url: 'https://b.example/page' }];
-  const env = environment({ tabs, settings: { enabled: false } });
-  const oldValue = env.AT.settings.normalize({ enabled: true });
-  const newValue = env.AT.settings.normalize({ enabled: false });
-  for (const listener of env.events.storageChanged) listener({ settings: { oldValue, newValue } }, 'local');
-  await settlePolicy();
-  assert.deepEqual(env.recorded.tabMessages.filter((entry) => entry.message.type === 'at/content-restore')
-    .map((entry) => entry.tabId).sort(), [7, 8]);
+  const session = { 'translationTargets.v1': [7] };
+  const env = environment({ tabs, session, settings: { targetLang: 'ja' } });
+  await fire(env.events.storageChanged, { settings: {
+    oldValue: env.AT.settings.normalize({ targetLang: 'ko' }),
+    newValue: env.AT.settings.normalize({ targetLang: 'ja' })
+  } }, 'local');
+  assert.deepEqual(env.recorded.tabMessages.filter(e => e.message.type === 'at/content-translate').map(e => e.tabId), [7]);
+  assert.equal((await env.send({ type: 'at/get-state', tabId: 8 })).tabEnabled, false);
 });
 
 test('policy: one tab waiting for a restore cannot hold the other tabs behind it', async () => {
   const tabs = [{ id: 7, url: 'https://a.example/page' }, { id: 8, url: 'https://b.example/page' }];
-  const env = environment({ tabs, settings: { enabled: false } });
+  const env = environment({ tabs, selectedTabs: [7, 8] });
   const blocked = deferred<ATNamespace>();
   const calls: number[] = [];
-  env.browser.tabs.sendMessage = async (id: number, message: TabMessage) => {
-    if (message.type === 'at/content-restore') {
-      calls.push(id);
-      if (id === 7) return blocked.promise;
-    }
-    return { ok: true };
-  };
-  for (const listener of env.events.storageChanged) listener({ settings: {
-    oldValue: env.AT.settings.normalize({ enabled: true }),
-    newValue: env.AT.settings.normalize({ enabled: false })
-  } }, 'local');
+  env.browser.tabs.sendMessage = async (id: number) => { calls.push(id); return id === 7 ? blocked.promise : { ok: true }; };
+  const first = env.send({ type: 'at/set-tab-enabled', tabId: 7, enabled: false });
+  const second = env.send({ type: 'at/set-tab-enabled', tabId: 8, enabled: false });
   await settlePolicy();
   assert.deepEqual(calls, [7, 8]);
-  blocked.resolve({ ok: true });
-  await settlePolicy();
+  await second; blocked.resolve({ ok: true }); await first;
 });
 
 test('policy: changing source language re-evaluates sites and respects never rules', async () => {
   const tabs = [{ id: 7, url: 'https://a.example/page' }, { id: 8, url: 'https://b.example/page' }];
   const settings = { enabled: true, sourceLang: 'ja', siteRules: [{ pattern: 'b.example', action: 'never' }] };
-  const env = environment({ tabs, settings });
+  const env = environment({ tabs, settings, selectedTabs: [7, 8] });
   env.browser.tabs.get = async (id: number) => tabs.find((tab) => tab.id === id);
   for (const listener of env.events.storageChanged) listener({ settings: {
     oldValue: env.AT.settings.normalize({ ...settings, sourceLang: 'en' }),
@@ -1038,7 +1049,7 @@ test('policy: changing source language re-evaluates sites and respects never rul
 });
 
 test('policy: requests from an obsolete model/language snapshot never reach inference', async () => {
-  const env = environment({ settings: { enabled: true, targetLang: 'ko', localModelId: 'model-a' }, inlineHost: 'stub' });
+  const env = environment({ selectedTabs: [7], tab: { id: 7, url: 'https://example.com/' }, settings: { enabled: true, targetLang: 'ko', localModelId: 'model-a' }, inlineHost: 'stub' });
   const reply = await env.send({ type: env.AT.C.MSG.BATCH, texts: ['Hello'], translationKey: 'obsolete' });
   assert.equal(reply.ok, false);
   assert.match(reply.error, /changed|obsolete|stale/i);
@@ -1068,34 +1079,25 @@ test('a storage ON event outranks an older in-flight settings read', async () =>
 });
 
 
-test('speed: enabling with twenty open tabs starts only the foreground document', async () => {
-  const tabs = Array.from({ length: 20 }, (_, index) => ({ id: index + 1,
-    url: 'https://example.test/' + index, active: index === 7, lastAccessed: index }));
-  const env = environment({ tabs, settings: { enabled: false } });
-  const before = env.AT.settings.normalize({ enabled: false });
-  const after = env.AT.settings.normalize({ enabled: true });
-  await fire(env.events.storageChanged, { settings: { oldValue: before, newValue: after } }, 'local');
-  await settlePolicy();
-  const starts = env.recorded.tabMessages.filter((e) => e.message.type === 'at/content-translate');
-  assert.deepEqual(starts.map((e) => e.tabId), [8]);
-  assert.ok(env.recorded.injected.every((e) => e.target.tabId === 8));
-  assert.equal(env.recorded.tabMessages.filter((e) => e.message.type === 'at/content-restore').length, 19,
-    'stale inactive policy is still invalidated after worker restart');
-  tabs[7]!.active = false; tabs[2]!.active = true;
-  await fire(env.events.activated, { tabId: 3 }); await settlePolicy();
-  assert.ok(env.recorded.tabMessages.some((e) => e.tabId === 3 && e.message.type === 'at/content-translate'),
-    'the deferred page starts on real tab activation');
+test('speed: twenty open tabs stay off until each is explicitly selected', async () => {
+  const tabs = Array.from({length:20}, (_,i) => ({id:i+1,url:'https://example.test/'+i,active:i===7}));
+  const env = environment({ tabs, settings: { enabled: true, siteRules: [{ pattern: 'example.test', action: 'always' }] } });
+  await fire(env.events.activated, {tabId:8});
+  assert.equal(env.recorded.tabMessages.length, 0, 'activation and legacy global/site switches never enroll a tab');
+  await env.send({type:'at/set-tab-enabled',tabId:8,enabled:true}); await settlePolicy();
+  assert.deepEqual(env.recorded.tabMessages.filter(e=>e.message.type==='at/content-translate').map(e=>e.tabId),[8]);
+  tabs[7]!.active=false; tabs[2]!.active=true;
+  await fire(env.events.activated,{tabId:3});
+  assert.ok(!env.recorded.tabMessages.some(e=>e.tabId===3));
+  assert.equal((await env.send({type:'at/get-state',tabId:8})).tabEnabled,true);
 });
 
-test('speed: options enable chooses only the most recently active web tab', async () => {
-  const tabs = [{ id: 1, url: 'https://a.example/', active: false, lastAccessed: 1 },
-    { id: 2, url: 'https://b.example/', active: false, lastAccessed: 9 },
-    { id: 3, url: 'chrome-extension://id/options.html', active: true, lastAccessed: 10 }];
-  const env = environment({ tabs, settings: { enabled: false } });
-  await fire(env.events.storageChanged, { settings: {
-    oldValue: env.AT.settings.normalize({ enabled: false }), newValue: env.AT.settings.normalize({ enabled: true }) } }, 'local');
-  await settlePolicy();
-  assert.deepEqual(env.recorded.tabMessages.filter((e) => e.message.type === 'at/content-translate').map((e) => e.tabId), [2]);
+test('settings window controls its original tab, not the most recently active page', async () => {
+  const tabs=[{id:1,url:'https://a.example/',active:false,lastAccessed:1},{id:2,url:'https://b.example/',active:false,lastAccessed:9},{id:3,url:'chrome-extension://id/options.html',active:true,lastAccessed:10}];
+  const env=environment({tabs});
+  await env.send({type:'at/set-tab-enabled',tabId:1,enabled:true}); await settlePolicy();
+  assert.deepEqual(env.recorded.tabMessages.filter(e=>e.message.type==='at/content-translate').map(e=>e.tabId),[1]);
+  assert.equal((await env.send({type:'at/get-state',tabId:2})).tabEnabled,false);
 });
 
 test('speed: completing a background navigation does not inject or infer', async () => {
@@ -1104,4 +1106,77 @@ test('speed: completing a background navigation does not inject or infer', async
   await fire(env.events.updated, 3, { status: 'complete' }, tab); await settlePolicy();
   assert.equal(env.recorded.injected.length, 0);
   assert.ok(!env.types().includes('at/content-translate'));
+});
+
+
+test('tab consent: same-site tabs are independent and OFF does not disable another tab', async () => {
+  const tabs = [{ id: 7, url: 'https://same.example/a' }, { id: 8, url: 'https://same.example/b' }];
+  const env = environment({ tabs, settings: { enabled: false, localModelId: 'model-a', sourceLang: 'en', targetLang: 'ko' }, inlineHost: 'stub' });
+  assert.equal((await env.send({ type: 'at/get-state', tabId: 7 })).tabEnabled, false);
+  await env.send({ type: 'at/set-tab-enabled', tabId: 7, enabled: true }); await settlePolicy();
+  assert.equal((await env.send({ type: 'at/get-state', tabId: 8 })).tabEnabled, false);
+  await env.send({ type: 'at/set-tab-enabled', tabId: 8, enabled: true }); await settlePolicy();
+  await env.send({ type: 'at/set-tab-enabled', tabId: 7, enabled: false });
+  assert.equal((await env.send({ type: 'at/get-state', tabId: 7 })).tabEnabled, false);
+  assert.equal((await env.send({ type: 'at/get-state', tabId: 8 })).tabEnabled, true);
+  assert.equal(env.recorded.storage.settings.enabled, false, 'no global settings edit');
+  const allowed = await env.send({type:'at/batch', texts:['Hello'], sourceLang:'en', targetLang:'ko'}, {tab:tabs[1]});
+  assert.equal(allowed.ok,true);
+  const denied = await env.send({type:'at/batch', texts:['Hello']}, {tab:tabs[0]});
+  assert.equal(denied.ok,false);
+});
+
+test('tab consent: session state survives worker restart, not a new browser session, and closes cleanly', async () => {
+  const session = {}; const tabs = [{id:7,url:'https://same.example/a'}];
+  const first = environment({session,tabs});
+  await first.send({type:'at/set-tab-enabled',tabId:7,enabled:true}); await settlePolicy();
+  const restarted = environment({session,tabs});
+  assert.equal((await restarted.send({type:'at/get-state',tabId:7})).tabEnabled,true);
+  const fresh = environment({tabs});
+  assert.equal((await fresh.send({type:'at/get-state',tabId:7})).tabEnabled,false);
+  await fire(restarted.events.removed,7); await settlePolicy();
+  const afterClose = environment({session,tabs});
+  assert.equal((await afterClose.send({type:'at/get-state',tabId:7})).tabEnabled,false);
+});
+
+test('tab consent: OFF while injection is delayed prevents the old ON from starting translation', async () => {
+  const tab={id:7,url:'https://same.example/a',ping:false};
+  const env=environment({tab}); const gate=deferred<unknown[]>();
+  env.browser.scripting.executeScript=()=>gate.promise;
+  const on=await env.send({type:'at/set-tab-enabled',tabId:7,enabled:true});
+  assert.equal(on.enabled,true); await settlePolicy();
+  await env.send({type:'at/set-tab-enabled',tabId:7,enabled:false});
+  gate.resolve([]); await settlePolicy();
+  assert.equal(env.recorded.tabMessages.filter(x=>x.message.type==='at/content-translate').length,0);
+  assert.equal((await env.send({type:'at/get-state',tabId:7})).tabEnabled,false);
+});
+
+test('tab consent: content cannot self-enroll through either control command', async () => {
+  const tab={id:7,url:'https://same.example/a'}; const env=environment({tab});
+  for(const type of ['at/set-tab-enabled','at/translate-tab']) {
+    const reply=await env.send({type,tabId:7,enabled:true},{tab}); assert.equal(reply.ok,false);
+  }
+  const reply=await env.send({type:'at/batch',texts:['Hello']},{});
+  assert.equal(reply.ok,false); assert.equal(env.recorded.injected.length,0);
+});
+
+test('tab consent: navigation invalidates old commands while retaining only explicit selection', async () => {
+  const tab={id:7,url:'https://same.example/a',active:true};const env=environment({tab,selectedTabs:[7]});
+  await fire(env.events.updated,7,{status:'loading'},tab);
+  await fire(env.events.updated,7,{status:'complete'},tab);await settlePolicy();
+  assert.equal((await env.send({type:'at/get-state',tabId:7})).tabEnabled,true);
+  assert.ok(env.recorded.tabMessages.some(x=>x.message.type==='at/content-translate'));
+  await env.send({type:'at/set-tab-enabled',tabId:7,enabled:false});
+  const count=env.recorded.tabMessages.length;
+  await fire(env.events.updated,7,{status:'complete'},tab);await settlePolicy();
+  assert.equal(env.recorded.tabMessages.length,count);
+});
+
+test('tab consent: persistence failure is reported and does not authorize work', async () => {
+  const env=environment({tab:{id:7,url:'https://same.example/a'}});
+  env.browser.storage.session.set=async()=>{throw Error('session write failed');};
+  const reply=await env.send({type:'at/set-tab-enabled',tabId:7,enabled:true});
+  assert.equal(reply.ok,false); assert.match(reply.error,/session write failed/);
+  assert.equal((await env.send({type:'at/get-state',tabId:7})).tabEnabled,false);
+  assert.ok(!env.recorded.tabMessages.some(x=>x.message.type==='at/content-translate'));
 });

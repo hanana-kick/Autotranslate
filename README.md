@@ -83,11 +83,23 @@ install is not one, so the first run after installing still lands in a tab; the 
 settings button *is* a gesture, so on a profile without a model it reopens onboarding in the
 panel. Firefox has no side panel: it always gets the tab.
 
-After that there is one control: the popup's switch. On translates every page into the target
-language and applies at once to the tab in front of the user; off puts the page back and stops
-translating new ones. A per-site rule (`never`/`always`, set in Options or from the page's
-context menu) is the only exception. The popup also carries the target language; everything
-else lives in Options, which stays an ordinary settings page rather than part of the flow.
+**Translation is explicitly selected per tab.** Each new tab starts OFF, including tabs
+on a site already selected elsewhere. The popup and the tab-bound Options surface show
+“This tab: translation”. ON translates that tab and its later DOM changes; OFF immediately
+restores its current source and stops new requests from that tab. Switching tabs, opening
+a site, completing onboarding or saving general settings never opts a tab in.
+
+Selection follows the same live tab across reload/navigation and survives extension
+service-worker suspension through browser session storage. Closing a tab removes its
+selection; a new browser session begins OFF. Site exclusion rules still block translation;
+site “always” rules only permit translation in a tab already selected by the user.
+
+**Options open in a tab-scoped side panel when the browser supports it.** Otherwise (or
+when the browser refuses a panel) they open in a separate popup window, not a new tab.
+Both keep the originating tab ID; focusing the settings window does not change the target.
+A directly opened unbound settings page only edits shared model/language settings and
+cannot guess or silently enroll a web tab. A closed target disables its switch.
+
 
 ## Scripts
 

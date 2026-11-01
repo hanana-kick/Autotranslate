@@ -176,7 +176,7 @@ namespace AT.welcome {
     if (!readyModel) return;
     el('start').disabled = true;
     settings = await AT.settings.save({
-      enabled: true,
+      enabled: false,
       localModelId: readyModel.id,
       targetLang: el('targetLang').value
     });
@@ -201,7 +201,7 @@ namespace AT.welcome {
     el('modelFile').addEventListener('change', () => void pickFile());
     el('start').addEventListener('click', () => void start());
     el('options').addEventListener('click', () => {
-      void AT.api?.runtime.openOptionsPage();
+      void AT.ui.openPage('options.html', 'auto', AT.ui.targetTabId());
     });
   }
 
