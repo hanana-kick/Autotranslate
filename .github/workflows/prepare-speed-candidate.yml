@@ -1,0 +1,46 @@
+name: Verify speed-fix candidate
+on:
+  push:
+    branches: [fix/translation-speed-20261101]
+    paths: [.github/workflows/prepare-speed-candidate.yml, .qa/prepare-speed-fix.mjs]
+permissions:
+  contents: write
+jobs:
+  candidate:
+    if: github.ref == 'refs/heads/fix/translation-speed-20261101'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Apply reviewed source changes
+        run: node .qa/prepare-speed-fix.mjs
+      - run: npm ci --no-audit --no-fund
+      - name: Complete type, unit, build and package verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run ci 2>&1 | tee /tmp/speed-ci.log
+      - name: Commit validated source only to the working branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/fix/translation-speed-20261101
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src test package.json package-lock.json
+          git diff --cached --stat
+          git commit -m 'fix: remove translation queue delays and redundant inline generations'
+          git push origin HEAD:fix/translation-speed-20261101
+          git rev-parse HEAD > /tmp/speed-candidate-commit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: speed-candidate-validation
+          path: |
+            /tmp/speed-ci.log
+            /tmp/speed-candidate-commit.txt
+          retention-days: 7
