@@ -1,0 +1,93 @@
+name: Verify explicit tab controls
+on:
+  push:
+    branches: [feat/explicit-tab-control]
+    paths: [.github/workflows/prepare-tab-control.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Recover exact reviewed patch and verify its digest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import {createHash} from 'node:crypto';
+          import {brotliDecompressSync} from 'node:zlib';
+          import {execFileSync} from 'node:child_process';
+          import assert from 'node:assert/strict';
+          const shas=['a9a2b2bf67eabdd090d0d5028de29c60d5cf0771','902828f8f9d94f4b99f5ddf05a503c7f9c831ea0','8620a40a2099bd5195256a6e419c41d68fe0dfd4','8717426c388c03908d5d0fb31d84172c7cfb422a','fb624fddddd717da6585156097131cb9be866069','1da3cb2e15048d82d7b7a35d60e0f811e5879ae8'];
+          let encoded='';
+          for(const sha of shas){
+            const r=await fetch('https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+'/git/blobs/'+sha,{headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json'}});
+            assert.equal(r.ok,true,'patch blob fetch '+r.status);
+            const b=await r.json();assert.equal(b.sha,sha);assert.equal(b.encoding,'base64');
+            encoded+=Buffer.from(b.content,'base64').toString('utf8');
+          }
+          const patch=brotliDecompressSync(Buffer.from(encoded,'base64'));
+          assert.equal(createHash('sha256').update(patch).digest('hex'),'8a6b114c94197943d0d3bb0c231c6a46c8d38630441bda2195a9adcbbe5063ee');
+          const file=process.env.RUNNER_TEMP+'/tab-control.patch';fs.writeFileSync(file,patch);
+          execFileSync('git',['apply','--check','--unidiff-zero',file],{stdio:'inherit'});
+          execFileSync('git',['apply','--unidiff-zero',file],{stdio:'inherit'});
+          execFileSync('git',['diff','--check'],{stdio:'inherit'});
+          // These exact inference files must not be changed for this UI feature.
+          execFileSync('git',['diff','--exit-code','--','src/lib/localhost.ts','src/lib/local.ts','src/inference-worker.ts'],{stdio:'inherit'});
+          JS
+      - run: npm ci --no-audit --no-fund
+      - name: Full type, unit, build and package validation
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/tab-control
+          npm run ci 2>&1 | tee test-results/tab-control/ci.log
+      - name: Pinned browser tooling
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+          npx playwright install --with-deps chromium
+      - name: Actual browser and extension API regression - deterministic inference double
+        run: |
+          set -euo pipefail
+          npm run test:browser 2>&1 | tee test-results/tab-control/browser.log
+      - name: Export verified source objects without moving any branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import {execFileSync} from 'node:child_process';import {createHash} from 'node:crypto';import assert from 'node:assert/strict';
+          fs.rmSync('.github/workflows/prepare-tab-control.yml');
+          execFileSync('git',['add','-A']);
+          const names=execFileSync('git',['diff','--cached','--name-only','-z']).toString().split('\0').filter(Boolean);
+          assert.ok(names.length>20 && names.length<60);
+          for(const p of names)assert.ok(/^(src\/|test\/|README\.md$|package(-lock)?\.json$|\.github\/workflows\/(native-extension|tab-control-workspace|prepare-tab-control)\.yml$)/.test(p),'unapproved export path '+p);
+          const parent=execFileSync('git',['rev-parse','HEAD']).toString().trim();
+          async function api(path,body){const r=await fetch('https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json','Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});if(!r.ok)throw Error(path+' HTTP '+r.status);return r.json();}
+          const base=await api('/git/commits/'+parent);const tree=[],manifest=[];
+          for(const path of names){
+            if(!fs.existsSync(path)){tree.push({path,mode:'100644',type:'blob',sha:null});manifest.push({path,deleted:true});continue;}
+            const bytes=fs.readFileSync(path);const b=await api('/git/blobs',{content:bytes.toString('base64'),encoding:'base64'});
+            tree.push({path,mode:'100644',type:'blob',sha:b.sha});manifest.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
+          }
+          const t=await api('/git/trees',{base_tree:base.tree.sha,tree});
+          const c=await api('/git/commits',{message:'feat: explicit per-tab translation consent and tab-bound side panel or separate options window\n\nDefault every tab to OFF; retain explicit choices across worker suspension only. Preserve current-source restoration and v0.1.4 scheduling. Validate UI boundaries, consent races, independent same-site tabs, closed targets and real browser popup windows. Original SDK/model/host/worker unchanged. Native model surface QA runs after source promotion.',tree:t.sha,parents:[parent]});
+          fs.writeFileSync('test-results/tab-control/verified.json',JSON.stringify({parent,commit:c.sha,tree:t.sha,manifest,scope:'type/unit/build/package plus real Chromium APIs with deterministic model double; native original-model QA not claimed here'},null,2));
+          console.log(JSON.stringify({parent,commit:c.sha,tree:t.sha,files:manifest.length}));
+          JS
+      - name: Keep verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-tab-controls-${{ github.run_id }}
+          path: |
+            test-results/tab-control/
+            test-results/browser/
+          if-no-files-found: error
+          retention-days: 3
