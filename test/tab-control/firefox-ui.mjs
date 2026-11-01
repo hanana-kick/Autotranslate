@@ -17,10 +17,12 @@ async function step(name, detail={}) { summary.stage=name; summary.checks.push({
 async function inventory(dir) { const files={}; async function walk(p) { for(const e of await readdir(p,{withFileTypes:true})) { const f=join(p,e.name);if(e.isDirectory())await walk(f);else files[relative(dir,f)]=createHash('sha256').update(await readFile(f)).digest('hex'); } } await walk(dir);return files; }
 const before = await inventory('build/firefox');
 assert.equal(before['vendor/mediapipe/genai_bundle.js'],createHash('sha256').update(await readFile('node_modules/@mediapipe/tasks-genai/genai_bundle.mjs')).digest('hex'));
-const driver = spawn(process.env.GECKODRIVER || 'geckodriver',['--port','4444','--log','error'],{stdio:['ignore','pipe','pipe']});
+// The tested popup windows are Firefox UI contexts. This documented WebDriver
+// permission is confined to the ephemeral localhost-only CI browser, never a user profile.
+const driver = spawn(process.env.GECKODRIVER || 'geckodriver',['--port','4444','--host','127.0.0.1','--allow-system-access','--log','error'],{stdio:['ignore','pipe','pipe']});
 let driverLog='';for(const stream of [driver.stdout,driver.stderr])stream.on('data',b=>{driverLog+=clean(b).slice(0,4000);});
 let session, server;
-async function api(method,path,data,timeout=45000) { const r=await fetch('http://127.0.0.1:4444'+path,{method,headers:{'Content-Type':'application/json'},...(data===undefined?{}:{body:JSON.stringify(data)}),signal:AbortSignal.timeout(timeout)});const result=await r.json();if(!r.ok||result.value?.error)throw Error(clean(result.value?.message || path+' '+r.status));return result.value; }
+async function api(method,path,data,timeout=45000) { const r=await fetch('http://127.0.0.1:4444'+path,{method,headers:{'Content-Type':'application/json'},...(data===undefined?{}:{body:JSON.stringify(data)}),signal:AbortSignal.timeout(timeout)});const result=await r.json();if(!r.ok||result.value?.error)throw Error(clean(method+' '+path+': '+(result.value?.message || r.status)));return result.value; }
 const command=(method,path,data,timeout)=>api(method,'/session/'+session+path,data,timeout);
 const js=(script,...args)=>command('POST','/execute/sync',{script,args});
 const use=handle=>command('POST','/window',{handle});
