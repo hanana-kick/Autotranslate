@@ -1,7 +1,9 @@
-name: Release
+name: Release (Chrome validated)
 
-# Main is an integration branch. Publishing both browser packages requires both
-# original-model runtimes, deterministic regressions, planner and package checks.
+# Publish Chrome ONLY when original installed Chrome/model E2E, deterministic
+# browser, planner and reproducible package checks pass. Firefox native model
+# preparation still fails (issue #2). That browser's ZIP is NOT released until
+# its own genuine model E2E passes. Its separate QA workflow stays enabled.
 on:
   push:
     branches: [main]
@@ -28,15 +30,9 @@ jobs:
       contents: read
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
-  firefox:
-    uses: ./.github/workflows/firefox-native.yml
-    permissions:
-      contents: read
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
   release:
-    needs: [browser, native, firefox, planner]
-    name: Package and publish
+    needs: [browser, native, planner]
+    name: Package and publish verified Chrome only
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,7 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          (cd dist && sha256sum ./*.zip > SHA256SUMS.txt)
+          (cd dist && sha256sum ./*-chrome.zip > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
       - name: Publish the release for this version
         shell: bash
@@ -57,21 +53,26 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           tag="v$version"
-          files=(dist/*.zip dist/SHA256SUMS.txt)
+          files=(dist/*-chrome.zip dist/SHA256SUMS.txt)
           notes="$RUNNER_TEMP/notes.md"
           {
-            echo "Autotranslate $version, built from \`${GITHUB_SHA::12}\`."
+            echo "Autotranslate $version — Chrome only, built from \`${GITHUB_SHA::12}\`."
             echo
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "- original SDK/model: Chrome and Firefox installed-extension checks"
+            echo "- original TranslateGemma .task and MediaPipe SDK in the installed Chrome extension; five independent fresh profiles"
             echo "- static and dynamic translation, exact HTML restoration and planner acceptance"
             echo
             echo "Chrome: unzip and load from chrome://extensions in Developer mode."
-            echo "Firefox: temporary installation from about:debugging, or sign with web-ext."
+            echo "Firefox is NOT included: its genuine model preparation fails. See https://github.com/$GITHUB_REPOSITORY/issues/2"
           } > "$notes"
           if gh release view "$tag" >/dev/null 2>&1; then
+            if gh release view "$tag" --json assets --jq '.assets[].name' | grep -q -- '-firefox\.zip'; then
+              echo 'Refusing to change an existing multi-browser release without valid Firefox QA' >&2
+              exit 1
+            fi
             gh release upload "$tag" "${files[@]}" --clobber
+            gh release edit "$tag" --title "Autotranslate $version (Chrome)" --notes-file "$notes"
           else
-            gh release create "$tag" "${files[@]}" --title "Autotranslate $version" --notes-file "$notes" --target "$GITHUB_SHA"
+            gh release create "$tag" "${files[@]}" --title "Autotranslate $version (Chrome)" --notes-file "$notes" --target "$GITHUB_SHA"
           fi
           gh release view "$tag"
