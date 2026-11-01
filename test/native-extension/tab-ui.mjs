@@ -17,15 +17,33 @@ export async function setTabThroughUI(options, tabId, enabled) {
     await options.waitForFunction(async v => document.querySelector('#saveStatus').dataset.kind==='ok' && (await AT.settings.load()).enabled===v, enabled);
     return;
   }
-  await options.goto(origin + '/options.html?tabId=' + tabId);
-  await options.waitForFunction(async () => {
-    const s = await AT.settings.load();
-    return document.querySelector('#sourceLang').value === s.sourceLang &&
-      document.querySelector('#targetLang').value === s.targetLang &&
-      document.querySelector('#localModel').value === s.localModelId && !document.querySelector('#enabled').disabled;
-  });
-  await options.locator('#enabled').setChecked(enabled);
-  await options.waitForFunction(async ({tabId,enabled}) =>
-    document.querySelector('#enabled').checked === enabled &&
-    (await AT.sendMessage({type:AT.C.MSG.GET_STATE,tabId})).tabEnabled === enabled, {tabId,enabled});
+  let stage = 'navigate';
+  try {
+    await options.goto(origin + '/options.html?tabId=' + tabId);
+    stage = 'hydration';
+    await options.waitForFunction(async () => {
+      const s = await AT.settings.load();
+      return document.querySelector('#sourceLang').value === s.sourceLang &&
+        document.querySelector('#targetLang').value === s.targetLang &&
+        document.querySelector('#localModel').value === s.localModelId && !document.querySelector('#enabled').disabled;
+    });
+    stage = 'checkbox';
+    await options.locator('#enabled').setChecked(enabled);
+    stage = 'confirmation';
+    await options.waitForFunction(async ({tabId,enabled}) =>
+      document.querySelector('#enabled').checked === enabled &&
+      (await AT.sendMessage({type:AT.C.MSG.GET_STATE,tabId})).tabEnabled === enabled, {tabId,enabled});
+  } catch (error) {
+    // Read-only failure evidence. Do not retry navigation or force tab consent.
+    const evidence = await options.evaluate(async id => ({
+      url: location.href, bound: AT.ui.targetTabId(),
+      checked: document.querySelector('#enabled')?.checked,
+      disabled: document.querySelector('#enabled')?.disabled,
+      label: document.querySelector('#tabHost')?.textContent,
+      status: document.querySelector('#tabStatus')?.textContent,
+      tab: await AT.api.tabs.get(id).then(t=>({id:t.id,url:t.url}),e=>({error:e.message})),
+      reply: await AT.sendMessage({type:AT.C.MSG.GET_STATE,tabId:id})
+    }), tabId).catch(e=>({error:e.message}));
+    throw new Error('tab UI ' + stage + ': ' + error.message + '; ' + JSON.stringify(evidence));
+  }
 }
