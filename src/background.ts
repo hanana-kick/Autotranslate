@@ -742,7 +742,11 @@ if (typeof self.importScripts === 'function') {
     [C.MSG.SET_TAB_ENABLED]: (message, sender) => {
       if (typeof message.enabled !== 'boolean') throw new Error('enabled must be a boolean');
       const tabId = (message as AT.background.TabRequest).tabId;
-      if (sender.tab && sender.tab.id !== tabId) throw new Error('cannot control a different tab');
+      // Extension UI pages can themselves be browser tabs. Trust the browser's
+      // sender URL, not a tab ID from the payload or the foreground window.
+      const sourcePage = typeof sender.url === 'string' ? sender.url.split(/[?#]/, 1)[0] : '';
+      const ownUI = ['popup.html', 'options.html', 'welcome.html'].some(page => sourcePage === AT.getURL(page));
+      if (sender.tab && sender.tab.id !== tabId && !ownUI) throw new Error('cannot control a different tab');
       return setTabEnabled(tabId, message.enabled);
     },
     [C.MSG.TRANSLATE_TAB]: (message) => setTabEnabled((message as AT.background.TabRequest).tabId, true, true),

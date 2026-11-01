@@ -1130,3 +1130,25 @@ test('page senders cannot change another tab consent',async()=>{
   await fire(events.updated,9,{status:'complete'},tab);
   assert.ok(recorded.tabMessages.some(e=>e.tabId===9&&e.message.type===AT.C.MSG.CONTENT_TRANSLATE));
  });
+
+test('source-bound extension UI may control its source from a distinct browser tab', async () => {
+ const {AT,send,browser}=environment({tab:{id:7,url:'https://example.com'}});
+ browser.runtime.getURL=(path:string)=>'chrome-extension://unit-extension/'+path;
+ for(const page of ['popup.html','options.html','welcome.html']) {
+   const sender={tab:{id:98},url:browser.runtime.getURL(page)+'?tabId=7#controls'};
+   const on=await send({type:AT.C.MSG.SET_TAB_ENABLED,tabId:7,enabled:true},sender);
+   assert.equal(on.ok,true,JSON.stringify(on));assert.equal((await AT.tabSelection.get(7)).enabled,true);
+   const off=await send({type:AT.C.MSG.SET_TAB_ENABLED,tabId:7,enabled:false},sender);
+   assert.equal(off.ok,true);assert.equal((await AT.tabSelection.get(7)).enabled,false);
+ }
+});
+test('lookalike web, foreign extension and content URLs cannot claim extension UI authority', async () => {
+ const {AT,send,browser}=environment({tab:{id:7,url:'https://example.com'}});
+ browser.runtime.getURL=(path:string)=>'chrome-extension://unit-extension/'+path;
+ for(const url of ['https://example.com/options.html?tabId=7',
+   'chrome-extension://foreign/options.html', 'chrome-extension://unit-extension.evil/options.html',
+   'chrome-extension://unit-extension/offscreen.html', 'chrome-extension://unit-extension/options.html.evil']) {
+   const reply=await send({type:AT.C.MSG.SET_TAB_ENABLED,tabId:7,enabled:true},{tab:{id:98},url});
+   assert.equal(reply.ok,false,url);assert.equal((await AT.tabSelection.get(7)).enabled,false);
+ }
+});

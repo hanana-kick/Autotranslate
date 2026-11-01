@@ -17,7 +17,7 @@ on:
         required: true
   push:
     branches: [fix/review-hardening-20261031, feat/explicit-tab-translation]
-    paths: ['src/**', 'scripts/**', 'package*.json', '.github/actions/released-chromium/**', '.github/workflows/native-extension.yml', '.github/workflows/release.yml', 'test/native-extension/**', 'test/dynamic-extension/**']
+    paths: ['src/**', 'scripts/**', 'package*.json', '.github/actions/released-chromium/**', '.github/workflows/native-extension.yml', '.github/workflows/release.yml', 'test/native-extension/**', 'test/dynamic-extension/**', 'test/tab-control/**']
 permissions:
   contents: read
 concurrency:
