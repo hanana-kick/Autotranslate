@@ -1,0 +1,30 @@
+name: Tab controls workspace
+on:
+  push:
+    branches: [feat/explicit-tab-controls]
+    paths: [.github/workflows/tab-controls-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: |
+          mkdir -p /tmp/tab-controls-workspace
+          git archive --format=tar.gz HEAD > /tmp/tab-controls-workspace/source.tar.gz
+          git rev-parse HEAD > /tmp/tab-controls-workspace/commit.txt
+          tar -czf /tmp/tab-controls-workspace/deps.tar.gz node_modules
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tab-controls-workspace
+          path: /tmp/tab-controls-workspace
+          retention-days: 2
