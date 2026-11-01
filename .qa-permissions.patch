@@ -1,0 +1,27 @@
+diff --git a/scripts/build.ts b/scripts/build.ts
+index 43ce9df..9280c70 100644
+--- a/scripts/build.ts
++++ b/scripts/build.ts
+@@ -41,7 +41,8 @@ const VENDOR_FILES: { from: string; to: string }[] = [
+ ];
+ // 'offscreen' hosts the on-device model; Firefox has no such API and the
+ // firefox target strips it, so it never ships in that bundle.
+-const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel'];
++// The original 3.6 GiB model must survive normal extension storage limits.
++const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel', 'unlimitedStorage'];
+ type Manifest = {
+   manifest_version?: number;
+   name?: string;
+diff --git a/test/build.test.ts b/test/build.test.ts
+index 102b338..6891d36 100644
+--- a/test/build.test.ts
++++ b/test/build.test.ts
+@@ -226,6 +226,8 @@ test('only the chrome bundle asks for the permissions it can use', () => {
+ 
+   assert.ok(chrome.permissions.includes('offscreen'), 'the model host needs the permission on chrome');
+   assert.ok(chrome.permissions.includes('sidePanel'), 'the side panel needs the permission on chrome');
++  assert.ok(chrome.permissions.includes('unlimitedStorage'), 'the multi-gigabyte model needs durable extension storage');
++  assert.ok(firefox.permissions.includes('unlimitedStorage'), 'Firefox must not block installation on a persistence prompt');
+   for (const permission of ['offscreen', 'sidePanel']) {
+     assert.equal(
+       firefox.permissions.includes(permission),
