@@ -34,6 +34,7 @@ namespace AT.background {
     sourceLang?: string;
     targetLang?: string;
     translationKey?: string;
+    tabEpoch?: number;
     /** What the content script read off the page, if the module is there. */
     context?: unknown;
     /** Which region of the page the batch came from. */
@@ -53,6 +54,7 @@ namespace AT.background {
 
   /** at/state-changed, reported by the content script about itself. */
   export type StateReport = {
+    tabEpoch?: number;
     status?: string;
     translated?: unknown;
     error?: string | null;
@@ -139,9 +141,7 @@ if (typeof self.importScripts === 'function') {
   const MENU: { id: string; i18n: string; contexts: string[] }[] = [
     { id: 'translate-page', i18n: 'menuTranslatePage', contexts: ['page'] },
     { id: 'restore-page', i18n: 'menuRestorePage', contexts: ['page'] },
-    { id: 'translate-selection', i18n: 'menuTranslateSelection', contexts: ['selection'] },
-    { id: 'never-site', i18n: 'menuNeverSite', contexts: ['page'] },
-    { id: 'always-site', i18n: 'menuAlwaysSite', contexts: ['page'] }
+    { id: 'translate-selection', i18n: 'menuTranslateSelection', contexts: ['selection'] }
   ];
 
   const tabStates = new Map<number, AT.background.TabState>();
@@ -221,16 +221,25 @@ if (typeof self.importScripts === 'function') {
     await AT.scripting!.executeScript({ target: { tabId }, files: CONTENT_FILES });
   }
 
-  // Whether a page should be translated, decided centrally so the content
-  // script never has to read settings or site rules. The switch is the whole
-  // policy: on means every page is translated into the target language, with a
-  // per-site rule able to say otherwise.
-  function decide(href: unknown, settings: AT.settings.Settings): AT.background.Plan {
-    if (!settings.enabled) return { action: 'skip', reason: 'disabled' };
-    const rule = AT.rules.resolve(settings.siteRules, href);
-    if (rule?.action === 'never') return { action: 'skip', reason: 'site-never', pattern: rule.pattern };
-    if (rule?.action === 'always') return { action: 'translate', reason: 'site-always', pattern: rule.pattern };
-    return { action: 'translate', reason: 'auto' };
+  // A site rule, global preference or tab activation is never consent.
+  // Existing settings remain readable for migration; explicit tab choice wins.
+  async function selected(tabId: number): Promise<boolean> {
+    return (await AT.tabSelection.get(tabId)).enabled;
+  }
+  async function setTabEnabled(tabId: number | undefined, enabled: boolean, wait = false): Promise<AT.MessageResult> {
+    const tab = await activeTab(tabId);
+    if (tab?.id === undefined || !isInjectable(tab.url)) throw new Error('this page cannot be translated');
+    const id = tab.id;
+    const choice = await AT.tabSelection.set(id, enabled);
+    if ((await AT.tabSelection.get(id)).epoch !== choice.epoch) return { status: 'cancelled' };
+    if (!enabled) {
+      const restored = await restoreTab(id, choice.epoch);
+      return restored.status === 'cancelled' ? restored : { tabEnabled: false, status: 'idle' };
+    }
+    const work = translateTab(id);
+    if (wait) return { ...(await work), tabEnabled: true };
+    void work.catch((error) => AT.warn('selected tab translation failed', error));
+    return { tabEnabled: true, status: 'translating' };
   }
 
   async function activeTab(tabId?: number): Promise<AT.Tab | null | undefined> {
@@ -241,21 +250,27 @@ if (typeof self.importScripts === 'function') {
 
   async function translateTab(
     tabId?: number,
-    { force = false, decision, revision, policy }: { force?: boolean; decision?: AT.background.Plan;
+    { revision, policy }: {
       revision?: number; policy?: AT.settings.Settings } = {}
   ): Promise<AT.MessageResult> {
     const settings = policy ?? await getSettings();
     const tab = await activeTab(tabId);
     if (!tab?.id) throw new Error('no active tab');
     if (!isInjectable(tab.url)) throw new Error('this page cannot be translated');
-    const plan = decision ?? (force ? { action: 'translate', reason: 'manual' } : decide(tab.url, settings));
+    const choice = await AT.tabSelection.get(tab.id);
+    const current = async () => {
+      const latest = await AT.tabSelection.get(tab.id!);
+      return latest.enabled && latest.epoch === choice.epoch && (revision === undefined || revision === policyEpoch);
+    };
+    const plan = choice.enabled ? { action: 'translate', reason: 'tab-enabled' } as AT.background.Plan
+      : { action: 'skip', reason: 'tab-disabled' } as AT.background.Plan;
     if (plan.action === 'skip') {
       tabStates.delete(tab.id);
       await updateBadge(tab.id);
       return { status: 'skipped', reason: plan.reason };
     }
     await ensureInjected(tab.id);
-    if (revision !== undefined && revision !== policyEpoch) return { status: 'cancelled' };
+    if (!(await current())) return { status: 'cancelled' };
     // The model answers after the whole pass; without this the popup reads
     // `state: null` and says "not translated yet" while the page is working.
     const pending = stateFor(tab.id);
@@ -263,15 +278,16 @@ if (typeof self.importScripts === 'function') {
     pending.targetLang = settings.targetLang;
     pending.error = null;
     await updateBadge(tab.id);
-    if (revision !== undefined && revision !== policyEpoch) return { status: 'cancelled' };
+    if (!(await current())) return { status: 'cancelled' };
     let response: AT.background.ContentReply | undefined;
     try {
       response = (await api.tabs.sendMessage(tab.id, {
         type: C.MSG.CONTENT_TRANSLATE,
         decision: plan,
-        settings: AT.settings.contentSnapshot(settings)
+        settings: { ...AT.settings.contentSnapshot(settings), enabled: true, tabEpoch: choice.epoch }
       })) as AT.background.ContentReply | undefined;
     } catch (error: unknown) {
+      if (!(await current())) return { status: 'cancelled' };
       // Keep the reason the page gave instead of a bare channel error.
       const state = stateFor(tab.id);
       state.status = 'error';
@@ -279,6 +295,7 @@ if (typeof self.importScripts === 'function') {
       await updateBadge(tab.id);
       throw error;
     }
+    if (!(await current())) return { status: 'cancelled' };
     if (!response?.ok) {
       const state = stateFor(tab.id);
       state.status = 'error';
@@ -298,13 +315,17 @@ if (typeof self.importScripts === 'function') {
     return { status: state.status, translated: state.translated, reason: plan.reason };
   }
 
-  async function restoreTab(tabId?: number): Promise<AT.MessageResult> {
+  async function restoreTab(tabId?: number, expectedEpoch?: number): Promise<AT.MessageResult> {
     const tab = await activeTab(tabId);
     if (!tab?.id) throw new Error('no active tab');
+    const current = async () => expectedEpoch === undefined || (await AT.tabSelection.get(tab.id!)).epoch === expectedEpoch;
+    if (!(await current())) return { status: 'cancelled' };
     if (await hasContentScript(tab.id)) {
+      if (!(await current())) return { status: 'cancelled' };
       const response = (await api.tabs.sendMessage(tab.id, { type: C.MSG.CONTENT_RESTORE })) as AT.background.ContentReply | undefined;
       if (!response?.ok) throw new Error(response?.error ?? 'the content script did not answer');
     }
+    if (!(await current())) return { status: 'cancelled' };
     tabStates.delete(tab.id);
     await updateBadge(tab.id);
     return { status: 'idle' };
@@ -328,11 +349,15 @@ if (typeof self.importScripts === 'function') {
     return { settings: AT.settings.contentSnapshot(next), pattern: canonical };
   }
 
-  async function translateBatch(message: AT.background.BatchRequest): Promise<AT.MessageResult> {
+  async function translateBatch(message: AT.background.BatchRequest, sender: AT.Sender): Promise<AT.MessageResult> {
     const settings = await getSettings();
-    // The switch is the policy: a page that was translated before it went off
-    // must not keep spending generations on new text.
-    if (!settings.enabled) throw new Error('translation is turned off');
+    const tabId = sender.tab?.id;
+    if (tabId === undefined) throw new Error('page translation requires a source tab');
+    const authorized = async () => {
+      const choice = await AT.tabSelection.get(tabId);
+      if (!choice.enabled || message.tabEpoch !== choice.epoch) throw new Error('translation is turned off for this tab');
+    };
+    await authorized();
     if (message.translationKey && message.translationKey !== AT.settings.contentSnapshot(settings).translationKey) {
       throw new Error('obsolete translation settings');
     }
@@ -349,6 +374,7 @@ if (typeof self.importScripts === 'function') {
     };
     // The host has to exist before the engine layer can ask it anything.
     await ensureHost();
+    await authorized();
     localKey = request.localModelId || null;
     const result = await AT.engines.translate(request);
     return { translations: result.translations, detected: result.detected };
@@ -375,6 +401,7 @@ if (typeof self.importScripts === 'function') {
         ? { id: tab.id, url: tab.url ?? null, title: tab.title ?? null, host: AT.rules.hostPattern(tab.url) }
         : null,
       canTranslate: isInjectable(tab?.url),
+      tabEnabled: tab?.id !== undefined ? await selected(tab.id) : false,
       rule: rule?.action ?? null,
       state: tab?.id != null ? await tabStateOf(tab.id, tab.url) : null,
       local: await localState(true)
@@ -403,6 +430,8 @@ if (typeof self.importScripts === 'function') {
   async function reportState(message: AT.background.StateReport, sender: AT.Sender): Promise<AT.MessageResult> {
     const tabId = sender?.tab?.id;
     if (tabId == null) return {};
+    const choice = await AT.tabSelection.get(tabId);
+    if (!choice.enabled || message.tabEpoch !== choice.epoch) return {};
     const state = stateFor(tabId);
     state.status = message.status ?? 'idle';
     state.translated = Number(message.translated) || 0;
@@ -429,19 +458,20 @@ if (typeof self.importScripts === 'function') {
     if (!tab?.id) return;
     switch (info.menuItemId) {
       case 'translate-page':
-        await translateTab(tab.id, { force: true });
+        await setTabEnabled(tab.id, true, true);
         break;
       case 'restore-page':
-        await restoreTab(tab.id);
+        await setTabEnabled(tab.id, false);
         break;
       case 'translate-selection': {
         const settings = await getSettings();
         if (!isInjectable(tab.url)) return;
+        const choice = await AT.tabSelection.set(tab.id, true);
         await ensureInjected(tab.id);
         await api.tabs.sendMessage(tab.id, {
           type: C.MSG.CONTENT_TRANSLATE_SELECTION,
           text: info.selectionText ?? '',
-          settings: AT.settings.contentSnapshot(settings)
+          settings: { ...AT.settings.contentSnapshot(settings), enabled: true, tabEpoch: choice.epoch }
         });
         break;
       }
@@ -452,8 +482,8 @@ if (typeof self.importScripts === 'function') {
         const current = AT.rules.resolve(settings.siteRules, tab.url);
         const next = current?.action === action ? null : action;
         await setSiteRule({ tabId: tab.id, action: next });
-        if (next === 'never') await restoreTab(tab.id);
-        else if (next === 'always') await translateTab(tab.id, { force: true });
+        if (next === 'never') await setTabEnabled(tab.id, false);
+        else if (next === 'always') await setTabEnabled(tab.id, true, true);
         break;
       }
       default:
@@ -583,8 +613,7 @@ if (typeof self.importScripts === 'function') {
 
   api.runtime.onInstalled.addListener(async (details) => {
     if (details.reason === 'install') {
-      // Nothing translates until the model is installed: the welcome page turns
-      // it on as its last step.
+      // Onboarding sets up the shared model. Every tab still requires opt-in.
       await AT.settings.save({ enabled: false });
       openWelcome();
     }
@@ -609,8 +638,8 @@ if (typeof self.importScripts === 'function') {
       void updateBadge(tabId);
       return;
     }
-    // Background navigation must not queue an entire unread feed on the shared model.
-    if (tab.active === false) return;
+    // Explicitly selected tabs remain targets across navigation, even in the
+    // background. Unselected tabs are rejected inside translateTab before injection.
     getSettings()
       // `translateTab` re-reads the tab, so it must take the decision from that
       // read: the event's snapshot can belong to a page that is already gone.
@@ -627,6 +656,7 @@ if (typeof self.importScripts === 'function') {
 
   api.tabs.onRemoved.addListener((tabId) => {
     tabStates.delete(tabId);
+    void AT.tabSelection.forget(tabId).catch((error) => AT.warn('removing tab choice failed', error));
   });
 
   /**
@@ -644,23 +674,19 @@ if (typeof self.importScripts === 'function') {
     const tabs = await api.tabs.query({});
     if (revision !== policyEpoch) return;
     const eligible = tabs.filter((tab): tab is AT.Tab => tab?.id != null && isInjectable(tab.url));
-    const foreground = eligible.filter((tab) => tab.active === true);
-    // Options/onboarding can be the foreground extension tab. Resume the most
-    // recently used web page, not every open tab. Activation handles the rest.
-    const recipients = new Set((foreground.length ? foreground : eligible.slice().sort((a, b) =>
-      (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)).slice(0, 1)).map((tab) => tab.id));
+    const opted = await Promise.all(eligible.map(async (tab) => await selected(tab.id!) ? tab.id : null));
+    const recipients = new Set(opted.filter((id): id is number => id !== null && id !== undefined));
     await Promise.all(tabs.map(async (tab) => {
       if (tab?.id == null || !isInjectable(tab.url) || revision !== policyEpoch) return;
       const id = tab.id;
       try {
-        const decision = decide(tab.url, settings);
-        if (decision.action === 'skip' || !recipients.has(id)) {
+        if (!recipients.has(id)) {
           // Restore/invalidate stale policy in existing scripts, without injecting
           // a script or starting inference in an unread tab (also after SW restart).
           await api.tabs.sendMessage(id, { type: C.MSG.CONTENT_RESTORE });
           if (revision === policyEpoch) tabStates.delete(id);
         } else {
-          await translateTab(id, { decision, revision, policy: settings });
+          await translateTab(id, { revision, policy: settings });
         }
       } catch {
         // A tab without a listener has nothing to restore.
@@ -701,7 +727,7 @@ if (typeof self.importScripts === 'function') {
   // The runtime hands over untrusted JSON: each handler names the payload it
   // reads, and the table narrows the message to that shape once, here.
   AT.onMessage({
-    [C.MSG.BATCH]: (message) => translateBatch(message as AT.background.BatchRequest),
+    [C.MSG.BATCH]: (message, sender) => translateBatch(message as AT.background.BatchRequest, sender),
     [C.MSG.STATE_CHANGED]: (message, sender) => reportState(message as AT.background.StateReport, sender),
     [C.MSG.GET_STATE]: (message) => getState(message as AT.background.TabRequest),
     [C.MSG.SET_SETTINGS]: async (message) => ({
@@ -713,8 +739,14 @@ if (typeof self.importScripts === 'function') {
     [C.MSG.SET_SITE_RULE]: (message) => setSiteRule(message as AT.background.SiteRuleRequest),
     [C.MSG.REMOVE_SITE_RULE]: (message) => setSiteRule({ ...(message as AT.background.SiteRuleRequest), action: null }),
     [C.MSG.TEST_ENGINE]: (message) => testModel(message as AT.background.EngineTestRequest),
-    [C.MSG.TRANSLATE_TAB]: (message) => translateTab((message as AT.background.TabRequest).tabId, { force: true }),
-    [C.MSG.RESTORE_TAB]: (message) => restoreTab((message as AT.background.TabRequest).tabId),
+    [C.MSG.SET_TAB_ENABLED]: (message, sender) => {
+      if (typeof message.enabled !== 'boolean') throw new Error('enabled must be a boolean');
+      const tabId = (message as AT.background.TabRequest).tabId;
+      if (sender.tab && sender.tab.id !== tabId) throw new Error('cannot control a different tab');
+      return setTabEnabled(tabId, message.enabled);
+    },
+    [C.MSG.TRANSLATE_TAB]: (message) => setTabEnabled((message as AT.background.TabRequest).tabId, true, true),
+    [C.MSG.RESTORE_TAB]: (message) => setTabEnabled((message as AT.background.TabRequest).tabId, false),
     [C.MSG.LOCAL_STATUS]: (message) => reportLocal(message as { status?: unknown }),
     [C.MSG.LOCAL_GET_STATUS]: () => getLocalState(),
     [C.MSG.LOCAL_PREPARE]: (message) => prepareLocal(message as AT.background.LocalRequest),

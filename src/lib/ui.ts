@@ -1,44 +1,38 @@
-// Where an extension page is shown. The side panel is the better surface when
-// the browser has one — it stays next to the page instead of taking a tab — but
-// the browser only allows `sidePanel.open` in response to a user gesture, so a
-// caller that has none (the background opening onboarding after an install) must
-// land on a tab instead of doing nothing.
-// Load after lib/constants.js, lib/browser.js.
+// Extension UI is docked when supported, otherwise opened in a real window.
+// A known source tab lets the click handler call sidePanel.open before awaiting
+// anything, retaining Chrome's user-gesture permission.
 namespace AT.ui {
-  export type Surface = 'panel' | 'tab';
-
-  /**
-   * Shows `page` (`'welcome.html'`, `'options.html'`) and says where it went.
-   * The side panel path does two things: it registers the page as the panel's
-   * content, then asks the browser to open it. Either step can fail (no API, no
-   * gesture, a browser that refuses a panel for that window), and a failure is
-   * not an error for the caller: the tab still opens.
-   */
-  export async function openPage(page: string, surface: 'auto' | 'tab' = 'auto'): Promise<Surface> {
+  export type Surface = 'panel' | 'window';
+  export function targetTabId(): number | undefined {
+    const value = new URLSearchParams(globalThis.location?.search ?? '').get('tabId');
+    if (value === null || !/^\d+$/.test(value)) return undefined;
+    const id = Number(value);
+    return Number.isSafeInteger(id) ? id : undefined;
+  }
+  export async function openPage(page: string, surface: 'auto' | 'window' = 'auto', target?: number): Promise<Surface> {
+    if (!['options.html', 'welcome.html'].includes(page)) throw new Error('unknown extension page');
+    let tabId = target;
+    if (tabId === undefined) {
+      const tabs = await AT.tabs?.query({ active: true, currentWindow: true });
+      const tab = tabs?.[0];
+      if (tab?.id !== undefined && /^https?:/i.test(tab.url ?? '')) tabId = tab.id;
+    }
+    const path = tabId === undefined ? page : page + '?tabId=' + tabId;
     const panel = AT.sidePanelApi;
-    if (surface === 'auto' && AT.supportsSidePanel() && panel) {
-      const url = AT.getURL(page);
+    if (surface === 'auto' && AT.supportsSidePanel() && panel && tabId !== undefined) {
       try {
-        await panel.setOptions({ path: page, enabled: true });
-        // `open` takes a window id or a tab id, and the tab API is the surface
-        // this context has: the panel then follows that tab.
-        const tabId = await activeTabId();
-        if (tabId === null) throw new Error('no active tab to dock the panel to');
-        await panel.open({ tabId });
+        // Both browser calls are issued during the originating gesture. Awaiting
+        // storage/tabs/setOptions before open can lose the gesture in Chromium.
+        const configured = panel.setOptions({ path, tabId, enabled: true });
+        const opened = panel.open({ tabId });
+        await Promise.all([configured, opened]);
         return 'panel';
       } catch (error: unknown) {
-        // A gesture-less caller lands here every time; that is expected.
-        AT.log('the side panel did not open, using a tab', String((error as { message?: unknown })?.message ?? error), url);
+        AT.log('side panel unavailable; opening a window', String((error as Error)?.message ?? error));
       }
     }
-    await AT.tabs!.create({ url: AT.getURL(page), active: true });
-    return 'tab';
-  }
-
-  /** The tab the user is looking at, for `sidePanel.open`. */
-  async function activeTabId(): Promise<number | null> {
-    const tabs = await AT.tabs?.query?.({ active: true, currentWindow: true });
-    const id = tabs?.[0]?.id;
-    return typeof id === 'number' ? id : null;
+    if (!AT.api?.windows?.create) throw new Error('this browser cannot open an options window');
+    await AT.api.windows.create({ url: AT.getURL(path), type: 'popup', focused: true, width: 560, height: 800 });
+    return 'window';
   }
 }

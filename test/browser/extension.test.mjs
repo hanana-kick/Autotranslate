@@ -27,8 +27,14 @@ async function fixture(path, html) {
   await page.goto(`${origin}${path}`);
   return page;
 }
+async function select(page, enabled) {
+  const tabId = await control.evaluate(async url => (await AT.api.tabs.query({})).find(t => t.url === url)?.id, page.url());
+  const response = await control.evaluate(({tabId,enabled}) => AT.sendMessage({type:AT.C.MSG.SET_TAB_ENABLED,tabId,enabled}), {tabId,enabled});
+  assert.equal(response.ok, true, JSON.stringify(response)); return tabId;
+}
 async function stopPolicy() {
   if (!control || control.isClosed()) return;
+  for (const page of context.pages()) if (/^https?:/.test(page.url())) await select(page, false);
   await policy({ enabled: false, siteRules: [] });
   await model({ release: true, failWarmup: false }).catch(() => {});
   for (const page of context.pages()) if (page !== control) await page.close();
@@ -138,20 +144,20 @@ check('file picker installs through the real UI and starts the extension', async
 
 check('background to offscreen to content translates links safely then restores all nodes', async () => {
   const page = await fixture('/inline', '<p>Read <a href="/privacy" class="policy">privacy policy</a> before you continue.</p>');
-  await policy({ enabled: true, sourceLang: 'en', targetLang: 'ja' });
+  await policy({ enabled: true, sourceLang: 'en', targetLang: 'ja' }); await select(page, true);
   await page.waitForFunction(() => document.querySelector('a').textContent === 'プライバシーポリシー');
   assert.equal(await page.locator('a').getAttribute('href'), '/privacy');
   assert.equal(await page.locator('a').getAttribute('class'), 'policy');
   await screenshot(page, 'extension-inline-translated');
-  await policy({ enabled: false });
+  await select(page, false);
   await page.waitForFunction(() => document.querySelector('p').textContent === 'Read privacy policy before you continue.');
 });
 
 check('turning off during native host work restores without waiting for inference', async () => {
   const page = await fixture('/cancel', '<p>Original text</p>');
-  await model({ hold: true }); await policy({ enabled: true, targetLang: 'ko' });
+  await model({ hold: true }); await policy({ enabled: true, targetLang: 'ko' }); await select(page, true);
   await until(async () => (await model()).pending === 1, 'inference held');
-  const start = Date.now(); await policy({ enabled: false });
+  const start = Date.now(); await select(page, false);
   const tab = await control.evaluate(async (url) => (await AT.api.tabs.query({})).find((item) => item.url === url), page.url());
   await until(async () => (await control.evaluate((id) => AT.api.tabs.sendMessage(id, { type: AT.C.MSG.CONTENT_STATE }), tab.id)).status === 'idle', 'immediate restore ack');
   assert.ok(Date.now() - start < 2500);
@@ -162,7 +168,7 @@ check('turning off during native host work restores without waiting for inferenc
 
 check('native MutationObserver catches content inserted during the initial inference', async () => {
   const page = await fixture('/mutation', '<p>First paragraph</p>');
-  await model({ hold: true }); await policy({ enabled: true, targetLang: 'ko' });
+  await model({ hold: true }); await policy({ enabled: true, targetLang: 'ko' }); await select(page, true);
   await until(async () => (await model()).pending === 1, 'inference held');
   await page.evaluate(() => document.querySelector('main').insertAdjacentHTML('beforeend', '<p id="inserted">Inserted during inference</p>'));
   await model({ release: true });
@@ -183,7 +189,7 @@ check('failed replacement keeps the selected model and both native files recover
 
 check('a terminated service worker restores already translated tabs after restart', async () => {
   const page = await fixture('/restart', '<p>Original text</p>');
-  await policy({ enabled: true, targetLang: 'ko' });
+  await policy({ enabled: true, targetLang: 'ko' }); await select(page, true);
   await page.waitForFunction(() => document.querySelector('p').textContent === '원문 번역');
   const session = await context.newCDPSession(control);
   let version;
@@ -194,7 +200,10 @@ check('a terminated service worker restores already translated tabs after restar
   await until(() => version?.runningStatus === 'running', 'running worker version');
   await session.send('ServiceWorker.stopWorker', { versionId: version.versionId });
   await until(() => version?.runningStatus === 'stopped', 'worker termination');
-  await policy({ enabled: false });
+  const tabId = await control.evaluate(async url => (await AT.api.tabs.query({})).find(t => t.url === url)?.id, page.url());
+  const recovered = await control.evaluate(tabId => AT.sendMessage({type:AT.C.MSG.GET_STATE,tabId}), tabId);
+  assert.equal(recovered.tabEnabled, true, 'explicit consent survives service-worker restart');
+  await select(page, false);
   await page.waitForFunction(() => document.querySelector('p').textContent === 'Original text');
   await session.detach();
 });

@@ -12,6 +12,7 @@ namespace AT {
     STATE_CHANGED: string;
     GET_STATE: string;
     SET_SETTINGS: string;
+    SET_TAB_ENABLED: string;
     RESET_SETTINGS: string;
     SET_SITE_RULE: string;
     REMOVE_SITE_RULE: string;
@@ -94,6 +95,7 @@ namespace AT {
       // popup / options -> background
       GET_STATE: 'at/get-state',
       SET_SETTINGS: 'at/set-settings',
+      SET_TAB_ENABLED: 'at/set-tab-enabled',
       RESET_SETTINGS: 'at/reset-settings',
       SET_SITE_RULE: 'at/set-site-rule',
       REMOVE_SITE_RULE: 'at/remove-site-rule',

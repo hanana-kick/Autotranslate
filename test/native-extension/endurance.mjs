@@ -1,6 +1,7 @@
 // Two real tabs share the packaged model. Fixture actions only mutate their own
 // DOM; all translation is performed by the installed extension and original SDK.
 import assert from 'node:assert/strict';
+import { setTabThroughUI, pageTabId } from './tab-ui.mjs';
 import { createServer } from 'node:http';
 export async function runEndurance({ context, options, host, capture, stage, passed, summary, save }) {
   const rounds = Number(process.env.ENDURANCE_ROUNDS || 5);
@@ -13,11 +14,7 @@ export async function runEndurance({ context, options, host, capture, stage, pas
   const tabs = []; const records = [];
   const result = summary.endurance = { rounds, tabs: 2, passed: false, samples: [] };
   async function toggle(value) {
-    const before = await options.evaluate(() => AT.settings.load());
-    await options.reload();
-    await options.waitForFunction((s) => document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled, before);
-    await options.locator('#enabled').setChecked(value); await options.locator('#save').click();
-    await options.waitForFunction(async (v) => document.querySelector('#saveStatus').dataset.kind === 'ok' && (await AT.settings.load()).enabled === v, value);
+    for (const page of tabs) await setTabThroughUI(options, await pageTabId(options, page), value);
   }
   try {
     await stage('multi-tab-endurance'); await toggle(false);
@@ -27,7 +24,7 @@ export async function runEndurance({ context, options, host, capture, stage, pas
       records.push(await page.locator('#text').evaluateHandle((el) => ({ el, text: el.firstChild })));
     }
     await toggle(true);
-    // Activate deferred unread tabs once; subsequent rounds remain concurrent.
+    // Both tabs were explicitly opted in through their own UI; switching is not consent.
     for (const page of tabs) {
       await page.bringToFront();
       await page.waitForFunction(() => /[가-힣]/u.test(document.querySelector('#text').textContent), null, { timeout: 600000 });

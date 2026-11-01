@@ -14,7 +14,7 @@ const LIBS = [
   'lib/local.js',
   'lib/modelstore.js',
   'lib/modelflow.js',
-  'lib/settings.js'
+  'lib/ui.js', 'lib/settings.js'
 ];
 
 const host = globalThis as ATNamespace;
@@ -176,6 +176,8 @@ type StubDocument = {
 
 // id, tag and the data-i18n key options.html puts on the button.
 const FIELDS: readonly (readonly [string, string, string?])[] = [
+  ['tabHost', 'p'],
+  ['tabStatus', 'p'],
   ['enabled', 'input'],
   ['showBadge', 'input'],
   ['debug', 'input'],
@@ -621,7 +623,7 @@ test('boot fills the selects, every field and the button labels from storage', a
 
   assert.deepEqual(
     env.runtimeMessages.map((message) => message.type),
-    [AT.C.MSG.LOCAL_GET_STATUS],
+    [AT.C.MSG.LOCAL_GET_STATUS, AT.C.MSG.GET_STATE],
     'boot reads storage; the single background read is the on-device host status'
   );
   assert.deepEqual(env.writes, [], 'boot never writes settings back');
@@ -696,13 +698,13 @@ test('saving writes one record with the typed values, coerced', async () => {
   assert.equal(env.writes.length, 1, 'one save is one write');
   assert.deepEqual(
     env.runtimeMessages.map((message) => message.type),
-    [AT.C.MSG.LOCAL_GET_STATUS],
+    [AT.C.MSG.LOCAL_GET_STATUS, AT.C.MSG.GET_STATE],
     'the page writes storage itself, no at/set-settings round trip'
   );
   const saved = savedSettings(env);
   assert.equal(saved.targetLang, 'ja');
   assert.equal(saved.sourceLang, 'ko');
-  assert.equal(saved.enabled, true);
+  assert.equal(saved.enabled, true, 'form save keeps the legacy preference untouched');
   assert.equal(saved.showBadge, false);
   assert.equal(saved.debug, true);
   assert.equal(saved.version, 1);
@@ -959,7 +961,7 @@ test('removing a rule drops it from storage and from the list', async () => {
   assert.equal(field('saveStatus').dataset.kind, 'ok');
   assert.deepEqual(
     env.runtimeMessages.map((message) => message.type),
-    [env.AT.C.MSG.LOCAL_GET_STATUS],
+    [env.AT.C.MSG.LOCAL_GET_STATUS, env.AT.C.MSG.GET_STATE],
     'the removal is a storage write, no at/remove-site-rule'
   );
 });

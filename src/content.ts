@@ -126,7 +126,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
   ): Promise<string[]> {
     const texts = batch.texts;
     const response = (await AT.sendMessage({
-      type: C.MSG.BATCH,
+      type: C.MSG.BATCH, ...(settings.tabEpoch === undefined ? {} : { tabEpoch: settings.tabEpoch }),
       texts,
       targetLang: settings.targetLang,
       sourceLang: settings.sourceLang,
@@ -178,6 +178,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.lastError = patch.error ?? null;
     return AT.sendMessage({
       type: C.MSG.STATE_CHANGED,
+      ...(state.settings?.tabEpoch === undefined ? {} : { tabEpoch: state.settings.tabEpoch }),
       status: patch.status,
       translated: patch.translated ?? 0,
       error: patch.error ?? null
@@ -436,7 +437,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
   }
 
   function sessionKey(settings: AT.settings.ContentSnapshot): string {
-    return JSON.stringify([settings.translationKey ?? '', settings.targetLang, settings.sourceLang, settings.maxNodes]);
+    return JSON.stringify([settings.translationKey ?? '', settings.tabEpoch, settings.targetLang, settings.sourceLang, settings.maxNodes]);
   }
 
   /** Control commands bypass the work queue. This is synchronous up to the UI report. */

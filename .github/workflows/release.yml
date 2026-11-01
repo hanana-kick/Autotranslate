@@ -35,8 +35,12 @@ jobs:
       contents: read
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  tab-ui:
+    uses: ./.github/workflows/tab-ui.yml
+    permissions:
+      contents: read
   release:
-    needs: [browser, native, planner, speed]
+    needs: [browser, native, planner, speed, tab-ui]
     name: Package and publish verified Chrome only
     runs-on: ubuntu-latest
     steps:
@@ -67,7 +71,8 @@ jobs:
             echo "- original TranslateGemma .task and MediaPipe SDK in the installed Chrome extension; five independent fresh profiles"
             echo "- static and dynamic translation, exact HTML restoration and planner acceptance"
             echo "- same-machine native speed comparison against 0.1.3: long cached pages, inline links and foreground tab contention"
-            echo "- inactive unread tabs defer inference until selected; known pending work no longer waits for mutation debounce"
+            echo "- explicit per-tab ON/OFF (new tabs OFF); chosen tabs survive reload and worker restart; OFF restores only that tab"
+            echo "- source-bound Options use a side panel when supported, otherwise a separate window; window routing is separately tested in Firefox (not Firefox model compatibility)"
             echo
             echo "Chrome: unzip and load from chrome://extensions in Developer mode."
             echo "Firefox is NOT included: its genuine model preparation fails. See https://github.com/$GITHUB_REPOSITORY/issues/2"

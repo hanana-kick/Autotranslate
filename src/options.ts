@@ -9,6 +9,8 @@ namespace AT.options {
   // the call sites stay as short as the untyped version was.
   type Fields = {
     enabled: HTMLInputElement;
+    tabHost: HTMLParagraphElement;
+    tabStatus: HTMLParagraphElement;
     showBadge: HTMLInputElement;
     debug: HTMLInputElement;
     testEngine: HTMLButtonElement;
@@ -114,7 +116,7 @@ namespace AT.options {
   }
 
   function render(): void {
-    el('enabled').checked = settings!.enabled;
+    // Tab consent is independent of the global preferences form.
     el('showBadge').checked = settings!.showBadge;
     el('debug').checked = settings!.debug;
     el('targetLang').value = settings!.targetLang;
@@ -129,7 +131,7 @@ namespace AT.options {
 
   function collect(): FormValues {
     return {
-      enabled: el('enabled').checked,
+      enabled: settings!.enabled, // legacy preference; never changes per-tab consent
       showBadge: el('showBadge').checked,
       debug: el('debug').checked,
       targetLang: el('targetLang').value,
@@ -388,7 +390,39 @@ namespace AT.options {
     setStatus(el('modelStatus'), AT.i18n.msg('options_prepared'), 'ok');
   }
 
+  let targetTabId: number | undefined;
+  let tabEnabled = false;
+  let refreshEpoch = 0;
+  async function refreshTab(): Promise<void> {
+    const epoch = ++refreshEpoch;
+    const response = await AT.sendMessage({ type: C.MSG.GET_STATE, tabId: targetTabId });
+    if (epoch !== refreshEpoch) return;
+    const tab = response.tab as { id?: number; host?: string; url?: string } | null;
+    if (!response.ok || !response.canTranslate || tab?.id === undefined) {
+      tabEnabled = false;
+      el('enabled').checked = false; el('enabled').disabled = true;
+      el('tabStatus').textContent = '';
+      el('tabHost').textContent = AT.i18n.msg('options_noTab');
+      return;
+    }
+    targetTabId = tab.id;
+    tabEnabled = response.tabEnabled === true;
+    el('enabled').checked = tabEnabled; el('enabled').disabled = false;
+    el('tabHost').textContent = tab.host ?? tab.url ?? '';
+    setStatus(el('tabStatus'), AT.i18n.msg(tabEnabled ? 'options_tabOn' : 'options_tabOff'), 'info');
+  }
+
   function wire(): void {
+    el('enabled').addEventListener('change', async () => {
+      if (targetTabId === undefined) return;
+      const response = await AT.sendMessage({ type: C.MSG.SET_TAB_ENABLED, tabId: targetTabId, enabled: el('enabled').checked });
+      if (!response.ok) {
+        el('enabled').checked = tabEnabled;
+        setStatus(el('tabStatus'), String(response.error ?? 'error'), 'error');
+        return;
+      }
+      await refreshTab();
+    });
     el('save').addEventListener('click', () => persist(collect()));
 
     el('reset').addEventListener('click', async () => {
@@ -449,6 +483,7 @@ namespace AT.options {
    */
   function watchStorage(): void {
     AT.storage?.onChanged?.addListener((changes, area) => {
+      if (area === 'session' && targetTabId !== undefined && changes[AT.tabSelection.PREFIX + targetTabId]) { void refreshTab(); return; }
       if (area !== 'local' || !changes[C.STORAGE_KEY]) return;
       void AT.settings.load().then((loaded) => {
         settings = loaded;
@@ -460,6 +495,8 @@ namespace AT.options {
   document.addEventListener('DOMContentLoaded', async () => {
     AT.i18n.apply(document);
     buildSelects();
+    targetTabId = AT.ui.targetTabId();
+    el('enabled').disabled = true;
     settings = await AT.settings.load();
     el('modelUrl').value = AT.local.MODEL_SOURCES[0]?.url ?? '';
     el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
@@ -474,5 +511,6 @@ namespace AT.options {
     // empty defaults over the user's settings.
     wire();
     watchStorage();
+    await refreshTab();
   });
 }
