@@ -1,0 +1,80 @@
+name: Real Firefox extension
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      HF_TOKEN:
+        required: true
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['src/**', 'test/firefox-native/**', '.github/workflows/firefox-native.yml']
+permissions:
+  contents: read
+concurrency:
+  group: firefox-native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    name: Original Firefox extension / standard Intel 14 GB
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund && npm run build:firefox
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
+      - name: Verify official Firefox and Mozilla WebDriver
+        run: |
+          set -euo pipefail
+          binary='/Applications/Firefox.app/Contents/MacOS/firefox'
+          test -x "$binary"
+          codesign --verify --deep --strict /Applications/Firefox.app
+          mkdir -p test-results/firefox-webdriver
+          "$binary" --version | tee test-results/firefox-webdriver/browser-release.txt
+          printf 'FIREFOX_BINARY=%s\n' "$binary" >> "$GITHUB_ENV"
+          curl -fL --retry 3 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-macos.tar.gz -o "$RUNNER_TEMP/geckodriver.tar.gz"
+          echo "d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5  $RUNNER_TEMP/geckodriver.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/geckodriver" "$RUNNER_TEMP/geckodriver-real"
+          printf '#!/bin/sh\nexec "%s/geckodriver-real" --allow-system-access "$@"\n' "$RUNNER_TEMP" > "$RUNNER_TEMP/geckodriver"
+          chmod +x "$RUNNER_TEMP/geckodriver"
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import os from 'node:os';
+          fs.writeFileSync('test-results/firefox-webdriver/environment.json',JSON.stringify({platform:os.platform(),arch:os.arch(),cpu:os.cpus()[0]?.model,logicalCpus:os.cpus().length,ramBytes:os.totalmem(),runner:process.env.RUNNER_NAME,node:process.version},null,2));
+          JS
+      - name: Actual installed addon, original SDK and model, native dynamic translation and restoration
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          GECKODRIVER: ${{ runner.temp }}/geckodriver
+        shell: bash
+        run: |
+          set -euo pipefail
+          (while true; do date -u; vm_stat; ps -axo pid,ppid,comm,rss,pcpu | grep -E 'firefox|plugin-container|PID'; sleep 5; done) > test-results/firefox-webdriver/resources.txt &
+          monitor=$!
+          trap 'kill "$monitor" 2>/dev/null || true' EXIT
+          node test/firefox-native/released.mjs 2>&1 | tee test-results/firefox-webdriver/execution.log
+      - name: Unchanged production and credential-safe evidence
+        if: always()
+        id: evidence
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- src scripts package.json package-lock.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import path from 'node:path';
+          function check(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,e.name);if(e.isDirectory())check(p);else if(/\.(json|html|log|txt)$/.test(p)){const s=fs.readFileSync(p,'utf8');if((process.env.HF_TOKEN&&s.includes(process.env.HF_TOKEN))||/hf_[A-Za-z0-9]{20,}/.test(s)){fs.rmSync(p);throw Error('credential-bearing artifact refused');}}}}
+          check('test-results/firefox-webdriver');
+          JS
+          cp dist/*-firefox.zip test-results/firefox-webdriver/tested-extension.zip
+          shasum -a 256 dist/*-firefox.zip > test-results/firefox-webdriver/package-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        with:
+          name: firefox-native-${{ github.run_id }}
+          path: test-results/firefox-webdriver/
+          retention-days: 14
