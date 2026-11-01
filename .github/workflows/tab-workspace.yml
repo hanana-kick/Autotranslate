@@ -1,0 +1,33 @@
+name: Tab control workspace
+on:
+  push:
+    branches: [feat/explicit-tab-translation]
+    paths: [.github/workflows/tab-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Export committed source and locked development runtime
+        run: |
+          mkdir -p /tmp/tab-workspace
+          git archive HEAD > /tmp/tab-workspace/source.tar
+          tar -czf /tmp/tab-workspace/deps.tar.gz node_modules
+          cp "$(command -v node)" /tmp/tab-workspace/node
+          gzip /tmp/tab-workspace/node
+          git rev-parse HEAD > /tmp/tab-workspace/commit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tab-control-workspace
+          path: /tmp/tab-workspace/
+          retention-days: 2
