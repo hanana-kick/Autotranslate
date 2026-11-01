@@ -17,7 +17,7 @@ test.afterEach(() => {
   else delete globals.navigator;
 });
 
-function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; oversized?: boolean; empty?: boolean; software?: boolean; delayed?: boolean; corrupt?: boolean; streamCorrupt?: boolean } = {}) {
+function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; oversized?: boolean; empty?: boolean; software?: boolean; delayed?: boolean; corrupt?: boolean; streamCorrupt?: boolean; responses?: readonly string[] } = {}) {
   resetGlobals();
   const deviceCalls: ATNamespace[] = [], devices: ATNamespace[] = [];
   const softwareAdapter = { info: { architecture: 'swiftshader' },
@@ -52,6 +52,7 @@ function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; 
           if (number === 0 && options.firstGenerationHangs) return new Promise(() => {});
           if (options.corrupt) return '<pad>'.repeat(946);
           if (options.streamCorrupt) { listener?.('<pad>', false); return new Promise(() => {}); }
+          if (options.responses) return options.responses[this.prompts.length - 2] ?? '검증된 응답';
           return options.empty ? '' : '검증된 응답';
         }
       };
@@ -181,4 +182,41 @@ test('host: greedy sampling uses one candidate with finite temperature scaling',
   await request();
   assert.equal(instances[0]!.settings.topK, 1);
   assert.equal(instances[0]!.settings.temperature, 1);
+});
+
+
+test('host: retry only an unchanged numbered segment without repeating valid peers', async () => {
+  const { request, instances, AT } = host({ responses: ['1: 읽으세요\n2: the installation guide\n3: 계속하기 전에.', '설치 지침'] });
+  const response = await request({ texts: ['Read', 'the installation guide', 'before continuing.'] });
+  assert.deepEqual(response.translations, ['읽으세요', '설치 지침', '계속하기 전에.']);
+  assert.equal(instances[0]!.prompts.length, 3, 'warmup + numbered batch + one missing fragment');
+  assert.equal(instances[0]!.prompts.at(-1), AT.local.buildBatchPrompt('en', 'ko', ['the installation guide'], null));
+});
+
+test('host: accepted numbered translations use one generation', async () => {
+  const { request, instances } = host({ responses: ['1: 읽으세요\n2: 설치 지침'] });
+  assert.deepEqual((await request({ texts: ['Read', 'the installation guide'] })).translations, ['읽으세요', '설치 지침']);
+  assert.equal(instances[0]!.prompts.length, 2);
+});
+
+test('host: unchanged names get at most one fallback and numerals get none', async () => {
+  const { request, instances } = host({ responses: ['1: OpenAI\n2: 123', 'OpenAI'] });
+  assert.deepEqual((await request({ texts: ['OpenAI', '123'] })).translations, ['OpenAI', '123']);
+  assert.equal(instances[0]!.prompts.length, 3, 'no repeated fallback for a legitimate unchanged name');
+});
+
+test('host: single and same-language answers never enter unchanged-batch retry', async () => {
+  const first = host({ responses: ['OpenAI'] });
+  assert.deepEqual((await first.request({ texts: ['OpenAI'] })).translations, ['OpenAI']);
+  assert.equal(first.instances[0]!.prompts.length, 2);
+  first.AT.localhost.unload('next fixture');
+  const second = host({ responses: ['1: OpenAI\n2: Hello'] });
+  assert.deepEqual((await second.request({ source: 'en', target: 'en', texts: ['OpenAI', 'Hello'] })).translations, ['OpenAI', 'Hello']);
+  assert.equal(second.instances[0]!.prompts.length, 2);
+});
+
+test('host: unchanged-segment fallback still rejects corrupted native output', async () => {
+  const { request, instances } = host({ responses: ['1: 읽으세요\n2: the guide', '<pad>'] });
+  await assert.rejects(() => request({ texts: ['Read', 'the guide'] }), /control-token/);
+  assert.equal(instances[0]!.prompts.length, 3);
 });
