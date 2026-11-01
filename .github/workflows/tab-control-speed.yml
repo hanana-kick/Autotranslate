@@ -1,0 +1,14 @@
+name: Tab-control native speed regression
+on:
+  push:
+    branches: [feat/explicit-tab-control]
+    paths: [.github/workflows/tab-control-speed.yml, 'test/speed/**', test/native-extension/tab-control.mjs]
+permissions:
+  contents: read
+jobs:
+  paired:
+    uses: ./.github/workflows/native-speed-benchmark.yml
+    permissions:
+      contents: read
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
