@@ -9,6 +9,7 @@ function replace(from, to) {
   source = source.replace(from, to);
 }
 replace("from './firefox-install.mjs'", "from './test/native-extension/firefox-install.mjs'");
+replace("from './tab-control.mjs'", "from './test/native-extension/tab-control.mjs'");
 if (process.env.CHROMIUM_BINARY) {
   replace("channel: 'chromium'", 'executablePath: process.env.CHROMIUM_BINARY');
   const version = 'context.setDefaultTimeout(30000); summary.browser = context.browser().version();';
@@ -17,7 +18,7 @@ if (process.env.CHROMIUM_BINARY) {
 // A stopped renderer must not leave a failed test waiting in evidence cleanup.
 replace('  const session = await context.newCDPSession(p);', "  const session = await bound(context.newCDPSession(p), 10000, 'screenshot CDP attachment');");
 replace('  } finally { await session.detach().catch(() => {}); }', "  } finally { await bound(session.detach(), 3000, 'screenshot CDP detach').catch(() => {}); }");
-source = "import { withNativeHostMonitor } from './test/native-extension/host-monitor.mjs';\nimport { runYouTube } from './test/native-extension/youtube.mjs';\nimport { runEndurance } from './test/native-extension/endurance.mjs';\nimport { runDynamicPage } from './test/dynamic-extension/dynamic-page.mjs';\n" + source;
+source = "import { runSurfaces } from './test/native-extension/surfaces.mjs';\nimport { withNativeHostMonitor } from './test/native-extension/host-monitor.mjs';\nimport { runYouTube } from './test/native-extension/youtube.mjs';\nimport { runEndurance } from './test/native-extension/endurance.mjs';\nimport { runDynamicPage } from './test/dynamic-extension/dynamic-page.mjs';\n" + source;
 // Observe definitive host failure while fixtures wait for asynchronous DOM writes.
 // No errors are converted to passes. Two identical error reports avoid treating
 // the supervisor's brief recovery transition as a final failed operation.
@@ -31,6 +32,7 @@ async function monitoredNative(job, label) {
 replace('async function host(p) {', monitor + '\nasync function host(p) {');
 const anchor = '  assert.deepEqual(summary.errors, []); summary.fullTranslationRestorePassed = true;';
 replace(anchor,
+  '  await monitoredNative(() => runSurfaces({ context, options, capture, passed, summary, save }), "tab control surfaces");\n' +
   '  await monitoredNative(() => runDynamicPage({ context, options, host, capture, stage, passed, summary, save, out }), "dynamic DOM");\n' +
   '  await monitoredNative(() => runEndurance({ context, options, host, capture, stage, passed, summary, save }), "multitab endurance");\n' +
   '  if (process.env.YOUTUBE_QA === "1") await monitoredNative(() => runYouTube({ context, options, host, capture, stage, passed, summary, save }), "live YouTube");\n' + anchor);

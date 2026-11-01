@@ -245,3 +245,8 @@ progress {
 .grow {
   flex: 1 1 200px;
 }
+
+/* Persistent settings surfaces can be narrower than an ordinary tab. */
+.options main { min-width: 0; }
+.options .host { overflow-wrap: anywhere; }
+@media (max-width: 480px) { .options main { padding: 12px; } .options .grid { grid-template-columns: minmax(0, 1fr); } }

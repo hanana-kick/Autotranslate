@@ -48,6 +48,7 @@ namespace AT.popup {
   type StateReply = Reply & {
     tab: TabSummary | null;
     canTranslate: boolean;
+    tabEnabled: boolean;
     rule: AT.SiteRuleAction | null;
     state: TabState | null;
     local?: { status?: unknown; supported?: boolean } | null;
@@ -59,6 +60,7 @@ namespace AT.popup {
   const view = {
     tab: null as TabSummary | null,
     canTranslate: false,
+    tabEnabled: false,
     rule: null as AT.SiteRuleAction | null,
     tabState: null as TabState | null,
     local: null as { status?: unknown; supported?: boolean } | null,
@@ -88,7 +90,8 @@ namespace AT.popup {
   }
 
   function render(): void {
-    el('enabled').checked = view.settings!.enabled;
+    el('enabled').checked = view.tabEnabled;
+    el('enabled').disabled = !view.canTranslate;
     fillLanguages(view.settings!.targetLang);
     el('targetLang').disabled = !view.canTranslate;
     el('host').textContent = view.tab?.host ?? view.tab?.url ?? '';
@@ -96,7 +99,7 @@ namespace AT.popup {
       setStatus(AT.i18n.msg('popup_unavailable'), 'warn');
       return;
     }
-    if (!view.settings!.enabled) {
+    if (!view.tabEnabled) {
       setStatus(AT.i18n.msg('popup_disabled'), 'warn');
       return;
     }
@@ -141,22 +144,29 @@ namespace AT.popup {
   }
 
   async function refresh(): Promise<void> {
+    el('options').disabled = true;
     const [response, settings] = await Promise.all([
       AT.sendMessage({ type: C.MSG.GET_STATE }) as Promise<StateReply>,
       AT.settings.load()
     ]);
     if (!response?.ok) {
+      el('options').disabled = false;
       setStatus(response?.error ?? AT.i18n.msg('popup_unavailable'), 'error');
       return;
     }
     view.tab = response.tab;
     view.canTranslate = response.canTranslate;
+    view.tabEnabled = response.tabEnabled === true;
     view.rule = response.rule;
     view.tabState = response.state;
     view.local = response.local ?? null;
     view.settings = settings;
     render();
     renderLocal();
+    if (view.tab?.id != null) {
+      await AT.ui.preparePage('options.html', view.tab.id).catch(() => undefined);
+    }
+    el('options').disabled = false;
   }
 
   async function patchSettings(
@@ -180,17 +190,17 @@ namespace AT.popup {
   function wire(): void {
     el('enabled').addEventListener('change', async (event) => {
       const enabled = sourceOf<HTMLInputElement>(event).checked;
-      await patchSettings({ enabled });
-      // The switch is the whole policy, so it applies to this page at once:
-      // on translates it, off puts it back.
-      if (view.canTranslate) await send(enabled ? C.MSG.TRANSLATE_TAB : C.MSG.RESTORE_TAB);
+      if (!view.canTranslate || view.tab?.id == null) return;
+      el('enabled').disabled = true;
+      const reply = await send(C.MSG.SET_TAB_ENABLED, { enabled });
       await refresh();
+      if (!reply.ok) setStatus(reply.error ?? 'error', 'error');
     });
 
     el('targetLang').addEventListener('change', async (event) => {
       await patchSettings({ targetLang: sourceOf<HTMLSelectElement>(event).value });
-      const wasTranslated = view.tabState?.status === 'translated';
-      if (wasTranslated) await send(C.MSG.TRANSLATE_TAB);
+      // The background updates selected tabs; changing language never opts in
+      // this tab and must not issue a duplicate translate command.
       await refresh();
     });
 
@@ -198,11 +208,8 @@ namespace AT.popup {
       // A click here is a gesture, which is exactly what the side panel needs.
       // Without a model the onboarding page is the useful destination; a fully
       // set-up profile wants the settings page.
-      if (!view.settings?.localModelId) {
-        void AT.ui.openPage('welcome.html');
-        return;
-      }
-      void AT.api?.runtime.openOptionsPage();
+      void AT.ui.openPage('options.html', 'auto', view.tab?.id ?? null)
+        .catch((error) => setStatus(String(error?.message ?? error), 'error'));
     });
   }
 

@@ -1,6 +1,7 @@
 // Two real tabs share the packaged model. Fixture actions only mutate their own
 // DOM; all translation is performed by the installed extension and original SDK.
 import assert from 'node:assert/strict';
+import { setTabEnabledUI, tabIdFor } from './tab-control.mjs';
 import { createServer } from 'node:http';
 export async function runEndurance({ context, options, host, capture, stage, passed, summary, save }) {
   const rounds = Number(process.env.ENDURANCE_ROUNDS || 5);
@@ -13,11 +14,7 @@ export async function runEndurance({ context, options, host, capture, stage, pas
   const tabs = []; const records = [];
   const result = summary.endurance = { rounds, tabs: 2, passed: false, samples: [] };
   async function toggle(value) {
-    const before = await options.evaluate(() => AT.settings.load());
-    await options.reload();
-    await options.waitForFunction((s) => document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled, before);
-    await options.locator('#enabled').setChecked(value); await options.locator('#save').click();
-    await options.waitForFunction(async (v) => document.querySelector('#saveStatus').dataset.kind === 'ok' && (await AT.settings.load()).enabled === v, value);
+    for (const page of tabs) await setTabEnabledUI(options, await tabIdFor(options, page), value);
   }
   try {
     await stage('multi-tab-endurance'); await toggle(false);
@@ -26,8 +23,18 @@ export async function runEndurance({ context, options, host, capture, stage, pas
       await page.goto(`http://127.0.0.1:${server.address().port}/${index}`);
       records.push(await page.locator('#text').evaluateHandle((el) => ({ el, text: el.firstChild })));
     }
-    await toggle(true);
-    // Activate deferred unread tabs once; subsequent rounds remain concurrent.
+    // Explicitly enrolling tab A must not enroll the same-site tab B.
+    const idA = await tabIdFor(options, tabs[0]);
+    const idB = await tabIdFor(options, tabs[1]);
+    await tabs[1].bringToFront(); await tabs[1].waitForTimeout(500);
+    assert.equal(await tabs[1].locator('#text').innerText(), 'This document contains chapter zero.');
+    await setTabEnabledUI(options, idA, true);
+    await tabs[0].waitForFunction(() => /[가-힣]/u.test(document.querySelector('#text').textContent), null, {timeout:600000});
+    assert.equal(await tabs[1].locator('#text').innerText(), 'This document contains chapter zero.');
+    assert.equal((await options.evaluate(id => AT.sendMessage({type:AT.C.MSG.GET_STATE,tabId:id}),idB)).tabEnabled,false);
+    await setTabEnabledUI(options, idB, true);
+    await passed('explicit-tab-default-off-and-same-site-isolation', {tabA:idA,tabB:idB,unselectedTranslated:false});
+    // Both have now been explicitly selected; subsequent rounds stay concurrent.
     for (const page of tabs) {
       await page.bringToFront();
       await page.waitForFunction(() => /[가-힣]/u.test(document.querySelector('#text').textContent), null, { timeout: 600000 });
@@ -46,6 +53,12 @@ export async function runEndurance({ context, options, host, capture, stage, pas
       }
       result.samples.push({ round, ms: performance.now() - start, host: (await host(options)).status }); await save();
     }
+    await setTabEnabledUI(options, idA, false);
+    await tabs[0].waitForFunction(() => document.querySelector('#text').textContent === window.source);
+    await tabs[1].locator('#next').click();
+    await tabs[1].waitForFunction(() => /[가-힣]/u.test(document.querySelector('#text').textContent), null, {timeout:600000});
+    assert.equal((await options.evaluate(id => AT.sendMessage({type:AT.C.MSG.GET_STATE,tabId:id}),idB)).tabEnabled,true);
+    await passed('one-tab-off-does-not-disable-selected-peer',{peerRemainsSelected:true});
     await toggle(false);
     await Promise.all(tabs.map((p) => p.waitForFunction(() => document.querySelector('#text').textContent === window.source)));
     result.finalGenerations = (await host(options)).status.generations;

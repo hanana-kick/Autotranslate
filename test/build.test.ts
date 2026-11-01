@@ -242,7 +242,7 @@ test('only the chrome bundle asks for the permissions it can use', () => {
   );
 
   // The panel page itself is a chrome key; Firefox gets the tab fallback.
-  assert.equal(chrome.side_panel?.default_path, 'welcome.html', 'onboarding is what the panel shows');
+  assert.equal(chrome.side_panel?.default_path, 'options.html', 'the panel shows tab controls and model options');
   assert.equal('side_panel' in firefox, false, 'there is no side_panel key for firefox');
 });
 

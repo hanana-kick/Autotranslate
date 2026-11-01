@@ -45,7 +45,7 @@ namespace AT.options {
 
   // What the form holds: `version` comes from settings.save, and the limit
   // fields are still the input strings normalize() later coerces.
-  type FormValues = Omit<AT.settings.Settings, 'version' | 'maxNodes' | 'localMaxTokens'> & {
+  type FormValues = Omit<AT.settings.Settings, 'version' | 'enabled' | 'maxNodes' | 'localMaxTokens'> & {
     maxNodes: string;
     localMaxTokens: string;
   };
@@ -114,7 +114,6 @@ namespace AT.options {
   }
 
   function render(): void {
-    el('enabled').checked = settings!.enabled;
     el('showBadge').checked = settings!.showBadge;
     el('debug').checked = settings!.debug;
     el('targetLang').value = settings!.targetLang;
@@ -129,7 +128,6 @@ namespace AT.options {
 
   function collect(): FormValues {
     return {
-      enabled: el('enabled').checked,
       showBadge: el('showBadge').checked,
       debug: el('debug').checked,
       targetLang: el('targetLang').value,
@@ -459,6 +457,7 @@ namespace AT.options {
 
   document.addEventListener('DOMContentLoaded', async () => {
     AT.i18n.apply(document);
+    AT.ui.bindTabSwitch(el('enabled'), document.getElementById('tabHost')!, document.getElementById('tabStatus')!);
     buildSelects();
     settings = await AT.settings.load();
     el('modelUrl').value = AT.local.MODEL_SOURCES[0]?.url ?? '';
@@ -474,5 +473,6 @@ namespace AT.options {
     // empty defaults over the user's settings.
     wire();
     watchStorage();
+    document.body.dataset.ready = 'true';
   });
 }
