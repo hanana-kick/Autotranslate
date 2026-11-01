@@ -1,0 +1,81 @@
+name: Verify tab sender fix
+on:
+  push:
+    branches: [feat/explicit-tab-translation]
+    paths: [.github/workflows/tab-sender-prepare.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply exact reviewed sender fix
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';import fs from 'node:fs';
+          const path='src/background.ts';let source=fs.readFileSync(path,'utf8');
+          const before="      if (sender.tab && sender.tab.id !== tabId) throw new Error('cannot control a different tab');";
+          const after=`      // Extension UI pages can themselves be browser tabs. Trust the browser's
+                // sender URL, not a tab ID from the payload or the foreground window.
+                const sourcePage = typeof sender.url === 'string' ? sender.url.split(/[?#]/, 1)[0] : '';
+                const ownUI = ['popup.html', 'options.html', 'welcome.html'].some(page => sourcePage === AT.getURL(page));
+                if (sender.tab && sender.tab.id !== tabId && !ownUI) throw new Error('cannot control a different tab');`;
+          assert.equal(source.split(before).length,2);fs.writeFileSync(path,source.replace(before,after));
+          fs.appendFileSync('test/background.test.ts', `
+          test('source-bound extension UI may control its source from a distinct browser tab', async () => {
+           const {AT,send,browser}=environment({tab:{id:7,url:'https://example.com'}});
+           browser.runtime.getURL=(path:string)=>'chrome-extension://unit-extension/'+path;
+           for(const page of ['popup.html','options.html','welcome.html']) {
+             const sender={tab:{id:98},url:browser.runtime.getURL(page)+'?tabId=7#controls'};
+             const on=await send({type:AT.C.MSG.SET_TAB_ENABLED,tabId:7,enabled:true},sender);
+             assert.equal(on.ok,true,JSON.stringify(on));assert.equal((await AT.tabSelection.get(7)).enabled,true);
+             const off=await send({type:AT.C.MSG.SET_TAB_ENABLED,tabId:7,enabled:false},sender);
+             assert.equal(off.ok,true);assert.equal((await AT.tabSelection.get(7)).enabled,false);
+           }
+          });
+          test('lookalike web, foreign extension and content URLs cannot claim extension UI authority', async () => {
+           const {AT,send,browser}=environment({tab:{id:7,url:'https://example.com'}});
+           browser.runtime.getURL=(path:string)=>'chrome-extension://unit-extension/'+path;
+           for(const url of ['https://example.com/options.html?tabId=7',
+             'chrome-extension://foreign/options.html', 'chrome-extension://unit-extension.evil/options.html',
+             'chrome-extension://unit-extension/offscreen.html', 'chrome-extension://unit-extension/options.html.evil']) {
+             const reply=await send({type:AT.C.MSG.SET_TAB_ENABLED,tabId:7,enabled:true},{tab:{id:98},url});
+             assert.equal(reply.ok,false,url);assert.equal((await AT.tabSelection.get(7)).enabled,false);
+           }
+          });
+          `);
+          const workflow='.github/workflows/native-extension.yml';const y=fs.readFileSync(workflow,'utf8');const anchor="      - 'test/dynamic-extension/**'";
+          assert.equal(y.split(anchor).length,2);fs.writeFileSync(workflow,y.replace(anchor,anchor+"\n      - 'test/tab-control/**'"));
+          JS
+      - run: npm ci --no-audit --no-fund
+      - name: Type and sender contract validation
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/tab-sender
+          npm run typecheck 2>&1 | tee /tmp/tab-sender/typecheck.log
+          npx tsc -p tsconfig.json
+          node --test test/background.test.ts 2>&1 | tee /tmp/tab-sender/tests.log
+      - name: Export verified source without updating any branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';import fs from 'node:fs';import {createHash} from 'node:crypto';
+          const paths=['src/background.ts','test/background.test.ts','.github/workflows/native-extension.yml'];const entries=[],hashes={};
+          for(const path of paths){const b=fs.readFileSync(path);hashes[path]=createHash('sha256').update(b).digest('hex');
+          const r=await fetch(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/git/blobs`,{method:'POST',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},body:JSON.stringify({content:b.toString('base64'),encoding:'base64'})});assert.ok(r.ok);const result=await r.json();entries.push({path,mode:'100644',type:'blob',sha:result.sha});fs.mkdirSync('/tmp/tab-sender/source/'+path.slice(0,path.lastIndexOf('/')),{recursive:true});fs.writeFileSync('/tmp/tab-sender/source/'+path,b);}
+          fs.writeFileSync('/tmp/tab-sender/entries.json',JSON.stringify(entries,null,2));fs.writeFileSync('/tmp/tab-sender/hashes.json',JSON.stringify(hashes,null,2));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-tab-sender
+          path: /tmp/tab-sender/
+          retention-days: 3
