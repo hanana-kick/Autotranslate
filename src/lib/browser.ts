@@ -6,6 +6,8 @@ namespace AT {
     id?: number;
     url?: string;
     title?: string | null;
+    active?: boolean;
+    lastAccessed?: number;
   };
 
   /** A browser-owned channel gives long model preparation an explicit lifetime. */
@@ -40,6 +42,7 @@ namespace AT {
       addListener: (listener: (tabId: number, changeInfo: { status?: string }, tab: Tab) => void) => void;
     };
     onRemoved: { addListener: (listener: (tabId: number) => void) => void };
+    onActivated?: { addListener: (listener: (info: { tabId: number; windowId?: number }) => void) => void };
   };
 
   export type StorageApi = {

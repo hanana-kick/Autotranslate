@@ -114,8 +114,6 @@ namespace AT.dom {
       : { lead: '', core: text, trail: '' };
   }
 
-  const marker = (index: number) => `\uE000${index}\uE001`;
-
   /** Exact boundaries only. Missing, reordered, duplicated or empty segments
    *  are unsafe, particularly for links; the caller falls back to fragments. */
   export function splitRun(reply: string, count: number): string[] | null {
@@ -430,13 +428,15 @@ namespace AT.dom {
           if (items.length === 1) {
             await single(first);
           } else {
-            const key = keyFor('run-v2', items.map((item) => item.source));
+            const key = keyFor('run-numbered-v3', items.map((item) => item.source));
             let pieces = cached(key);
             if (!pieces) {
-              const marked = items.map((item, index) => (index ? marker(index) : '') + item.core).join('');
-              const reply = await ask([marked]);
+              // Use the engine's existing numbered-segment contract directly.
+              // Private-use markers were normally dropped, wasting one full
+              // generation before the same fragments were translated again.
+              const reply = await ask(items.map((item) => item.core));
               if (cancelled() || !items.every(owns)) continue;
-              pieces = splitRun(reply[0] ?? '', items.length);
+              pieces = reply.length === items.length && reply.every(Boolean) ? reply : null;
             }
             if (pieces) {
               // Validate the entire unit before writing any part of it.
