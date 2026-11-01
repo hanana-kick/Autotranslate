@@ -1,0 +1,31 @@
+name: Tab-control QA workspace
+on:
+  push:
+    branches: [feat/explicit-tab-control]
+    paths: [.github/workflows/tab-control-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund
+      - name: Export exact source and public test toolchain, without credentials
+        run: |
+          mkdir -p "$RUNNER_TEMP/tab-workspace"
+          git archive HEAD > "$RUNNER_TEMP/tab-workspace/source.tar"
+          git rev-parse HEAD > "$RUNNER_TEMP/tab-workspace/commit.txt"
+          tar -czf "$RUNNER_TEMP/tab-workspace/deps.tar.gz" node_modules
+          cp "$(command -v node)" "$RUNNER_TEMP/tab-workspace/node"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tab-control-workspace
+          path: ${{ runner.temp }}/tab-workspace/
+          retention-days: 2
