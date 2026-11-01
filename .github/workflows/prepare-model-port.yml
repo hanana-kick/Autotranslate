@@ -1,0 +1,225 @@
+name: Verify model preparation channel
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: [.github/workflows/prepare-model-port.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply scoped production candidate and its contract regressions
+        run: |
+          mkdir -p /tmp/model-port
+          node --input-type=module <<'JS'
+          import fs from 'node:fs'; import assert from 'node:assert/strict'; import {execFileSync} from 'node:child_process';
+          const p='src/lib/browser.ts', t='test/messages.test.ts';
+          const hash=p=>execFileSync('git',['hash-object',p],{encoding:'utf8'}).trim();
+          assert.equal(hash(p),'8cd766ad655cb15535a116e8b0a5899fbb1588ae');
+          assert.equal(hash(t),'22d5c93893e4cde8772bcaf5773651893d7331d1');
+          let s=fs.readFileSync(p,'utf8');
+          function before(anchor,value){assert.equal(s.split(anchor).length,2);s=s.replace(anchor,value+anchor);}
+          before('  export type RuntimeApi = {',`  /** A browser-owned channel gives long model preparation an explicit lifetime. */
+            export type RuntimePort = {
+              name: string;
+              postMessage: (message: unknown) => void;
+              disconnect: () => void;
+              error?: { message?: string };
+              sender?: Sender;
+              onMessage: { addListener: (listener: (message: unknown) => void) => void };
+              onDisconnect: { addListener: (listener: () => void) => void };
+            };
+          
+          `);
+          before('    onMessage: { addListener: (listener: MessageListener) => void };',`    connect?: (options: { name: string }) => RuntimePort;
+              onConnect?: { addListener: (listener: (port: RuntimePort) => void) => void };
+          `);
+          before('  export function onMessage(handlers: MessageHandlers): void {',`  const MODEL_PORT = 'autotranslate-model-prepare-v1';
+          
+          `);
+          before('    extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {',`    // Only the preparation owner claims this channel; other pages leave it alone.
+              if (Object.hasOwn(handlers, C.MSG.LOCAL_PREPARE)) {
+                extensionApi.runtime.onConnect?.addListener((port) => {
+                  if (port.name !== MODEL_PORT) return;
+                  let active = true, received = false;
+                  port.onDisconnect.addListener(() => { active = false; });
+                  port.onMessage.addListener((raw) => {
+                    if (received) return;
+                    received = true;
+                    const message = raw && typeof raw === 'object' ? raw as Message : undefined;
+                    const handler = message?.type === C.MSG.LOCAL_PREPARE ? handlers[C.MSG.LOCAL_PREPARE] : undefined;
+                    const reply: Promise<Response> = Promise.resolve().then(async () => {
+                      if (!handler) throw new Error('unknown model preparation command');
+                      return { ok: true, ...((await handler(message!, port.sender ?? {})) ?? {}) };
+                    }).catch((error: unknown) => {
+                      const failure = error as Rejection;
+                      return { ok: false, error: String(failure?.message ?? error), code: failure?.code ?? null };
+                    });
+                    void reply.then((response) => {
+                      if (!active) return;
+                      try { port.postMessage(response); } catch { /* The caller closed its page. */ }
+                    });
+                  });
+                });
+              }
+          `);
+          before('  export async function sendMessage(message: Message | null | undefined): Promise<Response> {',`  function prepareOverPort(message: Message): Promise<Response> {
+              return new Promise((resolve) => {
+                let settled = false;
+                let port: RuntimePort | undefined;
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                const finish = (response: Response): void => {
+                  if (settled) return;
+                  settled = true;
+                  if (timer) clearTimeout(timer);
+                  resolve(response);
+                  try { port?.disconnect(); } catch { /* Already disconnected. */ }
+                };
+                // Includes two bounded slow software initializations, never an infinite wait.
+                timer = setTimeout(() => finish({ ok: false, error: 'model preparation channel timed out', code: 'provider' }), 45 * 60 * 1000);
+                try {
+                  port = extensionApi.runtime.connect!({ name: MODEL_PORT });
+                  port.onMessage.addListener((response) => {
+                    if (!response || typeof response !== 'object' || typeof (response as Partial<Response>).ok !== 'boolean') {
+                      finish({ ok: false, error: 'invalid model preparation response', code: 'no-response' });
+                    } else finish(response as Response);
+                  });
+                  port.onDisconnect.addListener(() => finish({ ok: false,
+                    error: port?.error?.message ?? 'model preparation channel closed', code: 'no-response' }));
+                  port.postMessage(message);
+                } catch (error: unknown) {
+                  finish({ ok: false, error: String((error as Rejection)?.message ?? error), code: 'no-response' });
+                }
+              });
+            }
+          
+          `);
+          const anchor="    const type = message?.type ?? 'message';\n";
+          assert.equal(s.split(anchor).length,2);
+          s=s.replace(anchor,anchor+`    // The document-host preparation uses a native operation-scoped channel.
+              // Chrome offscreen and every other command retain ordinary messaging.
+              if (message && type === C.MSG.LOCAL_PREPARE && !supportsOffscreen() && extensionApi.runtime.connect) {
+                return prepareOverPort(message);
+              }
+          `);
+          fs.writeFileSync(p,s);
+          fs.appendFileSync(t,`
+          /** Paired ports model platform messaging; the original router owns replies. */
+          function installPorts(harness: Harness) {
+            type Peer = {
+              name: string; sender?: typeof SENDER; error?: { message: string }; closed: boolean;
+              postMessage: (message: unknown) => void; disconnect: () => void;
+              onMessage: { addListener: (listener: (message: unknown) => void) => void };
+              onDisconnect: { addListener: (listener: () => void) => void };
+            };
+            const listeners: ((port: Peer) => void)[] = [];
+            const connections: { client: Peer; server: Peer }[] = [];
+            const runtime = harness.api.runtime as Record<string, unknown>;
+            runtime.onConnect = { addListener: (listener: (port: Peer) => void) => listeners.push(listener) };
+            runtime.connect = ({ name }: { name: string }) => {
+              const messages: ((message: unknown) => void)[][] = [[], []];
+              const ends: (() => void)[][] = [[], []];
+              const pair: Peer[] = [0, 1].map((side) => ({
+                name, ...(side === 1 ? {sender: SENDER} : {}), closed: false,
+                onMessage: { addListener: (fn) => { messages[side]!.push(fn); } },
+                onDisconnect: { addListener: (fn) => { ends[side]!.push(fn); } },
+                postMessage(value) {
+                  if (this.closed) throw new Error('disconnected');
+                  queueMicrotask(() => { if (!this.closed) for (const fn of messages[1-side]!) fn(value); });
+                },
+                disconnect() {
+                  if (this.closed) return;
+                  for (const port of pair) port.closed = true;
+                  queueMicrotask(() => { for (const group of ends) for (const fn of group) fn(); });
+                }
+              }));
+              const [client, server] = pair as [Peer, Peer];
+              connections.push({ client, server });
+              for (const listener of listeners) listener(server);
+              return client;
+            };
+            return { connections, listeners };
+          }
+          test('Firefox preparation uses an operation-scoped native port and original handler', async () => {
+            const h=boot({sendMessage:()=>assert.fail('preparation should use its native channel')});
+            const ports=installPorts(h); let finish!: (value: unknown)=>void; let senderSeen:unknown;
+            h.AT.onMessage({[h.AT.C.MSG.LOCAL_PREPARE]:(message:Message,sender:unknown)=>{
+              assert.equal(message.modelId,'stored-original-model'); senderSeen=sender;
+              return new Promise(resolve=>{ finish=resolve; });
+            }});
+            const result=h.AT.sendMessage({type:h.AT.C.MSG.LOCAL_PREPARE,modelId:'stored-original-model'});
+            await flush(); assert.equal(ports.connections.length,1); assert.equal(ports.connections[0]!.client.closed,false);
+            assert.deepEqual(senderSeen,SENDER);
+            finish({status:{state:'ready',loadedBytes:3896377344}});
+            assert.deepEqual(await result,{ok:true,status:{state:'ready',loadedBytes:3896377344}});
+            assert.equal(ports.connections[0]!.client.closed,true);
+          });
+          test('model channel preserves genuine provider errors and closes after replying', async () => {
+            const h=boot({});const ports=installPorts(h);
+            h.AT.onMessage({[h.AT.C.MSG.LOCAL_PREPARE]:()=>{throw Object.assign(new Error('native graph failed'),{code:'provider'});}});
+            assert.deepEqual(await h.AT.sendMessage({type:h.AT.C.MSG.LOCAL_PREPARE}),{ok:false,error:'native graph failed',code:'provider'});
+            assert.ok(ports.connections[0]!.client.closed);
+          });
+          test('lost model channel fails without pretending the model became ready', async () => {
+            const h=boot({});const ports=installPorts(h);
+            h.AT.onMessage({[h.AT.C.MSG.LOCAL_PREPARE]:()=>new Promise(()=>{})});
+            const result=h.AT.sendMessage({type:h.AT.C.MSG.LOCAL_PREPARE});await flush();
+            ports.connections[0]!.server.disconnect();
+            assert.deepEqual(await result,{ok:false,error:'model preparation channel closed',code:'no-response'});
+          });
+          test('Chrome offscreen preparation keeps normal messaging, not the Firefox port', async () => {
+            const h=boot({sendMessage:()=>({ok:true,status:{state:'ready'}})});const ports=installPorts(h);
+            h.api.offscreen={createDocument:async()=>{},hasDocument:async()=>true};
+            assert.deepEqual(await h.AT.sendMessage({type:h.AT.C.MSG.LOCAL_PREPARE}),{ok:true,status:{state:'ready'}});
+            assert.equal(ports.connections.length,0);assert.equal(h.sent.length,1);
+          });
+          test('unrelated handlers do not claim model ports and status uses ordinary messages', async () => {
+            const h=boot({sendMessage:()=>({ok:true,state:'unloaded'})});const ports=installPorts(h);
+            h.AT.onMessage({'at/status':()=>({state:'unloaded'})});
+            assert.equal(ports.listeners.length,0);
+            assert.deepEqual(await h.AT.sendMessage({type:'at/status'}),{ok:true,state:'unloaded'});
+            assert.equal(ports.connections.length,0);
+          });
+          test('a missing port response has a finite deadline and closes its channel', async (t) => {
+            t.mock.timers.enable({apis:['setTimeout']});
+            const h=boot({});const ports=installPorts(h);
+            h.AT.onMessage({[h.AT.C.MSG.LOCAL_PREPARE]:()=>new Promise(()=>{})});
+            const result=h.AT.sendMessage({type:h.AT.C.MSG.LOCAL_PREPARE});await flush();
+            t.mock.timers.tick(45*60*1000);
+            assert.deepEqual(await result,{ok:false,error:'model preparation channel timed out',code:'provider'});
+            assert.ok(ports.connections[0]!.client.closed);
+          });
+          `);
+          JS
+          git diff -- src test > /tmp/model-port/change.patch
+      - run: npm ci --no-audit --no-fund
+      - name: Validate exact candidate
+        run: |
+          set -euo pipefail
+          npm run ci 2>&1 | tee /tmp/model-port/ci.log
+      - name: Export verified source blobs without updating the branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const root='https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+'/';
+          async function api(path,body){const r=await fetch(root+path,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});if(!r.ok)throw Error(path+': '+r.status);return r.json();}
+          const parent=process.env.GITHUB_SHA,base=await api('git/commits/'+parent),entries=[];
+          for(const path of ['src/lib/browser.ts','test/messages.test.ts']){const b=await api('git/blobs',{content:fs.readFileSync(path,'utf8'),encoding:'utf-8'});entries.push({path,mode:'100644',type:'blob',sha:b.sha});}
+          fs.writeFileSync('/tmp/model-port/blobs.json',JSON.stringify({parent,baseTree:base.tree.sha,entries},null,2));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verified-model-port
+          path: /tmp/model-port/
+          retention-days: 3
