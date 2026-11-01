@@ -22,7 +22,8 @@ permissions:
   contents: read
 concurrency:
   group: native-extension-${{ github.workflow }}-${{ github.ref }}-${{ inputs.backend || 'hardware' }}
-  cancel-in-progress: false
+  # Validate the newest PR revision; never cancel an in-flight main release.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   original-runtime:
     name: Original extension / ${{ inputs.backend || 'hardware' }} / fresh profile ${{ matrix.repetition }}

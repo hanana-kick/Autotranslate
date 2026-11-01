@@ -1,29 +1,54 @@
-// Extend the installed-package test driver, never the application or runtime.
-// Static, dynamic, endurance and requested live-site checks remain mandatory.
+// Extend only the test driver. The installed application and inference path are unchanged.
 import assert from 'node:assert/strict';
 import { readFile, writeFile, unlink } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-const anchor = '  assert.deepEqual(summary.errors, []); summary.fullTranslationRestorePassed = true;';
 let source = await readFile('test/native-extension/real-extension.mjs', 'utf8');
-assert.equal(source.split(anchor).length, 2, 'the original success gate must occur exactly once');
-source = source.replace("from './firefox-install.mjs'", "from './test/native-extension/firefox-install.mjs'");
-// Select an actual released browser binary, not a provider or capability double.
-// All extension installation and native inference assertions remain identical.
-if (process.env.CHROMIUM_BINARY) {
-  const launch = "channel: 'chromium'";
-  assert.equal(source.split(launch).length, 2, 'one Chromium launch configuration');
-  source = source.replace(launch, 'executablePath: process.env.CHROMIUM_BINARY');
-  const version = 'context.setDefaultTimeout(30000); summary.browser = context.browser().version();';
-  assert.ok(source.includes(version));
-  source = source.replace(version, version + '\n  summary.browserDistribution = "Chrome for Testing stable";\n  assert.equal(summary.browser, process.env.CHROMIUM_VERSION, "run the pinned released browser");');
+function replace(from, to) {
+  assert.equal(source.split(from).length, 2, 'one expected driver anchor: ' + from);
+  source = source.replace(from, to);
 }
+replace("from './firefox-install.mjs'", "from './test/native-extension/firefox-install.mjs'");
+if (process.env.CHROMIUM_BINARY) {
+  replace("channel: 'chromium'", 'executablePath: process.env.CHROMIUM_BINARY');
+  const version = 'context.setDefaultTimeout(30000); summary.browser = context.browser().version();';
+  replace(version, version + '\n  summary.browserDistribution = "Chrome for Testing stable";\n  assert.equal(summary.browser, process.env.CHROMIUM_VERSION, "run the pinned released browser");');
+}
+// A stopped renderer must not leave a failed test waiting in evidence cleanup.
+replace('  const session = await context.newCDPSession(p);', "  const session = await bound(context.newCDPSession(p), 10000, 'screenshot CDP attachment');");
+replace('  } finally { await session.detach().catch(() => {}); }', "  } finally { await bound(session.detach(), 3000, 'screenshot CDP detach').catch(() => {}); }");
 source = "import { runYouTube } from './test/native-extension/youtube.mjs';\nimport { runEndurance } from './test/native-extension/endurance.mjs';\nimport { runDynamicPage } from './test/dynamic-extension/dynamic-page.mjs';\n" + source;
-source = source.replace(anchor,
-  '  await runDynamicPage({ context, options, host, capture, stage, passed, summary, save, out });\n  await runEndurance({ context, options, host, capture, stage, passed, summary, save });\n  if (process.env.YOUTUBE_QA === "1") await runYouTube({ context, options, host, capture, stage, passed, summary, save });\n' + anchor);
+// Observe definitive host failure while fixtures wait for asynchronous DOM writes.
+// No errors are converted to passes. Two identical error reports avoid treating
+// the supervisor's brief recovery transition as a final failed operation.
+const monitor = `
+async function monitoredNative(job, label) {
+  let stopped = false;
+  const monitor = (async () => {
+    let lastError = null;
+    while (!stopped) {
+      await sleep(1000);
+      if (stopped) return;
+      const reply = await host(options);
+      if (!reply.ok) throw new Error(label + ': host unavailable: ' + (reply.error || 'no response'));
+      const status = reply.status;
+      const key = status?.state === 'error' ? JSON.stringify([status.reason, status.lastError, status.recoveries]) : null;
+      if (key && key === lastError) throw new Error(label + ': native host failed: ' + status.lastError);
+      lastError = key;
+    }
+  })();
+  try { return await Promise.race([job(), monitor]); }
+  finally { stopped = true; }
+}
+`;
+replace('async function host(p) {', monitor + '\nasync function host(p) {');
+const anchor = '  assert.deepEqual(summary.errors, []); summary.fullTranslationRestorePassed = true;';
+replace(anchor,
+  '  await monitoredNative(() => runDynamicPage({ context, options, host, capture, stage, passed, summary, save, out }), "dynamic DOM");\n' +
+  '  await monitoredNative(() => runEndurance({ context, options, host, capture, stage, passed, summary, save }), "multitab endurance");\n' +
+  '  if (process.env.YOUTUBE_QA === "1") await monitoredNative(() => runYouTube({ context, options, host, capture, stage, passed, summary, save }), "live YouTube");\n' + anchor);
 const failure = "    if (p && !p.isClosed()) { if (await p.locator('#modelToken').count()) await p.locator('#modelToken').fill('').catch(() => {}); await capture(p, name).catch(() => {}); }";
-assert.ok(source.includes(failure));
-source = source.replace(failure, `    if (p && !p.isClosed()) {
+replace(failure, `    if (p && !p.isClosed()) {
       try {
         const count = await bound(p.locator('#modelToken').count(), 3000, 'failure token field check');
         if (count) await bound(p.locator('#modelToken').fill(''), 3000, 'failure credential removal');
