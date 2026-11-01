@@ -94,3 +94,30 @@ test('install: unanswered persistence permission cannot block model installation
   assert.equal(env.selected(), 'new-model');
   assert.deepEqual(env.events, ['stage', 'prepare', 'select', 'cleanup']);
 });
+
+
+for (const outcome of ['recovered', 'still-missing', 'provider-failure', 'wake-failure']) {
+  test('install: idempotent prepare transport recovery is bounded: ' + outcome, async () => {
+    resetGlobals();
+    const AT = load('lib/constants.js', 'lib/local.js', 'lib/modelstore.js', 'lib/modelflow.js');
+    const calls: string[] = [];
+    AT.sendMessage = async (message: ATNamespace) => {
+      calls.push(message.type);
+      if (message.type === AT.C.MSG.LOCAL_GET_STATUS) {
+        return outcome === 'wake-failure'
+          ? { ok: false, code: 'no-response', error: 'host absent' }
+          : { ok: true, status: { state: 'unloaded' } };
+      }
+      assert.equal(message.modelId, 'exact-original-model');
+      if (outcome === 'provider-failure') return { ok: false, code: 'provider', error: 'native model failed' };
+      return calls.length === 1 || outcome === 'still-missing'
+        ? { ok: false, code: 'no-response', error: 'receiver absent' }
+        : { ok: true };
+    };
+    const result = await AT.modelflow.prepare('exact-original-model');
+    assert.equal(result.ok, outcome === 'recovered');
+    assert.deepEqual(calls, outcome === 'provider-failure' ? [AT.C.MSG.LOCAL_PREPARE]
+      : outcome === 'wake-failure' ? [AT.C.MSG.LOCAL_PREPARE, AT.C.MSG.LOCAL_GET_STATUS]
+      : [AT.C.MSG.LOCAL_PREPARE, AT.C.MSG.LOCAL_GET_STATUS, AT.C.MSG.LOCAL_PREPARE]);
+  });
+}

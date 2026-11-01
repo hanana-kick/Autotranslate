@@ -89,7 +89,15 @@ namespace AT.modelflow {
 
   /** Asks the host to load a model; only a successful load means it can translate. */
   export async function prepare(modelId: string): Promise<{ ok: boolean; error: string | null }> {
-    const reply = await AT.sendMessage({ type: C.MSG.LOCAL_PREPARE, modelId });
+    const message = { type: C.MSG.LOCAL_PREPARE, modelId };
+    let reply = await AT.sendMessage(message);
+    // Event-page startup can lose the first message after a long download.
+    // Only an idempotent prepare with a missing receiver may be retried, once,
+    // after a real host handshake. Never retry a model/provider failure here.
+    if (!reply.ok && reply.code === 'no-response') {
+      const awake = await AT.sendMessage({ type: C.MSG.LOCAL_GET_STATUS });
+      if (awake.ok) reply = await AT.sendMessage(message);
+    }
     if (reply?.ok) return { ok: true, error: null };
     return { ok: false, error: String(reply?.error ?? 'the model did not load') };
   }
