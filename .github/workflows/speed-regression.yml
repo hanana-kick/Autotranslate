@@ -1,0 +1,114 @@
+name: Native speed regression
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/translation-speed-20261101]
+    paths: ['src/**', 'test/**', 'package*.json', '.github/workflows/speed-regression.yml']
+permissions:
+  contents: read
+concurrency:
+  group: speed-regression-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  browser:
+    uses: ./.github/workflows/browser.yml
+  planner:
+    uses: ./.github/workflows/planner-audit.yml
+  native:
+    uses: ./.github/workflows/native-extension.yml
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  compare:
+    name: Same-machine 0.1.3 versus candidate / original model
+    runs-on: macos-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund && npm run build:chrome
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
+      - run: npx playwright install --with-deps chromium
+      - uses: ./.github/actions/released-chromium
+      - name: Original model and byte-verified released baseline
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/speed "$RUNNER_TEMP/speed-candidate"
+          cp -R build/chrome "$RUNNER_TEMP/speed-candidate/chrome"
+          cp dist/*-chrome.zip "$RUNNER_TEMP/speed-candidate/tested-extension.zip"
+          curl -fL --retry 3 https://github.com/hanana-kick/Autotranslate/releases/download/v0.1.3/autotranslate-0.1.3-chrome.zip -o "$RUNNER_TEMP/speed-baseline.zip"
+          echo "1d3bc155f64c5c8ff59ec708bca78926ecc5aab981a36da6b87c32eb64a69016  $RUNNER_TEMP/speed-baseline.zip" | shasum -a 256 -c -
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import { pipeline } from 'node:stream/promises';
+          import { Readable } from 'node:stream';
+          import { createHash } from 'node:crypto';
+          import assert from 'node:assert/strict';
+          const file=process.env.RUNNER_TEMP+'/translategemma-4b-it-int8-web.task';
+          const r=await fetch('https://huggingface.co/litert-community/TranslateGemma-4B-IT/resolve/main/translategemma-4b-it-int8-web.task',{headers:{Authorization:'Bearer '+process.env.HF_TOKEN}});
+          assert.ok(r.ok,'original model download HTTP '+r.status);
+          await pipeline(Readable.fromWeb(r.body),fs.createWriteStream(file));
+          assert.equal(fs.statSync(file).size,3896377344);
+          const hash=createHash('sha256');for await(const chunk of fs.createReadStream(file))hash.update(chunk);
+          fs.writeFileSync('test-results/speed/model-provenance.json',JSON.stringify({file:'translategemma-4b-it-int8-web.task',bytes:3896377344,sha256:hash.digest('hex'),sameFileForBothRuns:true,runtime:'@mediapipe/tasks-genai@0.10.30'},null,2));
+          fs.appendFileSync(process.env.GITHUB_ENV,'MODEL_FILE='+file+'\n');
+          JS
+      - name: Measure untouched v0.1.3 extension
+        env:
+          HEADED: '1'
+          SPEED_LABEL: baseline
+          NATIVE_QA_DIR: test-results/speed/baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build/chrome
+          mkdir -p build/chrome test-results/speed/baseline
+          unzip -q "$RUNNER_TEMP/speed-baseline.zip" -d build/chrome
+          shasum -a 256 "$RUNNER_TEMP/speed-baseline.zip" > test-results/speed/baseline/package-sha256.txt
+          cp build/chrome/manifest.json test-results/speed/baseline/manifest.json
+          node test/speed/run-native.mjs 2>&1 | tee test-results/speed/baseline/execution.log
+      - name: Measure actual candidate extension
+        env:
+          HEADED: '1'
+          SPEED_LABEL: candidate
+          NATIVE_QA_DIR: test-results/speed/candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf build/chrome
+          cp -R "$RUNNER_TEMP/speed-candidate/chrome" build/chrome
+          mkdir -p test-results/speed/candidate
+          cp "$RUNNER_TEMP/speed-candidate/tested-extension.zip" test-results/speed/candidate/tested-extension.zip
+          shasum -a 256 test-results/speed/candidate/tested-extension.zip > test-results/speed/candidate/package-sha256.txt
+          cp build/chrome/manifest.json test-results/speed/candidate/manifest.json
+          node test/speed/run-native.mjs 2>&1 | tee test-results/speed/candidate/execution.log
+      - name: Require functional preservation and measured improvements
+        run: node test/speed/compare.mjs
+      - name: Unchanged production and safe evidence
+        if: always()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- src scripts package.json package-lock.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import path from 'node:path';
+          const secret=process.env.HF_TOKEN||'';
+          function scan(dir){for(const item of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,item.name);if(item.isDirectory())scan(p);else if(/\.(json|txt|log|html)$/.test(p)){const t=fs.readFileSync(p,'utf8');if((secret&&t.includes(secret))||/hf_[A-Za-z0-9]{20,}/.test(t)){fs.rmSync(p);throw Error('Credential-bearing evidence refused');}}}}
+          scan('test-results/speed');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: native-speed-${{ github.run_id }}
+          path: test-results/speed/
+          retention-days: 14
+          if-no-files-found: error
