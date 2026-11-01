@@ -34,11 +34,13 @@ namespace AT.modelflow {
 
   /** Eviction would cost the user a 3.6 GiB download, so ask for an exemption. */
   export async function keepStorage(): Promise<void> {
-    try {
-      await AT.modelstore.requestPersistence();
-    } catch (error: unknown) {
+    // Firefox can leave this promise pending while a browser-owned permission
+    // panel awaits input. Persistence is optional: download quota is checked
+    // independently. Never make accepting an eviction exemption a prerequisite
+    // for downloading/importing the user's model. No permission is auto-granted.
+    void AT.modelstore.requestPersistence().catch((error: unknown) => {
       AT.warn('asking for persistent storage failed', String((error as { message?: unknown })?.message ?? error));
-    }
+    });
   }
 
   /**
@@ -55,22 +57,47 @@ namespace AT.modelflow {
     if (!result.ok || !result.record) {
       return { ok: false, stored: false, modelId: '', name, bytes, seconds, error: result.error ?? 'unknown', retired: [] };
     }
-    const prepared = await prepare(result.record.id);
-    return {
-      ok: prepared.ok,
-      stored: true,
-      modelId: result.record.id,
-      name: result.record.name,
-      bytes,
-      seconds,
-      error: prepared.ok ? null : (prepared.error ?? 'model-load-failed'),
-      retired: result.retired ?? []
+    const record = result.record;
+    const activate = async (): Promise<Outcome> => {
+      const previous = await AT.settings.load();
+      const prepared = await prepare(record.id);
+      const outcome: Outcome = {
+        ok: prepared.ok, stored: true, modelId: record.id, name: record.name,
+        bytes, seconds, error: prepared.ok ? null : (prepared.error ?? 'model-load-failed'), retired: []
+      };
+      if (!prepared.ok) return outcome;
+      try {
+        // Persist the selection before deleting anything. On a storage failure
+        // both files remain recoverable; a failed model never replaces the old one.
+        await AT.settings.save({ localModelId: record.id });
+      } catch (error: unknown) {
+        return { ...outcome, ok: false, error: String((error as Error)?.message ?? error) };
+      }
+      try {
+        outcome.retired = await AT.modelstore.retireReplaced(record.id, previous.localModelId);
+      } catch (error: unknown) {
+        // Cleanup may be retried later; the new, verified selection still works.
+        AT.warn('retiring the replaced model failed', error);
+      }
+      return outcome;
     };
+    // Options and onboarding can be open together. Serialize activation across
+    // extension documents, not just within one UI's single-flight button.
+    const locks = globalThis.navigator?.locks;
+    return locks ? locks.request('autotranslate-model-activation', activate) : activate();
   }
 
   /** Asks the host to load a model; only a successful load means it can translate. */
   export async function prepare(modelId: string): Promise<{ ok: boolean; error: string | null }> {
-    const reply = await AT.sendMessage({ type: C.MSG.LOCAL_PREPARE, modelId });
+    const message = { type: C.MSG.LOCAL_PREPARE, modelId };
+    let reply = await AT.sendMessage(message);
+    // Event-page startup can lose the first message after a long download.
+    // Only an idempotent prepare with a missing receiver may be retried, once,
+    // after a real host handshake. Never retry a model/provider failure here.
+    if (!reply.ok && reply.code === 'no-response') {
+      const awake = await AT.sendMessage({ type: C.MSG.LOCAL_GET_STATUS });
+      if (awake.ok) reply = await AT.sendMessage(message);
+    }
     if (reply?.ok) return { ok: true, error: null };
     return { ok: false, error: String(reply?.error ?? 'the model did not load') };
   }
@@ -101,9 +128,10 @@ namespace AT.modelflow {
     return settle(result, started);
   }
 
-  /** The model the user already has, if any; the newest one wins. */
+  /** Prefer the active selection over a newer, potentially failed staged file. */
   export async function installed(): Promise<AT.local.ModelRecord | null> {
     const models = await AT.modelstore.list();
-    return models[0] ?? null;
+    const settings = await AT.settings.load();
+    return models.find((model) => model.id === settings.localModelId) ?? models[0] ?? null;
   }
 }

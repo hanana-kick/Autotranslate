@@ -103,7 +103,8 @@ test('the content snapshot carries only what a page needs', () => {
     'maxNodes',
     'showBadge',
     'sourceLang',
-    'targetLang'
+    'targetLang',
+    'translationKey'
   ]);
   assert.equal(snapshot.maxNodes, 400);
 });

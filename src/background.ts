@@ -33,6 +33,7 @@ namespace AT.background {
     texts?: unknown[];
     sourceLang?: string;
     targetLang?: string;
+    translationKey?: string;
     /** What the content script read off the page, if the module is there. */
     context?: unknown;
     /** Which region of the page the batch came from. */
@@ -145,6 +146,7 @@ if (typeof self.importScripts === 'function') {
 
   const tabStates = new Map<number, AT.background.TabState>();
   let settingsCache: AT.settings.Settings | null = null;
+  let policyEpoch = 0;
 
   // The on-device model needs a document: a service worker is stopped after
   // seconds of quiet and cannot hold WebAssembly plus WebGPU. Chrome gets one
@@ -171,8 +173,13 @@ if (typeof self.importScripts === 'function') {
 
   async function getSettings({ force = false }: { force?: boolean } = {}): Promise<AT.settings.Settings> {
     if (force || !settingsCache) {
-      settingsCache = await AT.settings.load();
-      AT.debug = settingsCache.debug;
+      const revision = policyEpoch;
+      const loaded = await AT.settings.load();
+      // A storage event is newer than a read which started before that event.
+      // Never let a delayed old read replace an authoritative enabled/target edit.
+      if (revision !== policyEpoch) return getSettings();
+      settingsCache = loaded;
+      AT.debug = loaded.debug;
     }
     return settingsCache;
   }
@@ -234,9 +241,10 @@ if (typeof self.importScripts === 'function') {
 
   async function translateTab(
     tabId?: number,
-    { force = false, decision }: { force?: boolean; decision?: AT.background.Plan } = {}
+    { force = false, decision, revision, policy }: { force?: boolean; decision?: AT.background.Plan;
+      revision?: number; policy?: AT.settings.Settings } = {}
   ): Promise<AT.MessageResult> {
-    const settings = await getSettings();
+    const settings = policy ?? await getSettings();
     const tab = await activeTab(tabId);
     if (!tab?.id) throw new Error('no active tab');
     if (!isInjectable(tab.url)) throw new Error('this page cannot be translated');
@@ -247,6 +255,7 @@ if (typeof self.importScripts === 'function') {
       return { status: 'skipped', reason: plan.reason };
     }
     await ensureInjected(tab.id);
+    if (revision !== undefined && revision !== policyEpoch) return { status: 'cancelled' };
     // The model answers after the whole pass; without this the popup reads
     // `state: null` and says "not translated yet" while the page is working.
     const pending = stateFor(tab.id);
@@ -254,6 +263,7 @@ if (typeof self.importScripts === 'function') {
     pending.targetLang = settings.targetLang;
     pending.error = null;
     await updateBadge(tab.id);
+    if (revision !== undefined && revision !== policyEpoch) return { status: 'cancelled' };
     let response: AT.background.ContentReply | undefined;
     try {
       response = (await api.tabs.sendMessage(tab.id, {
@@ -275,6 +285,9 @@ if (typeof self.importScripts === 'function') {
       state.error = response?.error ?? 'the content script did not answer';
       await updateBadge(tab.id);
       throw new Error(state.error);
+    }
+    if (response.status === 'cancelled' || (revision !== undefined && revision !== policyEpoch)) {
+      return { status: 'cancelled' };
     }
     const state = stateFor(tab.id);
     state.status = response.status === 'translated' ? 'translated' : 'idle';
@@ -320,6 +333,9 @@ if (typeof self.importScripts === 'function') {
     // The switch is the policy: a page that was translated before it went off
     // must not keep spending generations on new text.
     if (!settings.enabled) throw new Error('translation is turned off');
+    if (message.translationKey && message.translationKey !== AT.settings.contentSnapshot(settings).translationKey) {
+      throw new Error('obsolete translation settings');
+    }
     const request: AT.engines.TranslateRequest = {
       texts: message.texts ?? [],
       source: message.sourceLang ?? settings.sourceLang,
@@ -609,44 +625,58 @@ if (typeof self.importScripts === 'function') {
    * switch and the target language are the two controls a user expects to apply
    * to the page in front of them, wherever they were changed from.
    */
-  async function retargetTabs(settings: AT.settings.Settings, previous: AT.settings.Settings): Promise<void> {
-    if (previous.enabled === settings.enabled && previous.targetLang === settings.targetLang) return;
-    const snapshot = AT.settings.contentSnapshot(settings);
-    const tabs = [...tabStates.keys()];
-    for (const id of tabs) {
+  async function retargetTabs(settings: AT.settings.Settings, previous: AT.settings.Settings, revision: number): Promise<void> {
+    const current = AT.settings.contentSnapshot(settings);
+    const before = AT.settings.contentSnapshot(previous);
+    if (settings.enabled === previous.enabled && current.translationKey === before.translationKey &&
+        settings.maxNodes === previous.maxNodes && JSON.stringify(settings.siteRules) === JSON.stringify(previous.siteRules)) return;
+    // A service-worker restart loses tabStates. The browser, not that cache,
+    // owns the list of open documents that must receive policy changes.
+    const tabs = await api.tabs.query({});
+    if (revision !== policyEpoch) return;
+    await Promise.all(tabs.map(async (tab) => {
+      if (tab?.id == null || !isInjectable(tab.url) || revision !== policyEpoch) return;
+      const id = tab.id;
       try {
-        if (!settings.enabled) {
+        const decision = decide(tab.url, settings);
+        if (decision.action === 'skip') {
           await api.tabs.sendMessage(id, { type: C.MSG.CONTENT_RESTORE });
+          if (revision === policyEpoch) tabStates.delete(id);
         } else {
-          await api.tabs.sendMessage(id, {
-            type: C.MSG.CONTENT_TRANSLATE,
-            decision: { action: 'translate', reason: 'settings' },
-            settings: snapshot
-          });
+          await translateTab(id, { decision, revision, policy: settings });
         }
       } catch {
         // A tab without a listener has nothing to restore.
-        tabStates.delete(id);
+        if (revision === policyEpoch) tabStates.delete(id);
       }
-    }
-    await Promise.all(tabs.map((id) => updateBadge(id)));
+      if (revision === policyEpoch) await updateBadge(id);
+    }));
   }
 
   // A context with storage always has onChanged; the plain-JS version relied on
   // the same guarantee, so the assertion keeps a missing member a TypeError.
   api.storage.onChanged!.addListener((changes, area) => {
     if (area !== 'local' || !changes[C.STORAGE_KEY]) return;
+    const revision = ++policyEpoch;
     const edited = changes[C.STORAGE_KEY];
     const previous = edited?.oldValue ? AT.settings.normalize(edited.oldValue) : null;
-    settingsCache = null;
-    void getSettings()
-      .then(async (settings) => {
+    // onChanged supplies the committed snapshot. Reading storage again here can
+    // race unrelated tab reads and silently cancel a rapid OFF -> ON transition.
+    settingsCache = edited?.newValue ? AT.settings.normalize(edited.newValue) : null;
+    const committed = settingsCache;
+    const next = committed ? Promise.resolve(committed) : getSettings();
+    void next.then(async (settings) => {
+        if (revision !== policyEpoch) return;
         // Whatever was resident was loaded for the model the user had chosen;
         // keeping it after they picked another one would translate with a model
         // nobody selected. A model prepared from the options page stays warm
         // while the user translates elsewhere.
-        if (localKey !== null && localKey !== settings.localModelId) await releaseLocal();
-        if (previous) await retargetTabs(settings, previous);
+        // Broadcast cancellation/retargeting immediately; unloading may wait for
+        // native inference, and must not hold every page's controls behind it.
+        await Promise.all([
+          previous ? retargetTabs(settings, previous, revision) : Promise.resolve(),
+          localKey !== null && localKey !== settings.localModelId ? releaseLocal() : Promise.resolve()
+        ]);
       })
       .catch((error) => AT.warn('applying a settings change failed', error));
   });

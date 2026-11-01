@@ -127,16 +127,15 @@ test('splitWhitespace keeps the layout apart from the content', () => {
 test('a sentence split by inline elements is translated as one sentence', async () => {
   const strong = el('strong', {}, [t('5 items')]);
   const paragraph = el('p', {}, [t('Total '), strong, t(' left')]);
-  // A provider that translates the whole sentence: the answer is spread back
-  // over the three nodes by their share of the source, at word boundaries.
+  // A provider preserves explicit segment identities, not length proportions.
   const { calls, translator, body } = harness(el('div', {}, [paragraph]), (texts) =>
-    texts.map(() => '합계 5개 항목 남음')
+    texts.map(() => '합계\uE0001\uE0015개 항목\uE0002\uE001남음')
   );
 
   const result = await translator.translateRoot(body);
 
   assert.equal(calls.length, 1, 'one batch');
-  assert.deepEqual(calls[0], ['Total 5 items left'], 'the run goes out as one plain sentence');
+  assert.deepEqual(calls[0], ['Total\uE0001\uE0015 items\uE0002\uE001left'], 'the run carries verifiable boundaries');
   assert.deepEqual(
     textNodes(paragraph).map((node) => node.nodeValue),
     ['합계 ', '5개 항목', ' 남음'],
@@ -147,16 +146,14 @@ test('a sentence split by inline elements is translated as one sentence', async 
   assert.equal(translator.stats().translated, 3);
 });
 
-test('a translation shorter than the run still fills every node', async () => {
+test('an unaligned short answer falls back without clearing an element', async () => {
   const paragraph = el('p', {}, [t('left side '), el('em', {}, [t('middle')]), t(' right side')]);
-  const { translator, body } = harness(el('div', {}, [paragraph]), (texts) => texts.map(() => '짧은 답'));
+  const dictionary: Record<string, string> = { 'left side': '왼쪽', middle: '가운데', 'right side': '오른쪽' };
+  const { translator, body, calls } = harness(el('div', {}, [paragraph]), (texts) => texts.map((value) => dictionary[value] ?? '짧은 답'));
   await translator.translateRoot(body);
-  assert.deepEqual(
-    textNodes(paragraph).map((node) => node.nodeValue),
-    ['짧은 ', '답', ''],
-    'no node keeps stale source text, and nothing is invented'
-  );
-  assert.equal(textContent(paragraph), '짧은 답');
+  assert.equal(calls.length, 4, 'an unaligned run is retried per fragment');
+  assert.deepEqual(textNodes(paragraph).map((node) => node.nodeValue), ['왼쪽 ', '가운데', ' 오른쪽']);
+  assert.equal(textContent(paragraph), '왼쪽 가운데 오른쪽');
 });
 
 test('a block element or a line break ends a run', async () => {
@@ -172,14 +169,14 @@ test('a block element or a line break ends a run', async () => {
   assert.equal(textContent(second), 'OTHER PARAGRAPH');
 });
 
-test('an ignored inline element drops out but does not break the sentence', async () => {
+test('an ignored inline element is a protected boundary', async () => {
   const code = el('code', {}, [t('npm test')]);
   const paragraph = el('p', {}, [t('Run '), code, t(' now')]);
   const { calls, translator, body } = harness(el('div', {}, [paragraph]), upcase);
 
   await translator.translateRoot(body);
 
-  assert.equal(calls[0]!.length, 1, 'the sentence stays one run around the code');
+  assert.deepEqual(calls, [['Run'], ['now']], 'do not merge around omitted code');
   assert.ok(!calls[0]![0]!.includes('npm test'), 'the code text is never sent');
   assert.equal(textContent(code), 'npm test', 'code is untouched');
   assert.equal(textContent(paragraph), 'RUN npm test NOW');

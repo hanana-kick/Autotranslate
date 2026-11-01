@@ -28,17 +28,12 @@ namespace AT.modelstore {
     persist(): Promise<boolean>;
   };
 
-  /** The response members a download reads; `fetch` is compatible with it. */
-  export type StreamResponse = {
-    ok: boolean;
-    status: number;
-    headers: { get(name: string): string | null };
-    body: { read: () => Promise<{ done: boolean; value?: Uint8Array }> } | null;
-  };
+  /** Use the platform contract: Response.body is a stream, not a reader. */
+  export type StreamResponse = Pick<InstanceType<typeof globalThis.Response>, 'ok' | 'status' | 'headers' | 'body'>;
 
   export type StreamFetch = (
     url: string,
-    init: { headers: Record<string, string>; signal?: AbortSignal | undefined }
+    init: RequestInit
   ) => Promise<StreamResponse>;
 
   type Deps = {
@@ -85,13 +80,6 @@ namespace AT.modelstore {
     });
   }
 
-  function ask<T>(request: IDBRequest<T>): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error ?? new Error('model store failure'));
-    });
-  }
-
   /** The real driver: one object store per purpose, keys are ids. */
   export function indexedDbDriver(): Driver {
     const withStore = (
@@ -99,7 +87,17 @@ namespace AT.modelstore {
       mode: IDBTransactionMode,
       body: (objectStore: IDBObjectStore) => IDBRequest<unknown>
     ): Promise<unknown> =>
-      openDatabase().then((db) => ask(body(db.transaction(store, mode).objectStore(store))));
+      openDatabase().then((db) => new Promise((resolve, reject) => {
+        const transaction = db.transaction(store, mode);
+        const request = body(transaction.objectStore(store));
+        let result: unknown;
+        request.onsuccess = () => { result = request.result; };
+        // Request success is not transaction commit. A later quota/abort error
+        // must not activate a model whose metadata was never persisted.
+        transaction.oncomplete = () => resolve(result);
+        transaction.onabort = transaction.onerror = () => reject(transaction.error ?? new Error('model store transaction failed'));
+        request.onerror = () => reject(request.error ?? new Error('model store request failed'));
+      }));
     return {
       get: (store, key) => withStore(store, 'readonly', (os) => os.get(key) as IDBRequest<unknown>),
       put: (store, key, value) =>
@@ -150,17 +148,18 @@ namespace AT.modelstore {
             if (written > L.MAX_MODEL_BYTES) throw new Error('model-too-large');
             await writable.write(chunk.value as unknown as BufferSource);
           }
+          await writable.close();
         } catch (error: unknown) {
+          await reader.cancel(error).catch(() => {});
           try {
             await writable.abort?.(error as Error);
           } catch {
             // An already-dead stream cannot be aborted; the throw below stands.
           }
           throw error;
+        } finally {
+          reader.releaseLock();
         }
-        // `close()` is where OPFS commits the swap file: a failure here means
-        // nothing was stored, so it must reach `ingest` and clean up.
-        await writable.close();
         return written;
       },
       async read(id) {
@@ -326,8 +325,8 @@ namespace AT.modelstore {
       await files().remove(id);
       return { ok: false, record: null, error: bytes < L.MIN_MODEL_BYTES ? 'too-small' : 'invalid-record', bytes };
     }
-    // Registration is the last step, and it retires the copy this one replaces,
-    // so a failed transfer above can never touch a working model.
+    // Staging never deletes a working copy. Activation and retirement happen
+    // only after modelflow has verified inference and saved the new selection.
     try {
       await putRecord(record);
     } catch (error: unknown) {
@@ -336,19 +335,17 @@ namespace AT.modelstore {
       await files().remove(id);
       return { ok: false, record: null, error: 'store-failed', bytes };
     }
-    const retired = await replaceExisting(record).catch((error: unknown) => {
-      AT.warn('retiring the replaced model failed', error);
-      return [] as string[];
-    });
-    return { ok: true, record, error: null, bytes, retired };
+    return { ok: true, record, error: null, bytes, retired: [] };
   }
 
-  /** Deletes previous copies of the same file; answers the ids it retired. */
-  async function replaceExisting(record: ModelRecord): Promise<string[]> {
+  /** Called only after a verified model has become the persisted selection. */
+  export async function retireReplaced(modelId: string, previousId: string): Promise<string[]> {
+    const record = await get(modelId);
+    if (!record) throw new Error('the verified model is no longer stored');
     const records = await list();
     const retired: string[] = [];
     for (const existing of records) {
-      if (existing.name === record.name && existing.id !== record.id && (await remove(existing.id))) {
+      if (existing.id === previousId && existing.name === record.name && existing.id !== record.id && (await remove(existing.id))) {
         retired.push(existing.id);
       }
     }
@@ -368,7 +365,7 @@ namespace AT.modelstore {
   export async function download(request: DownloadRequest): Promise<IngestResult> {
     const url = L.normalizeDownloadUrl(request.url);
     if (!url) return { ok: false, record: null, error: 'bad-url', bytes: 0 };
-    const doFetch = deps.fetchImpl ?? (globalThis.fetch as unknown as StreamFetch | undefined);
+    const doFetch: StreamFetch | undefined = deps.fetchImpl ?? globalThis.fetch?.bind(globalThis);
     if (typeof doFetch !== 'function') return { ok: false, record: null, error: 'no-fetch', bytes: 0 };
 
     const headers: Record<string, string> = { Accept: 'application/octet-stream' };
@@ -381,7 +378,7 @@ namespace AT.modelstore {
 
     let response: StreamResponse;
     try {
-      response = await doFetch(url, { headers, signal: request.signal });
+      response = await doFetch(url, { headers, signal: request.signal ?? null });
     } catch (error: unknown) {
       const rejection = error as { name?: string; message?: string };
       return {
@@ -409,16 +406,7 @@ namespace AT.modelstore {
 
     let lastReport = 0;
     const stream = countingStream(
-      new ReadableStream<Uint8Array>({
-        async pull(controller) {
-          const chunk = await (response.body as NonNullable<StreamResponse['body']>).read();
-          if (chunk.done) {
-            controller.close();
-            return;
-          }
-          controller.enqueue(chunk.value as Uint8Array);
-        }
-      }),
+      response.body,
       (received) => {
         const now = deps.now();
         if (now - lastReport < L.DOWNLOAD_PROGRESS_INTERVAL_MS && !(total !== null && received >= total)) return;
@@ -457,7 +445,7 @@ namespace AT.modelstore {
       lastReport = now;
       options.onProgress?.(received, total);
     });
-    const result = await ingest({ name, sourceUrl: 'file://local', stream });
+    const result = await ingest({ name, sourceUrl: 'file://local', stream, expectedBytes: total ?? undefined });
     return result;
   }
 

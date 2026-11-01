@@ -10,6 +10,15 @@ is **on-device only**: a quantised TranslateGemma model, run by the background c
 page text ever leaves the browser and there is no endpoint, no API key and no account to set
 up (see [On-device translation](#on-device-translation)).
 
+## Correctness and validation
+
+See [the validation contract](docs/testing.md) for automated coverage and its limits.
+Page sessions now invalidate late results, compare source text before writing, and
+track completion separately from restore records. Inline text uses validated
+markers or a per-node fallback, never proportional word redistribution. Models
+are staged, successfully loaded and selected before the previous active file is
+retired. The browser regression gate must pass before the Release job publishes.
+
 ## Requirements
 
 | Requirement | Minimum | Why |
@@ -17,7 +26,7 @@ up (see [On-device translation](#on-device-translation)).
 | Chrome | 121 | MV3 + the `background.scripts` fallback key must be ignored, not rejected |
 | Firefox | 121 | MV3 `scripting` API and `background.scripts` alongside `service_worker` |
 | Node | 24 | runs `tsc` and executes the `test/*.ts` suites directly (type stripping) |
-| WebGPU-capable GPU | — | only for the on-device engine: the 4B model is loaded onto the GPU |
+| WebGPU-capable GPU | — | the current host requires an adapter; this check alone does not prove the selected inference backend |
 
 ## Quick start
 
@@ -180,7 +189,7 @@ sequenceDiagram
 ```
 
 Decisions live in the background (`decide()` in `background.ts`); the content script only
-compares the declared page language with the target language when asked to `detect`.
+obeys the switch and per-site rules; source-language detection happens at the engine boundary.
 Content scripts are never declared in the manifest — they are injected on demand, so
 untouched pages pay nothing.
 
@@ -188,7 +197,7 @@ untouched pages pay nothing.
 
 `AT.dom.createTranslator` writes **only `Text.nodeValue`**. It never creates, removes,
 re-parents or re-attributes an element, so the CSS cascade, classes, inline styles, event
-listeners, focus, and every layout box are exactly what the page authored. Originals are
+listeners and authored element attributes remain intact. Text length can still change layout and wrapping. Originals are
 kept in a `Map<Text, {source, text, applied}>` in memory — never as DOM attributes — which
 is what makes byte-exact `restore()` and "did the page rewrite this node since we touched
 it" both possible.
@@ -202,7 +211,7 @@ Around that, three rules decide what leaves the page and where the answer lands:
   split by `<strong>`, `<a>`, `<em>` — are sent as **one** string with private-use markers
   (`\uE000{n}\uE001`) at the boundaries, so the model can re-order the sentence the way
   the target language needs. A run never crosses a block element or a `<br>`, and an
-  ignored inline element (`<code>`, `pre`, …) drops out of the sentence without breaking it.
+  ignored inline element (`<code>`, `pre`, …) ends the run so protected content is never silently omitted from its middle.
   Set `mergeInline: false` to send every text node separately.
 - **Markers are verified, never guessed.** A merged answer is accepted only when every
   marker returns, in order, with content on both sides. Otherwise that run alone is retried
@@ -314,7 +323,7 @@ shape of a pass on real sites:
 
 | Failure | What the script does now |
 | --- | --- |
-| A single-page app reports `complete` with an empty body and `lang="ko-KR"`; judging then says "already Korean" and nothing ever translates | an empty page is not judged: the pass answers `waiting-for-content` and re-checks at 0.4 s, 1.2 s, 3 s and 6 s, translating as soon as there is something to read |
+| Content arrives after the initial page load, including while inference is running | the observer starts before the first translation request and queues inserted or edited regions for a later pass |
 | A page that mutates faster than the debounce (video progress, ads, live counters) pushed the pending tick back forever | a mutation inside the window keeps the scheduled tick and marks another one due, so the pass runs |
 | A page that rewrote a translated node's text in place put the source back, and the node was then skipped because its answer was already cached | the cache answers the write as well as the request: the node is translated again without asking the model |
 | Every mutation meant reading the whole body again — thousands of nodes, several times a second, on a feed | the observer reads its own records: an inserted subtree or an edited text node is the region the tick visits. Removals, ignored regions (`contenteditable`, `translate="no"`) and the script's own write-back are dropped before they can schedule anything, and a tick that is already running only leaves a note for the next one instead of starting a second pass |
@@ -421,8 +430,8 @@ repository, which needs a token; the token is kept in the model store rather tha
 settings blob, so it never travels with a settings snapshot. A model becomes visible only
 after its whole stream is written and the byte count matches what the transfer promised: a
 short write is deleted and reported (`truncated`, `too-small`), and the copy it replaces is
-retired *after* the new one validates, so an interrupted download cannot destroy a working
-model. Removing a model in Options deletes the bytes as well as the record, and the usage
+retired only after the new one successfully loads, warms up and becomes the persisted
+selection. A failed download, warmup or settings write leaves the old file recoverable. Removing a model in Options deletes the bytes as well as the record, and the usage
 line reports what the origin has used of its quota.
 
 Options asks the browser to pin that storage before a transfer starts; if the browser
@@ -450,7 +459,7 @@ installs) is what the popup line and the Options status read.
 
 **Budgets.** The model is sized by the tokens one generation may spend, so texts are packed to
 `localMaxTokens` (128–8192, default 1024) counting input *and* expected output, and a text too
-long to ever fit travels alone rather than being dropped. Several texts go out as one numbered
+long to fit even alone is refused explicitly with `context-overflow`, retaining the original text. Several texts go out as one numbered
 prompt; if the reply cannot be split back reliably, that chunk is re-run one text per
 generation.
 
@@ -473,6 +482,8 @@ checked* rather than pretending it is equally good (`AT.local.isVerifiedPair`).
 **Offline by construction.** There is no fallback to configure: `AT.engines` has one
 implementation, and a failed generation is reported as a failure. Nothing in the extension
 opens a network connection for translation.
+
+**Historical performance measurements, before the correctness hardening below; not revalidated by CI.**
 
 Measured on one Apple-silicon machine, Chromium, TranslateGemma 4B IT int8
 (3,896,377,344 bytes), cold profile unless noted, with the prompt and language
@@ -558,8 +569,7 @@ the extension caps it at 8192, of which the page context spends at most 12.
 page drops the model and the next translation reloads it. WebGPU is also younger there than
 in Chrome: when `navigator.gpu` is missing or has no adapter the host answers `no-webgpu`
 with the `config` code and both UI surfaces say the browser cannot run the model — before a
-user spends 3.6 GiB on it, because the status probe runs when Options opens. The cloud
-engines are unaffected either way.
+user spends 3.6 GiB on it, because the status probe runs when Options opens. There is no cloud fallback.
 
 ## Sample page
 
@@ -619,7 +629,7 @@ path prefix length. A tie resolves to `never`, so `example.com → always` plus
   `contenteditable` regions are never rewritten.
 - Attributes (`placeholder`, `alt`, `title`, `aria-*`) are not translated: they are the
   page's own text, and replacing them is a different risk profile than replacing a text node.
-- Per page: at most `maxNodes` text nodes (default 600); one generation is bounded by
+- Per pass: at most `maxNodes` text nodes (default 600); remaining nodes schedule another pass independently of cache hits or request count. One generation is bounded by
   `localMaxTokens` instead of a character budget.
 - Merged runs are only merged when the whole run is being translated in that pass; a
   partial (observer-driven) pass sends its nodes separately, which costs word order but
@@ -627,7 +637,7 @@ path prefix length. A tie resolves to `never`, so `example.com → always` plus
 - The on-device engine runs only on bytes the user supplied: 3.6 GiB for TranslateGemma 4B
   int8, held on disk until they delete it in Options. Nothing in the repository or the
   archives is a model.
-- On-device generations are serial — one sentence at a time per browser, other tabs queue —
+- On-device generations are serial — one request at a time per browser, other tabs queue —
   and the model is released ten minutes after the last page needed it.
 
 ## CI and releases
@@ -653,3 +663,5 @@ just refreshes the download so it always matches `main`. `git push` is the only
 step. The notes carry the commit and the workflow run, and the archives say how to
 load them: unpacked for Chrome, temporary add-on (or `web-ext` signing) for
 Firefox.
+
+Browser integration automation and its explicit real-model/Firefox limitations are documented in [docs/testing.md](docs/testing.md).

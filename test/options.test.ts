@@ -391,16 +391,17 @@ function fakeModelstore(AT: ATNamespace, fixtures: ModelFixtures, onBytes: (writ
       status,
       headers: { get: (name: string) => (name.toLowerCase() === 'content-length' ? String(total) : null) },
       body: ok
-        ? {
-            read: async () => {
+        ? new ReadableStream({
+            pull(controller) {
               const size = chunks[next];
-              if (size === undefined) return { done: true as const };
+              if (size === undefined) { controller.close(); return; }
               next += 1;
               clock.now += Number(AT.local.DOWNLOAD_PROGRESS_INTERVAL_MS) + 100;
-              // Only `byteLength` is ever read, so nobody allocates 3.6 GiB.
-              return { done: false as const, value: { byteLength: size } };
+              // This fixture tests UI accounting without allocating gigabytes.
+              // Native Response/byte streams are covered by review-regressions.
+              controller.enqueue({ byteLength: size });
             }
-          }
+          })
         : null
     };
   };

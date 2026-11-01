@@ -415,3 +415,9 @@ test('a reply without numbers is accepted when its shape is unambiguous', () => 
   assert.equal(local.parseNumbered('하나\n둘\n셋\n넷', 3), null, 'too many lines is still a failure');
   assert.equal(local.parseNumbered('1: 하나\n2: 둘\n2: 셋', 3), null, 'wrong numbering never falls back to lines');
 });
+
+
+test('numbered parsing refuses duplicate and extra indices even with all expected entries', () => {
+  assert.equal(local.parseNumbered('1: first\n2: second\n1: overwrite', 2), null);
+  assert.equal(local.parseNumbered('1: first\n2: second\n3: extra', 2), null);
+});

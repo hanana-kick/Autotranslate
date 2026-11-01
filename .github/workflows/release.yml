@@ -1,10 +1,7 @@
 name: Release
 
-# One path: a push to main builds, tests and packages the extension, then
-# publishes it as the release for the version in package.json — creating the
-# release the first time that version is pushed, and replacing its assets on
-# every push after. Bumping the version is how you cut a new release.
-
+# Main is an integration branch. Publishing both browser packages requires both
+# original-model runtimes, deterministic regressions, planner and package checks.
 on:
   push:
     branches: [main]
@@ -17,26 +14,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  browser:
+    uses: ./.github/workflows/browser.yml
+    permissions:
+      contents: read
+  planner:
+    uses: ./.github/workflows/planner-audit.yml
+    permissions:
+      contents: read
+  native:
+    uses: ./.github/workflows/native-extension.yml
+    permissions:
+      contents: read
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  firefox:
+    uses: ./.github/workflows/firefox-native.yml
+    permissions:
+      contents: read
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
   release:
+    needs: [browser, native, firefox, planner]
     name: Package and publish
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      # Installs, type-checks, validates, tests, builds both bundles, runs the
-      # packaging gate and proves the archives are reproducible. Nothing below
-      # runs unless all of that passed.
       - uses: ./.github/actions/build-extension
-
       - name: Checksums
         shell: bash
         run: |
           set -euo pipefail
           (cd dist && sha256sum ./*.zip > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
-
       - name: Publish the release for this version
         shell: bash
         env:
@@ -51,19 +63,15 @@ jobs:
             echo "Autotranslate $version, built from \`${GITHUB_SHA::12}\`."
             echo
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "- original SDK/model: Chrome and Firefox installed-extension checks"
+            echo "- static and dynamic translation, exact HTML restoration and planner acceptance"
             echo
-            echo "Chrome: unzip, then load the folder from chrome://extensions with"
-            echo "Developer mode on. Firefox: install the zip as a temporary add-on from"
-            echo "about:debugging, or sign it with \`web-ext\`."
+            echo "Chrome: unzip and load from chrome://extensions in Developer mode."
+            echo "Firefox: temporary installation from about:debugging, or sign with web-ext."
           } > "$notes"
-
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag exists: replacing its assets"
             gh release upload "$tag" "${files[@]}" --clobber
           else
-            gh release create "$tag" "${files[@]}" \
-              --title "Autotranslate $version" \
-              --notes-file "$notes" \
-              --target "$GITHUB_SHA"
+            gh release create "$tag" "${files[@]}" --title "Autotranslate $version" --notes-file "$notes" --target "$GITHUB_SHA"
           fi
           gh release view "$tag"

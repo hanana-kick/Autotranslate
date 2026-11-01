@@ -57,6 +57,7 @@ export const ENTRIES = [
   'lib/localhost.js',
   'offscreen.html',
   'offscreen.js',
+  'inference-worker.js',
   'icons/icon-16.png',
   'icons/icon-32.png',
   'icons/icon-48.png',

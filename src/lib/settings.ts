@@ -20,6 +20,8 @@ namespace AT.settings {
 
   /** What a content script may see: no site rules, no debug flag. */
   export type ContentSnapshot = {
+    /** Opaque generation-configuration identity; never includes credentials. */
+    translationKey?: string;
     enabled: boolean;
     targetLang: string;
     sourceLang: string;
@@ -128,6 +130,7 @@ namespace AT.settings {
   export function contentSnapshot(normalized?: Settings | null): ContentSnapshot {
     const s = normalized ?? defaults();
     return {
+      translationKey: JSON.stringify(['prompt-v2', s.localModelId, s.localMaxTokens, s.sourceLang, s.targetLang]),
       enabled: s.enabled,
       targetLang: s.targetLang,
       sourceLang: s.sourceLang,

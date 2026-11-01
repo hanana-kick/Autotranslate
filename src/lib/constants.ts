@@ -63,7 +63,7 @@ namespace AT {
     // Hard ceiling on DOM text nodes touched per run; keeps huge feeds cheap.
     DEFAULT_MAX_NODES: 600,
     // Ceiling for nodes translated by the MutationObserver in one tick.
-    OBSERVER_BATCH_NODES: 40,
+    OBSERVER_BATCH_NODES: 16,
     // Longer texts are split into sentences before they are sent: about 50
     // Latin tokens, well inside a sentence's worth of meaning. Only a text
     // longer than this pays for the extra round trip.
@@ -182,5 +182,28 @@ namespace AT {
 
   export function warn(...args: unknown[]): void {
     console.warn('[autotranslate]', ...args);
+  }
+}
+
+
+/** Protocol validity, not linguistic scoring. Never invent a translation when
+ * a provider emits control tokens, empty output or a runaway repetition. */
+namespace AT {
+  export type OutputIssue = 'empty-output' | 'control-token' | 'repeated-output' | 'excessive-output';
+  export function outputIssue(source: string, answer: string, partial = false): OutputIssue | null {
+    if (!partial && !answer.trim()) return 'empty-output';
+    // A page that literally discusses these tokens may legitimately contain them.
+    // Newly introduced controls, or more copies than the source, are not prose.
+    const controls = /<(?:pad|bos|eos|start_of_turn|end_of_turn)>|<\|(?:endoftext|im_start|im_end)\|>/g;
+    for (const token of new Set(answer.match(controls) ?? [])) {
+      if (answer.split(token).length > source.split(token).length) return 'control-token';
+    }
+    const ceiling = Math.min(262144, Math.max(2048, source.length * 24 + 256));
+    if (answer.length > ceiling) return 'excessive-output';
+    // Only long, newly introduced loops are structural errors. Names, short
+    // repeated words and source text which itself repeats must remain legal.
+    const repetition = /(.{2,80}?)\1{15,}/gu.exec(answer);
+    if (repetition && !source.includes(repetition[0])) return 'repeated-output';
+    return null;
   }
 }

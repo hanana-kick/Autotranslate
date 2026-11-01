@@ -1,0 +1,60 @@
+name: Planner quality audit
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [main, fix/review-hardening-20261031]
+    paths:
+      - .github/workflows/planner-audit.yml
+      - test/optimization/**
+      - src/lib/constants.ts
+      - src/lib/pagecontext.ts
+      - src/lib/targets.ts
+      - src/lib/pipeline.ts
+      - src/lib/dom.ts
+permissions:
+  contents: read
+concurrency:
+  group: planner-audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      - name: Use the same pinned Chromium driver as native QA
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
+      - run: npx playwright install --with-deps chromium
+      - name: Real DOM order, acceptance and planning CPU budget
+        env:
+          PLANNER_ENFORCE: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/planner
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import os from 'node:os';
+          import {createHash} from 'node:crypto';
+          import {execFileSync} from 'node:child_process';
+          const modules=['constants','pagecontext','targets','dom','pipeline'];
+          const hashes=Object.fromEntries(modules.map(name=>[name,createHash('sha256').update(fs.readFileSync('build/ts/src/lib/'+name+'.js')).digest('hex')]));
+          fs.writeFileSync('test-results/planner/provenance.json',JSON.stringify({commit:execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(),node:process.version,platform:process.platform,cpu:os.cpus()[0]?.model,logicalCpus:os.cpus().length,ramBytes:os.totalmem(),compiledModuleSHA256:hashes,provider:'identity: planner-only, not original-model translation'},null,2));
+          JS
+          node test/optimization/planner-audit.mjs 2>&1 | tee test-results/planner/run.log
+          node test/optimization/check-budget.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: planner-audit-${{ github.run_id }}
+          path: test-results/planner/
+          retention-days: 14
+          if-no-files-found: error

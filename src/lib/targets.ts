@@ -51,9 +51,8 @@ namespace AT.targets {
   const PRIORITY_RANK: Record<Priority, number> = { visible: 0, near: 1, far: 2 };
 
   /**
-   * The page's own content, as opposed to its chrome. Meaningful text is
-   * translated to the end first; menus, footers, forms and comment threads are
-   * lower priority but still translated afterwards.
+   * The page's own content, as opposed to its chrome. Within the same visibility class, meaningful text precedes
+   * chrome. Visible UI always precedes distant prose.
    */
   const CONTENT: Record<TextRole, boolean> = {
     article: true,
@@ -87,7 +86,7 @@ namespace AT.targets {
   };
 
   /** Comment containers, as sites actually mark them. */
-  const COMMENT_MARKERS = /(^|[\s_-])(comments?|replies|responses|discussion|thread)([\s_-]|$)/;
+  const COMMENT_MARKERS = /(^|[\s_-])(comments?|replies|responses)([\s_-]|$)/;
 
   /**
    * The region a text belongs to. Order is the rule: a comment inside an
@@ -99,7 +98,7 @@ namespace AT.targets {
     const role = (info.ariaRole ?? '').toLowerCase();
     if (info.inComment || role === 'comment' || COMMENT_MARKERS.test(info.markers ?? '')) return 'comment';
     if (info.inNav || role === 'navigation' || role === 'menu' || role === 'menubar') return 'navigation';
-    if (info.inForm || role === 'form' || role === 'search' || role === 'button') return 'form';
+    if (info.inForm || info.tag === 'button' || role === 'form' || role === 'search' || role === 'button') return 'form';
     if (info.inFooter || role === 'contentinfo') return 'footer';
     if (info.inAside || role === 'complementary' || role === 'note') return 'aside';
     if (info.inHeading || info.tag === 'h1' || /^h[1-6]$/.test(info.tag) || role === 'heading') return 'heading';
@@ -113,8 +112,8 @@ namespace AT.targets {
 
   /** On screen, near it, or neither. `slack` is how far "near" reaches. */
   export function priorityOf(
-    rect: { top: number; bottom: number },
-    viewport: { top: number; height: number },
+    rect: { top: number; bottom: number; left?: number; right?: number },
+    viewport: { top: number; height: number; width?: number },
     slack?: number
   ): Priority {
     const top = Number(rect?.top);
@@ -122,6 +121,9 @@ namespace AT.targets {
     const start = Number(viewport?.top) || 0;
     const height = Number(viewport?.height) || 0;
     if (!Number.isFinite(top) || !Number.isFinite(bottom)) return 'far';
+    const horizontal = rect.left === undefined || rect.right === undefined || viewport.width === undefined ||
+      (rect.right >= 0 && rect.left <= viewport.width);
+    if (!horizontal) return 'far';
     if (bottom >= start && top <= start + height) return 'visible';
     const reach = Number.isFinite(slack) ? Number(slack) : height;
     if (top <= start + height + reach && bottom >= start - reach) return 'near';
@@ -157,7 +159,7 @@ namespace AT.targets {
         Boolean(candidate) && typeof candidate.id === 'string' && candidate.role in ROLE_RANK && candidate.priority in PRIORITY_RANK
     );
     const bandOf = (candidate: Candidate): number => {
-      const top = Number(candidate.top);
+      const top = candidate.priority === 'visible' ? Math.max(0, Number(candidate.top)) : Number(candidate.top);
       if (!Number.isFinite(top)) return Number.MAX_SAFE_INTEGER;
       return Math.floor(top / band);
     };
@@ -166,7 +168,7 @@ namespace AT.targets {
     const buckets = new Map<string, Group & { key: number; first: number }>();
     for (const candidate of usable) {
       const key = bandKey(bandOf(candidate));
-      const bucket = `${key}/${candidate.role}`;
+      const bucket = `${candidate.priority}/${key}/${candidate.role}`;
       const top = Number(candidate.top);
       const first = Number.isFinite(top) ? top : Number.MAX_SAFE_INTEGER;
       const group = buckets.get(bucket) ?? { role: candidate.role, priority: candidate.priority, ids: [], key, first };
@@ -183,6 +185,7 @@ namespace AT.targets {
     }
     groups.sort(
       (left, right) =>
+        PRIORITY_RANK[left.priority] - PRIORITY_RANK[right.priority] ||
         Number(!isContent(left.role)) - Number(!isContent(right.role)) ||
         left.key - right.key ||
         left.first - right.first ||
