@@ -41,7 +41,8 @@ const VENDOR_FILES: { from: string; to: string }[] = [
 ];
 // 'offscreen' hosts the on-device model; Firefox has no such API and the
 // firefox target strips it, so it never ships in that bundle.
-const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel'];
+// The original 3.6 GiB model must survive normal extension storage limits.
+const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel', 'unlimitedStorage'];
 type Manifest = {
   manifest_version?: number;
   name?: string;

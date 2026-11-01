@@ -308,10 +308,10 @@ test('local: a reply that does not match the request is refused', async () => {
   );
 });
 
-test('local: an empty answer keeps the original text', async () => {
+test('local: an empty answer remains incomplete for the DOM layer', async () => {
   stubSend(() => ({ ok: true, translations: ['', '안녕'] }));
   const result = await localModel({ texts: ['hello', 'goodbye'] });
-  assert.deepEqual(result.translations, ['hello', '안녕']);
+  assert.deepEqual(result.translations, ['', '안녕']);
 });
 
 test('local: test() probes through the same host', async () => {

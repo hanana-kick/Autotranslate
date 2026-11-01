@@ -277,3 +277,17 @@ test('background passes advance through the page instead of re-translating the t
   assert.equal(third.failed, 0);
   assert.equal(batches.length, before, 'a rewritten node is answered from the cache');
 });
+
+
+test('initial work may yield so a moved viewport is replanned before the old offscreen tail', async () => {
+  const e = engine(Array.from({ length: 90 }, (_, i) => ({ text: 'Article ' + i, top: i * 30 })));
+  const initial = await e.translator.translate(8);
+  assert.equal(initial.processedNodes, 8); assert.equal(initial.hasMore, true);
+  for (let i = 8; i < 90; i++) e.texts[i]!.parentElement!.getBoundingClientRect = () => ({ top: -3000, bottom: -2980, width: 600, height: 20 });
+  e.texts[89]!.parentElement!.getBoundingClientRect = () => ({ top: 100, bottom: 120, width: 600, height: 20 });
+  const before = e.batches.length;
+  const next = await e.translator.refresh(null, 8);
+  assert.equal(e.batches[before]!.texts[0], 'Article 89');
+  assert.equal(next.processedNodes, 8); assert.equal(next.hasMore, true);
+  assert.ok(!e.texts[30]!.nodeValue.includes('»'), 'an old offscreen plan cannot consume the next slice first');
+});

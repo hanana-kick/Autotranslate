@@ -51,6 +51,10 @@ namespace AT.local {
   export const IDLE_UNLOAD_MS = 10 * 60 * 1000;
   /** One generation on a 4B model over 1500 characters is slow but bounded. */
   export const GENERATION_TIMEOUT_MS = 180000;
+  /** Hardware ready-model first-output deadline, supervised outside native work. */
+  export const FIRST_OUTPUT_TIMEOUT_MS = 60000;
+  /** Real software WebGPU is much slower; do not repeatedly discard valid work. */
+  export const SOFTWARE_GENERATION_TIMEOUT_MS = 15 * 60 * 1000;
   /** Progress is forwarded to the background at most this often. */
   export const DOWNLOAD_PROGRESS_INTERVAL_MS = 500;
 
@@ -104,6 +108,13 @@ namespace AT.local {
     }
   }
 
+  /** Current native operation, reported before entering synchronous WASM. */
+  export type ModelPhase = 'runtime' | 'model-read' | 'model-create' | 'warmup' | 'count' | 'generate';
+  /** Enforced by the document outside the inference worker. */
+  export const MODEL_LOAD_TIMEOUT_MS = 300000;
+  /** Even capability checks may hang after GPU-process loss. Keep UI bounded. */
+  export const GPU_PROBE_TIMEOUT_MS = 5000;
+
   export type ModelState = 'unloaded' | 'loading' | 'ready' | 'busy' | 'error';
 
   /** One model file the user downloaded; `size` is bytes. */
@@ -127,6 +138,14 @@ namespace AT.local {
     loadMs: number | null;
     generations: number;
     lastError: string | null;
+    phase?: ModelPhase | null;
+    /** Detected from the actual browser adapter, not a testing override. */
+    softwareRendering?: boolean;
+    /** Aggregate progress only: prompts and generated text are never reported. */
+    outputChars?: number;
+    /** Bounded fresh-worker recoveries, not successful generations. */
+    recoveries?: number;
+    lastProgressAt?: number;
   };
 
   /** A download the options page is running right now, for the popup badge. */
@@ -295,12 +314,15 @@ namespace AT.local {
     if (typeof reply !== 'string' || reply.length === 0) return null;
     const found: Record<string, string> = {};
     let current: number | null = null;
+    const seen = new Set<number>();
     let buffer: string[] = [];
     for (const line of reply.split('\n')) {
       const match = SEGMENT_START.exec(line);
       if (match) {
         if (current !== null) found[String(current)] = buffer.join('\n').trim();
         current = Number(match[1]);
+        if (current < 1 || current > count || seen.has(current)) return null;
+        seen.add(current);
         buffer = [line.slice(match[0].length)];
       } else if (current !== null) {
         buffer.push(line);
@@ -495,6 +517,14 @@ namespace AT.local {
       loadedBytes: Number.isFinite(size) && size >= 0 ? Math.round(size) : 0,
       loadMs: Number.isFinite(loadMs) && loadMs >= 0 ? Math.round(loadMs) : null,
       generations: Number.isFinite(generations) && generations >= 0 ? Math.round(generations) : 0,
+      ...(input.phase === null || ['runtime', 'model-read', 'model-create', 'warmup', 'count', 'generate'].includes(String(input.phase))
+        ? { phase: input.phase as ModelPhase | null } : {}),
+      ...(typeof input.softwareRendering === 'boolean' ? { softwareRendering: input.softwareRendering } : {}),
+      ...(Number.isFinite(input.recoveries) ? { recoveries: Math.max(0, Number(input.recoveries)) } : {}),
+      ...(Number.isFinite(input.outputChars) && Number(input.outputChars) >= 0
+        ? { outputChars: Math.min(Math.round(Number(input.outputChars)), 1_000_000) } : {}),
+      ...(Number.isFinite(input.lastProgressAt) && Number(input.lastProgressAt) >= 0
+        ? { lastProgressAt: Math.round(Number(input.lastProgressAt)) } : {}),
       lastError: typeof input.lastError === 'string' ? input.lastError.slice(0, 300) : null
     };
   }
@@ -539,11 +569,16 @@ namespace AT.local {
     'model-missing': true,
     'model-load-failed': true,
     'generation-failed': true,
+    'invalid-output': true,
     'generation-timeout': true,
+    'warmup-timeout': true,
+    'generation-stalled': true,
+    'context-overflow': true,
     cancelled: true
   };
 
   const CONFIG_REASONS: Record<string, true | undefined> = {
+    'context-overflow': true,
     'unsupported-browser': true,
     'no-webgpu': true,
     // The target has no code in the model's language table, so no prompt can

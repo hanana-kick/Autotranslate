@@ -231,7 +231,9 @@ namespace AT.engines {
     const translations = originals.map((text) => {
       if (!needsTranslation(text)) return text;
       const translated = batchOut.get(text);
-      return typeof translated === 'string' && translated.length > 0 ? translated : text;
+      // An empty model answer is not a successful identity translation. Keep
+      // the distinction so the DOM can retain the source without marking done.
+      return typeof translated === 'string' ? translated : '';
     });
     return { translations, detected, requested: unique.length };
   }

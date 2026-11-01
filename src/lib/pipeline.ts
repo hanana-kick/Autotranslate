@@ -50,11 +50,15 @@ namespace AT.pipeline {
     /** Groups that failed, and why; the rest of the page still went through. */
     failed: number;
     error: string | null;
+    /** DOM nodes visited, not deduplicated model inputs. */
+    processedNodes: number;
+    /** Unvisited planned work; failures alone do not create an infinite retry. */
+    hasMore: boolean;
   };
 
   export type PageTranslator = {
     /** First pass over the page: metadata, plan, translate. */
-    translate: () => Promise<Result>;
+    translate: (budget?: number) => Promise<Result>;
     /** Another pass over what is still untranslated (scroll, mutations).
      *  `budget` caps how many nodes this pass may take, so background work on a
      *  page that keeps mutating cannot hold the model for minutes. */
@@ -85,19 +89,26 @@ namespace AT.pipeline {
     let ariaRole: string | null = null;
     const markers: string[] = [];
     let current: Element | null = element;
-    for (let depth = 0; current && depth < 12; depth += 1) {
+    while (current) {
       const name = current.tagName.toLowerCase();
       // `<main>` is the page's own content in practice (Wikipedia, MDN, most
       // documentation), so it counts as the article region without <article>.
       if (name === 'article' || name === 'main') flags.inArticle = true;
       if (name === 'nav') flags.inNav = true;
-      if (name === 'form') flags.inForm = true;
+      if (name === 'form' || name === 'button') flags.inForm = true;
       if (name === 'footer') flags.inFooter = true;
       if (name === 'aside') flags.inAside = true;
       if (name === 'ul' || name === 'ol') flags.inList = true;
       if (/^h[1-6]$/.test(name)) flags.inHeading = true;
       const role = current.getAttribute('role');
       if (role && !ariaRole) ariaRole = role;
+      const landmark = (role ?? '').toLowerCase();
+      if (['main', 'article'].includes(landmark)) flags.inArticle = true;
+      if (['navigation', 'menu', 'menubar'].includes(landmark)) flags.inNav = true;
+      if (['form', 'search', 'button'].includes(landmark)) flags.inForm = true;
+      if (landmark === 'heading') flags.inHeading = true;
+      if (landmark === 'contentinfo') flags.inFooter = true;
+      if (landmark === 'complementary') flags.inAside = true;
       if ((role ?? '').toLowerCase() === 'comment') flags.inComment = true;
       // schema.org marks a comment thread as itemtype="…Comment".
       if (/comment/i.test(current.getAttribute('itemtype') ?? '')) flags.inComment = true;
@@ -113,10 +124,32 @@ namespace AT.pipeline {
     };
   }
 
+  // Reuse a single live Range per document. Thousands of retained Ranges make
+  // subsequent Text.nodeValue mutations quadratic in Chromium.
+  const measurementRanges = new WeakMap<Document, Range>();
+
   /** Where a text sits, in viewport coordinates. */
-  function measureFromDom(node: Text): { top: number; bottom: number } {
-    const element = node.parentElement;
-    const rect = element?.getBoundingClientRect?.();
+  function measureFromDom(node: Text): { top: number; bottom: number; left?: number; right?: number } {
+    // An element box can span thousands of pixels, or have no box at all
+    // (display:contents). Measure the text's actual line rectangles first.
+    const doc = node.ownerDocument;
+    if (typeof doc?.createRange === 'function') {
+      let range = measurementRanges.get(doc);
+      if (!range) { range = doc.createRange(); measurementRanges.set(doc, range); }
+      range.selectNodeContents(node);
+      const rects = Array.from(range.getClientRects()).filter((r) => r.width > 0 && r.height > 0);
+      range.selectNodeContents(doc.documentElement);
+      range.collapse(true);
+      const height = globalThis.innerHeight || 800, width = globalThis.innerWidth || 1200;
+      const visible = rects.find((r) => r.bottom >= 0 && r.top <= height && r.right >= 0 && r.left <= width);
+      const rect = visible ?? rects.sort((a, b) =>
+        Math.max(0, a.top - height, -a.bottom, -a.right, a.left - width) -
+        Math.max(0, b.top - height, -b.bottom, -b.right, b.left - width))[0];
+      if (rect) return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right };
+      return NO_MEASUREMENT;
+    }
+    // The non-browser unit-test adapter only supplies element geometry.
+    const rect = node.parentElement?.getBoundingClientRect?.();
     if (!rect || (rect.width === 0 && rect.height === 0)) return NO_MEASUREMENT;
     return { top: rect.top, bottom: rect.bottom };
   }
@@ -130,6 +163,9 @@ namespace AT.pipeline {
     const viewportHeight = request.viewportHeight ?? (() => globalThis.innerHeight || 800);
 
     const done = new Set<Text>();
+    // A successful unrelated mutation must not erase an earlier segment failure.
+    const failures = new Map<Text, { value: string | null; error: string }>();
+    let generation = 0;
     /** A pass owns the translator's run table: two of them must not interleave. */
     let passes: Promise<unknown> = Promise.resolve();
     const once = <T>(job: () => Promise<T>): Promise<T> => {
@@ -154,6 +190,7 @@ namespace AT.pipeline {
         maxNodes: settings.maxNodes,
         sentences: request.sentences,
         shouldAbort: request.shouldAbort,
+        cacheScope: () => JSON.stringify([context, role]),
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
         translate: async (texts) => {
           batches += 1;
@@ -172,34 +209,47 @@ namespace AT.pipeline {
     async function run(
       root: Element | Document | null | undefined,
       reset: boolean,
-      budget?: number
+      budget?: number,
+      epoch = generation
     ): Promise<Result> {
       const dom = executor();
+      const cancelled = () => epoch !== generation || request.shouldAbort?.() === true;
+      const empty = (): Result => ({ requested: 0, translated: dom.stats().translated, runs: 0,
+        batches: 0, failed: failures.size, error: failures.values().next().value?.error ?? null, processedNodes: 0, hasMore: false });
+      if (cancelled()) return empty();
+      for (const node of done) if (node.isConnected === false) done.delete(node);
+      for (const node of swept) if (node.isConnected === false) swept.delete(node);
+      for (const [node, failure] of failures) {
+        if (node.isConnected === false || node.nodeValue !== failure.value || dom.has(node)) failures.delete(node);
+      }
       if (reset) {
+        failures.clear();
         context = AT.pagecontext.analyze(AT.pagecontext.collect(request.doc as AT.pagecontext.MetaDocument));
         done.clear();
         swept = new Set<Text>();
       }
       const start = root ?? request.doc.documentElement;
       if (!start) {
-        return { requested: 0, translated: dom.stats().translated, runs: 0, batches: 0, failed: 0, error: null };
+        return empty();
       }
       // `maxNodes` bounds how much one pass *translates*, not how much it looks
       // at: collection follows DOM order, and a page's sidebar often precedes
       // its body, so capping the walk would translate the menu and never see the
       // article. Look at a wide window, then let the plan pick.
       const settings = request.settings();
-      const window = Math.min(Math.max(settings.maxNodes, 1) * 8, 4000);
-      const collected = dom.collect(start, window);
+      // A translation budget must not truncate discovery: the reader may be at
+      // node 50,000. Dynamic updates already use affected subtrees. Full scans
+      // collect all eligible pending nodes and cap inference only after sorting.
+      const collected = dom.collect(start, Number.POSITIVE_INFINITY);
       // `done` is a memory aid, not the truth: a page that rewrites a node's
       // text in place puts it back in play (`dom.has` is false again).
       const pending = collected.filter((node) => !done.has(node) || !dom.has(node));
       if (pending.length === 0) {
-        return { requested: 0, translated: dom.stats().translated, runs: 0, batches: 0, failed: 0, error: null };
+        return empty();
       }
 
       const height = viewportHeight();
-      const viewport = { top: 0, height };
+      const viewport = { top: 0, height, width: globalThis.innerWidth || 1200 };
       const limit = Number(budget) > 0 ? Math.min(settings.maxNodes, Number(budget)) : settings.maxNodes;
       // A budgeted pass is background work: it takes what the round has not
       // reached yet, so text below the fold is paid for even while the page
@@ -228,18 +278,22 @@ namespace AT.pipeline {
       /** Groups that threw outright; a group can also fail in part. */
       let groupFailures = 0;
       let attempted = 0;
+      let processedNodes = 0;
       let error: string | null = null;
       let firstError: unknown = null;
       for (const group of groups) {
-        if (request.shouldAbort?.() === true) break;
+        if (cancelled()) break;
         const subset = group.ids
           .map((id) => ordered[Number(id)])
           .filter((node): node is Text => node !== undefined);
         if (subset.length === 0) continue;
         role = group.role;
         attempted += 1;
+        processedNodes += subset.length;
+        if (budgeted) subset.forEach((node) => swept.add(node));
         try {
           const result = await dom.translateNodes(subset);
+          if (cancelled()) break;
           requested += result.requested;
           runs += result.runs;
           if (result.failed > 0) {
@@ -250,36 +304,53 @@ namespace AT.pipeline {
           // answered with nothing stays eligible, so the next pass retries it
           // instead of leaving the page half English forever.
           for (const node of subset) {
-            if (dom.has(node)) done.add(node);
+            if (dom.has(node)) { done.add(node); failures.delete(node); }
+            else if (result.failed > 0) failures.set(node, { value: node.nodeValue, error: result.error ?? 'translation incomplete' });
             if (budgeted) swept.add(node);
           }
           request.onProgress?.({ translated: dom.stats().translated, requested });
         } catch (caught: unknown) {
+          if (cancelled()) break;
           // A generation that fails must not take the rest of the page with it. Those nodes stay eligible; the caller is
           // told what happened.
           failed += 1;
           groupFailures += 1;
           if (!firstError) firstError = caught;
           error ??= String((caught as { message?: unknown })?.message ?? caught);
+          for (const node of subset) {
+            if (dom.has(node)) failures.delete(node);
+            else failures.set(node, { value: node.nodeValue, error });
+          }
           AT.warn('translation batch failed', group.role, caught);
         }
       }
       role = null;
       // Nothing got through: fail the pass so the caller shows the host's own
       // error instead of a silent no-op. A partial pass returns normally.
-      if (attempted > 0 && groupFailures === attempted) throw firstError;
-      return { requested, translated: dom.stats().translated, runs, batches: batches - before, failed, error };
+      if (!cancelled() && attempted > 0 && groupFailures === attempted) throw firstError;
+      failed = Math.max(failed, failures.size);
+      error ??= failures.values().next().value?.error ?? null;
+      return { requested, translated: dom.stats().translated, runs, batches: batches - before, failed, error,
+        processedNodes, hasMore: !cancelled() && ordered.length > processedNodes };
+    }
+
+    function schedule(root: Element | Document | null, reset: boolean, budget?: number): Promise<Result> {
+      const epoch = generation;
+      return once(() => run(root, reset, budget, epoch));
     }
 
     return {
-      translate: () => once(() => run(null, true)),
-      refresh: (root, budget) => once(() => run(root ?? null, false, budget)),
+      translate: (budget) => schedule(null, true, budget),
+      refresh: (root, budget) => schedule(root ?? null, false, budget),
       isTranslated(node: Text) {
         return translator ? translator.holds(node) : false;
       },
       restore() {
+        generation++;
         const restored = translator ? translator.restore(request.doc.documentElement).restored : 0;
         done.clear();
+        failures.clear();
+        swept.clear();
         role = null;
         return { restored };
       },

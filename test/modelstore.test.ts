@@ -80,21 +80,11 @@ function fakes() {
   return { meta, settings, stored, deleted, clock, estimate, driver, files, use };
 }
 
-/** A response with the members a download reads. */
-const response = (status: number, body: unknown, headers: Record<string, string> = {}) => ({
-  ok: status >= 200 && status < 300,
-  status,
-  headers: { get: (name: string) => headers[name.toLowerCase()] ?? null },
-  body
-});
+/** Native Fetch and Streams contracts, not an implementation-shaped reader. */
+const response = (status: number, body: ReadableStream<Uint8Array> | null, headers: Record<string, string> = {}) =>
+  new Response(body, { status, headers });
 
-const bodyOf = (...chunks: Uint8Array[]) => {
-  let index = 0;
-  return {
-    read: async () =>
-      index < chunks.length ? { done: false, value: chunks[index++] } : { done: true, value: undefined }
-  };
-};
+const bodyOf = (...chunks: Uint8Array[]) => streamOf(...chunks);
 
 const big = () => [bytes(local.MIN_MODEL_BYTES), bytes(1024)];
 const length = { 'content-length': String(local.MIN_MODEL_BYTES + 1024) };
@@ -205,13 +195,16 @@ test('a non-https source is stored as no source at all', async () => {
   assert.equal(result.record.sourceUrl, '');
 });
 
-test('re-downloading the same file name replaces the older copy', async () => {
+test('re-downloading stages a second copy until explicit verified activation', async () => {
   const first = await modelstore.ingest({ name: 'same.task', sourceUrl: 'https://a.test/same.task', stream: streamOf(...big()) });
   active.clock.now += 1000;
   const second = await modelstore.ingest({ name: 'same.task', sourceUrl: 'https://b.test/same.task', stream: streamOf(...big()) });
   assert.notEqual(first.record.id, second.record.id);
-  const list = await modelstore.list();
-  assert.deepEqual(list.map((model: { id: string }) => model.id), [second.record.id]);
+  const staged = await modelstore.list();
+  assert.equal(staged.length, 2, 'file validation is not inference verification');
+  assert.equal(active.stored.has(first.record.id), true);
+  assert.deepEqual(await modelstore.retireReplaced(second.record.id, first.record.id), [first.record.id]);
+  assert.deepEqual((await modelstore.list()).map((model: { id: string }) => model.id), [second.record.id]);
   assert.equal(active.stored.has(first.record.id), false);
 });
 

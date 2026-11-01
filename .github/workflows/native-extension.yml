@@ -1,0 +1,96 @@
+name: Real installed extension
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Actual browser backend (software is slower)
+        type: choice
+        options: [hardware, software]
+        default: hardware
+  workflow_call:
+    inputs:
+      backend:
+        type: string
+        default: hardware
+    secrets:
+      HF_TOKEN:
+        required: true
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['src/**', 'scripts/**', 'package*.json', '.github/actions/released-chromium/**', '.github/workflows/native-extension.yml', '.github/workflows/release.yml', 'test/native-extension/**', 'test/dynamic-extension/**']
+permissions:
+  contents: read
+concurrency:
+  group: native-extension-${{ github.workflow }}-${{ github.ref }}-${{ inputs.backend || 'hardware' }}
+  # Validate the newest PR revision; never cancel an in-flight main release.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+jobs:
+  original-runtime:
+    name: Original extension / ${{ inputs.backend || 'hardware' }} / fresh profile ${{ matrix.repetition }}
+    strategy:
+      fail-fast: false
+      max-parallel: 5
+      matrix:
+        repetition: ${{ fromJSON(inputs.backend == 'software' && '[1]' || '[1,2,3,4,5]') }}
+    runs-on: ${{ inputs.backend == 'software' && 'ubuntu-latest' || 'macos-latest' }}
+    timeout-minutes: ${{ inputs.backend == 'software' && 45 || 30 }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:chrome
+      - name: Install pinned browser driver
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
+      - run: npx playwright install --with-deps chromium
+      - uses: ./.github/actions/released-chromium
+        if: runner.os == 'macOS'
+      - name: Original model - static, dynamic, multitab and exact restoration
+        env:
+          HEADED: '1'
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ENDURANCE_ROUNDS: ${{ matrix.repetition == 1 && '25' || '5' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-extension
+          node --check test/native-extension/real-extension.mjs
+          node --check test/dynamic-extension/dynamic-page.mjs
+          node --check test/dynamic-extension/run-dynamic.mjs
+          if [ "$RUNNER_OS" = Linux ]; then
+            xvfb-run -a node test/dynamic-extension/run-dynamic.mjs 2>&1 | tee test-results/native-extension/execution.log
+          else
+            node test/dynamic-extension/run-dynamic.mjs 2>&1 | tee test-results/native-extension/execution.log
+          fi
+      - name: Verify unchanged production files
+        if: always()
+        run: git diff --exit-code -- src package.json package-lock.json scripts
+      - name: Keep tested package and reject credential-bearing evidence
+        id: evidence
+        if: always()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-extension
+          find test-results/native-extension -type f -name '*trace*.zip' -delete
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import path from 'node:path';const secret=process.env.HF_TOKEN||'';
+          function check(dir){for(const item of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,item.name);if(item.isDirectory())check(file);else if(/\.(json|txt|log|html|mjs|cpuprofile)$/.test(file)){const s=fs.readFileSync(file,'utf8');if((secret&&s.includes(secret))||/hf_[A-Za-z0-9]{20,}/.test(s)){fs.rmSync(file);throw Error('Credential-bearing evidence refused');}}}}
+          check('test-results/native-extension');
+          JS
+          cp dist/*-chrome.zip test-results/native-extension/tested-extension.zip
+          shasum -a 256 dist/*-chrome.zip > test-results/native-extension/package-sha256.txt
+      - name: Native extension evidence
+        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-extension-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.repetition }}
+          path: test-results/native-extension/
+          if-no-files-found: error
+          retention-days: 14

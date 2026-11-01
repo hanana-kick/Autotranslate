@@ -226,6 +226,8 @@ test('only the chrome bundle asks for the permissions it can use', () => {
 
   assert.ok(chrome.permissions.includes('offscreen'), 'the model host needs the permission on chrome');
   assert.ok(chrome.permissions.includes('sidePanel'), 'the side panel needs the permission on chrome');
+  assert.ok(chrome.permissions.includes('unlimitedStorage'), 'the multi-gigabyte model needs durable extension storage');
+  assert.ok(firefox.permissions.includes('unlimitedStorage'), 'Firefox must not block installation on a persistence prompt');
   for (const permission of ['offscreen', 'sidePanel']) {
     assert.equal(
       firefox.permissions.includes(permission),
