@@ -1,55 +1,64 @@
-# DOM optimization audit — 2026-10-31
+# DOM optimization audit — 2026-11-01
 
-This audit concerns scheduling/DOM overhead, not linguistic quality. The production planner/executor tested here is unchanged by the inference-host compatibility work. The findings remain unresolved. For actual installed-extension inference/restoration results, use `native-extension-testing.md` and the PR's native checks.
+This report concerns target eligibility, scheduling and DOM overhead, not linguistic quality or inference performance. Actual installed-extension verification is documented separately in `native-extension-testing.md`.
 
-## Native DOM planner audit
+## Current acceptance result
 
-Actions run: `41176151919`. Actual Chromium 143 loaded the production targets, pipeline and DOM modules. Identity responses were used **only to expose request order and isolate planner overhead**; they are not translations or whole-extension E2E evidence. The same matrix was reproduced locally in Chromium 144.
+[Actions run 41273951631](https://github.com/hanana-kick/Autotranslate/actions/runs/41273951631), source `8341a369e5db2d7d7834a46df89801687a4d311d`: **15/15 real-DOM acceptance cases passed, zero failed**. The earlier 2026-10-31 run `41176151919` had 2/15 passes; that is a historical baseline, not the current status.
 
-**15 adversarial cases: 2 pass, 13 unmet.** This is not a representative real-web quality score. The visible-UI case asks for viewport-first behavior rather than the current content-first policy. Hidden-content eligibility represents the optimization goal of avoiding foreground inference on invisible text; implementing it also requires visibility-change observation.
+The test loads the compiled production constants, page-context, target, pipeline and DOM modules in actual Chromium. Identity responses are used only to inspect request order and isolate planner overhead. They are not translations and cannot establish native extension E2E success. These deliberately adversarial cases are not a representative web-quality score.
 
-| Case | Observed result |
+| Acceptance case | Current behavior |
 | --- | --- |
-| display:none | Hidden prose becomes a request. |
-| visibility:hidden / opacity:0 / closed details | All three hidden strings are requested. |
-| display:contents | Visible text is placed after distant prose because the parent has no box. |
-| Visible UI versus distant article | Distant article wins under the current content-first policy. |
-| Partial overlap at viewport top | top=-5 is placed after prose at top=2000. |
-| Horizontal offscreen content | x=-2000 is ignored and can precede visible text. |
-| Native button | A button inside main is classified as article, not form. |
-| ARIA navigation ancestor | Child role=link masks ancestor role=navigation. |
-| Deep main | Sixteen wrappers exceed the twelve-ancestor scan. |
-| Generic thread container | class=thread-page makes the original post and heading comments. |
-| Hidden prefix with small budget | A hidden 100-node menu consumes the scan window; visible prose is not reached. |
-| Initially scrolled page | A 4,500-node page scrolled to row 4,499 first processes nodes around row 3,980. |
-| maxNodes=5000 | A 5,002-node page processes 4,001 nodes and returns hasMore=false. |
-| Protected regions | PASS: code, translate=no and editable content remain untouched. |
-| Basic native landmarks | PASS: heading, main prose and explicit comment remain distinct. |
+| display:none | Hidden prose is not requested. |
+| visibility:hidden / opacity:0 / closed details | Hidden text is excluded; reveal changes are observed by the content script. |
+| display:contents | Visible text geometry precedes distant prose. |
+| Visible UI versus distant article | Viewport priority precedes semantic tie-breakers. |
+| Partial viewport-top overlap | Partially visible text precedes distant text. |
+| Horizontal offscreen content | Horizontal visibility is considered. |
+| Native button | Classified as form rather than surrounding article. |
+| ARIA navigation ancestor | Landmark evidence survives a child role=link. |
+| Deep main | Main/article evidence survives sixteen wrappers. |
+| Generic thread container | thread-page alone does not reclassify the entire post as comments. |
+| Hidden prefix with small budget | Hidden menu text does not consume the eligible discovery budget. |
+| Initially scrolled 4,500-node page | Current visible cohort is discovered and scheduled before offscreen text. |
+| maxNodes=5000 on 5,002 nodes | Remaining work is reported, not silently truncated at 4,001. |
+| Protected regions | Code, translate=no and editable content remain untouched. |
+| Basic native landmarks | Heading, article and explicit comment remain distinct. |
 
-The computed visibility priority is not used by the comparator; role rank precedes location globally. Parent rectangles do not establish text visibility. Native/ARIA evidence and ancestor scanning are inconsistent. Capping the DOM prefix can exclude the viewport before ranking, and scan truncation is not represented independently from processed-node count.
+Discovery and translation limits are separate. Actual text Range rectangles supply geometry; one Range per document is reused instead of retaining a live Range for every node. Completion counters are incremental. Detached restoration records are pruned at pass boundaries rather than on every statistics read. Mutation work is scoped and coalesced; its native execution is tested by the installed-extension workflow.
 
-## CPU overhead without inference
+## Current CPU baseline, excluding inference
 
-Five samples per size, Actions Chromium medians. Total includes collection, planning, identity-response application and continuation, not restore or model inference.
+Five samples per size; medians from the same run. Environment: Ubuntu, Node 24.22.1, Chromium 156.0.8078.4, four logical CPUs (AMD EPYC 7763), 16,760,344,576 bytes RAM. `provenance.json` records the source commit and SHA-256 of every compiled module tested.
 
-| Text nodes | First request | Total | Restore |
+Total includes discovery, planning, identity-response application and continuation. Restore is measured separately.
+
+| Eligible text nodes | First request | Total DOM work | Restore |
 | ---: | ---: | ---: | ---: |
-| 100 | 6.3 ms | 9.6 ms | 0.3 ms |
-| 1,000 | 26.1 ms | 74.5 ms | 0.9 ms |
-| 4,000 | 50.4 ms | 532.0 ms | 2.6 ms |
+| 100 | 13.1 ms | 17.8 ms | 0.4 ms |
+| 1,000 | 41.1 ms | 109.9 ms | 1.6 ms |
+| 4,000 | 129.9 ms | 446.4 ms | 3.7 ms |
 
-A separate instrumented local 4,000-node profile found prune() at 285.3 ms self time and stats() at 120.5 ms out of 657.1 ms total. Do not mix profiled and unprofiled timings. onApply(stats().translated) repeatedly scans a growing map before progress throttling. Incremental counters and periodic/removal-driven cleanup are the optimization targets.
+All samples requested each unique input exactly once and used no more than `ceil(nodes / 600)` passes. Coarse regression budgets passed at every size. The budgets are intentionally broader than normal shared-runner variation, not latency guarantees.
 
-## Reproduction
+More complete discovery and real visibility measurements add first-pass work. The old run's lower first-request timings must not be presented as equivalent work: it missed eligible content and used an older browser. These measurements do not establish a controlled before/after speedup or native model throughput. The present table is the reproducible baseline for subsequent optimization.
 
-With Node 24, built sources and pinned Playwright/Chromium:
+## Reproduction and release gate
+
+With Node 24, locked dependencies and Playwright 1.64.1:
 
 ```sh
+npm ci
+npm run build
+npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
+npx playwright install --with-deps chromium
 PLANNER_ENFORCE=1 node test/optimization/planner-audit.mjs
+node test/optimization/check-budget.mjs
 ```
 
-The audit intentionally exits nonzero while criteria remain unmet; it is not silently waived or represented as a pass.
+`planner-audit.yml` watches every planner dependency and preserves all fifteen case results, performance samples, source provenance and budget checks. Acceptance or budget failure exits nonzero. The release workflow requires this audit in addition to browser regressions, original-model native E2E and type/unit/package checks.
 
 ## Superseded alternate-engine experiment
 
-Earlier history contains a llama.cpp bridge experiment. It did not test the installed extension's original inference path and is **not evidence of extension correctness or performance**. Its workflow and script have been removed. Do not use its timings or pass counts in extension release claims. Actual original-runtime CPU software-WebGPU and Metal results are documented separately in `native-extension-testing.md`.
+Earlier history contains a llama.cpp bridge experiment. It did not test the installed extension's original inference path and is not evidence of extension correctness or performance. Its workflow and script were removed. Native software-WebGPU and Metal results must be reported independently, with their actual SDK, model, browser and device.
