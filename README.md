@@ -1,8 +1,10 @@
 # Autotranslate
 
-Automatic web-page translation for **Chrome** and **Firefox** from a single Manifest V3
-source tree, written in **TypeScript**. One `src/` folder, one build script, two
-browser-specific bundles — each shipped as a ready-to-upload zip.
+Automatic on-device web-page translation from a single Manifest V3 TypeScript source tree.
+**Chrome is the supported release. Firefox remains experimental:** the native on-device
+model initialization is failing in actual Firefox tests ([issue #2](https://github.com/hanana-kick/Autotranslate/issues/2)).
+Both browser packages can be built from source for testing, but **v0.1.3 publishes only
+the tested Chrome archive**, not an unverified Firefox addon.
 
 Pages are translated in place: text nodes are replaced, originals are kept so the page can
 be restored, and a `MutationObserver` keeps up with dynamically inserted content. Translation
