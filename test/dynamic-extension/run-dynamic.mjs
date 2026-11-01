@@ -17,28 +17,15 @@ if (process.env.CHROMIUM_BINARY) {
 // A stopped renderer must not leave a failed test waiting in evidence cleanup.
 replace('  const session = await context.newCDPSession(p);', "  const session = await bound(context.newCDPSession(p), 10000, 'screenshot CDP attachment');");
 replace('  } finally { await session.detach().catch(() => {}); }', "  } finally { await bound(session.detach(), 3000, 'screenshot CDP detach').catch(() => {}); }");
-source = "import { runYouTube } from './test/native-extension/youtube.mjs';\nimport { runEndurance } from './test/native-extension/endurance.mjs';\nimport { runDynamicPage } from './test/dynamic-extension/dynamic-page.mjs';\n" + source;
+source = "import { withNativeHostMonitor } from './test/native-extension/host-monitor.mjs';\nimport { runYouTube } from './test/native-extension/youtube.mjs';\nimport { runEndurance } from './test/native-extension/endurance.mjs';\nimport { runDynamicPage } from './test/dynamic-extension/dynamic-page.mjs';\n" + source;
 // Observe definitive host failure while fixtures wait for asynchronous DOM writes.
 // No errors are converted to passes. Two identical error reports avoid treating
 // the supervisor's brief recovery transition as a final failed operation.
 const monitor = `
 async function monitoredNative(job, label) {
-  let stopped = false;
-  const monitor = (async () => {
-    let lastError = null;
-    while (!stopped) {
-      await sleep(1000);
-      if (stopped) return;
-      const reply = await host(options);
-      if (!reply.ok) throw new Error(label + ': host unavailable: ' + (reply.error || 'no response'));
-      const status = reply.status;
-      const key = status?.state === 'error' ? JSON.stringify([status.reason, status.lastError, status.recoveries]) : null;
-      if (key && key === lastError) throw new Error(label + ': native host failed: ' + status.lastError);
-      lastError = key;
-    }
-  })();
-  try { return await Promise.race([job(), monitor]); }
-  finally { stopped = true; }
+  return withNativeHostMonitor({
+    context, optionsURL: options.url(), readHost: host, run: job, label
+  });
 }
 `;
 replace('async function host(p) {', monitor + '\nasync function host(p) {');

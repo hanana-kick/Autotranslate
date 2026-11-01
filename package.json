@@ -16,7 +16,7 @@
     "lint": "node scripts/build.ts --check",
     "verify": "node scripts/verify-package.ts",
     "pretest": "tsc -p tsconfig.json",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test test/*.test.ts test/native-extension/host-monitor.test.mjs",
     "ci": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify",
     "test:browser": "node --test --test-concurrency=1 test/browser/*.test.mjs",
     "test:browser:dom": "node --test test/browser/dom.test.mjs"
