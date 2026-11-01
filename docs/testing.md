@@ -1,90 +1,52 @@
 # Validation contract
 
-## Fast deterministic checks
+## Deterministic type, module and package checks
 
-Use Node 24 or newer. `npm ci && npm run ci` type-checks extension and tooling,
-validates assets/catalogues/API boundaries, runs production-module regression
-suites, builds both browser packages and verifies ZIP contents. The existing
-shared CI action additionally rebuilds archives and compares their checksums.
+Use Node 24 or newer:
 
-The new regression suites load **compiled production modules**, not copied
-implementations. The storage tests use real `Response` and `ReadableStream`;
-model-host tests inject a deterministic runtime implementing the MediaPipe API.
-They are protocol/lifecycle tests, not real-model benchmarks.
+```sh
+npm ci
+npm run ci
+```
 
-Covered invariants:
+This type-checks extension/tooling, validates assets and API boundaries, runs compiled production-module and host-monitor regressions, builds both packages and checks ZIP contents. The shared CI action also rebuilds and compares archive checksums.
 
-* native Fetch stream contract, partial file cleanup and selection-before-retirement;
-* successful warmup before model activation; failed replacement preserves the old file;
-* immediate cancellation acknowledgement and per-session invalidation of late results;
-* compare-before-write protects a page's own edits;
-* strict inline markers or per-node fallback, never length-based redistribution;
-* partial paragraphs remain incomplete and retry from their original source;
-* completed nodes and requested strings are different counters;
-* changing the model/token budget recreates the runtime as necessary;
-* over-budget single inputs fail explicitly instead of silently truncating;
-* timed-out native instances are disposed before reuse;
-* detached-node cleanup and bounded, context-scoped translation caching;
-* policy propagation finds tabs after worker restart and does not wait serially per tab.
+Storage tests use native `Response` and `ReadableStream`. Host tests deliberately use a deterministic MediaPipe API double. They establish platform contracts and lifecycle behavior, not original-model inference or performance.
 
-## Real Chromium automation
+Regression invariants cover Fetch/OPFS/IndexedDB failure cleanup; activation before retirement; epoch and source ownership; current-source restoration; strict inline alignment; partial completion; context-budget changes; invalid generated output; worker termination and bounded recovery; bounded caches and detached-node cleanup; tab discovery after background restart; standard Promise/raw Chrome callback messaging; and bounded Firefox preparation channels. A passing message-contract test does not establish Firefox native compatibility.
+
+## Actual browser / deterministic inference layer
 
 ```sh
 npm ci
 npm run build
-npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
 npx playwright install --with-deps chromium
 npm run test:browser
 ```
 
-`Browser regression` runs on pull requests and main. The Release workflow also
-calls it and **cannot publish until it passes**. Screenshots, Playwright trace
-and TAP results are Actions artifacts. The extension lifecycle suite does not
-skip itself when Chromium fails to load an extension: that is a failed check.
+`dom.test.mjs` exercises actual DOM and MutationObserver with a scripted translator. `extension.test.mjs` installs an ephemeral copy of the package and tests actual extension APIs, service-worker restart, offscreen placement, settings, file selection and browser storage. Only that copy gets a deterministic inference implementation and capability fixture. Production files and release packages remain untouched.
 
-`dom.test.mjs` exercises actual DOM nodes and MutationObserver with a scripted
-translator. `extension.test.mjs` exercises actual Chrome service-worker lifetime,
-offscreen-document placement, extension messages, injection, settings, native
-Fetch responses, OPFS and IndexedDB, plus installation through the file picker.
-It explicitly terminates and restarts the service worker via CDP.
+For an existing Chromium executable, use `CHROMIUM_EXECUTABLE=/path/to/chromium npm run test:browser:dom`. `PLAYWRIGHT_MODULE` selects a driver module and `QA_DIR` selects the evidence directory. Do not bypass managed extension-installation policies; isolated Actions runners provide the separate extension test environment.
 
-The extension suite **copies** `build/chrome` to an ephemeral directory. Only in
-that copy, it installs a deterministic MediaPipe API double and a GPU-capability
-fixture. This enables reproducible CI without gated multi-gigabyte weights or a
-GPU. `src/`, release archives and the production capability check are unchanged.
-A one-megabyte fixture file is not represented as a genuine working AI model.
+## Planner-only layer
 
-For an existing Chromium executable:
+`PLANNER_ENFORCE=1 node test/optimization/planner-audit.mjs` followed by `node test/optimization/check-budget.mjs` measures actual DOM eligibility/order and CPU overhead using identity responses. Every compiled module's SHA-256 and environment are recorded. These are not translations. See [the planner audit](optimization-audit.md).
 
-```sh
-CHROMIUM_EXECUTABLE=/path/to/chromium npm run test:browser:dom
-```
+## Original-model installed-extension layer
 
-`PLAYWRIGHT_MODULE` can name an already installed Node Playwright module;
-`QA_DIR` sets the evidence directory. Managed browser policies may prohibit
-extension loading. Do not disable those policies: run DOM-only tests there and
-run the extension suite on the isolated CI runner instead.
+`test/dynamic-extension/run-dynamic.mjs` extends the native installation/onboarding driver with dynamic DOM and multitab scenarios. It does not replace the application's inference engine, model, capability detection or extension messaging. The real SDK/model and installed-file/package hashes are checked. On macOS the released Chrome for Testing distribution is pinned and verified by the repository action; Firefox uses its official distribution and Mozilla WebDriver separately.
 
-## What these checks do not certify
+The reusable `native-extension.yml` requires five fresh hardware profiles. Static cases, dynamic changes, in-flight edits, restoration and bounded multitab endurance must all pass. One profile performs 25 repeated update rounds; the others perform five. A canceled/blocked/failed run cannot be counted as a pass.
 
-Passing CI does **not** establish TranslateGemma translation quality, real GPU
-backend selection, speed, peak memory, multi-gigabyte download reliability or
-Firefox runtime execution. Firefox is type-checked, built and package-verified,
-not exercised by the Chromium suite. Historical README timings are not rerun by
-these tests.
+Public YouTube QA is separate from the deterministic YouTube-like fixture. It must preserve external sign-in/bot restrictions instead of logging in, bypassing controls or substituting pages. Public-site observations and third-party warnings are not generalized to all YouTube sessions.
 
-Before a hardware/model performance claim, install the real gated `.task` model
-in an unmodified package, record browser/OS/GPU/runtime versions and model hash,
-then verify real EN/JA to KO samples, long and inline-rich pages, cancellation,
-model replacement, worker restart, memory release and forbidden external
-translation traffic. Record actual measurements separately from deterministic
-CI results. No Hugging Face credential is embedded in the repository or CI.
+**Firefox native preparation remains a known failure, not merely an untested package.** Its official-runtime evidence and acceptance criteria are in [issue #2](https://github.com/hanana-kick/Autotranslate/issues/2). The separate native Firefox workflow is a release prerequisite. See [the T01–T16 ledger](review-qa-status.md) for the current distinctions.
 
-## Deliberate safety tradeoffs
+## Release, evidence and limits
 
-Missing/malformed inline markers fall back to independent node translations.
-This preserves link ownership at the cost of some fluency; valid markers are
-not proof of linguistic correctness. A single input that still cannot fit its
-token budget is reported as `context-overflow`; the original remains intact.
-Cancellation immediately prevents writes and returns control to the user; it
-does not promise that a native runtime can physically abort computation.
+Publication requires browser regression, planner acceptance, native Chrome and native Firefox success, followed by the build action's type/unit/package checks. Main integration is not permission to publish a package with a failed native gate.
+
+No token or model file is committed. Authenticated browser traces/profiles are excluded from artifacts; text evidence is scanned before upload. Screenshots, sanitized logs, before/after HTML, installed-file inventories, environment and tested package hashes are retained.
+
+Semantic translation quality, arbitrary websites, all GPU/backends and hours-long memory stability are not certified by these suites. Missing inline alignment falls back to independent fragments to preserve element ownership, not to prove fluency. Oversized inputs fail explicitly. Cancellation immediately stops DOM writes, while actual computation is separately supervised and bounded.
