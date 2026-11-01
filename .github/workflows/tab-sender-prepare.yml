@@ -51,8 +51,8 @@ jobs:
            }
           });
           `);
-          const workflow='.github/workflows/native-extension.yml';const y=fs.readFileSync(workflow,'utf8');const anchor="      - 'test/dynamic-extension/**'";
-          assert.equal(y.split(anchor).length,2);fs.writeFileSync(workflow,y.replace(anchor,anchor+"\n      - 'test/tab-control/**'"));
+          const workflow='.github/workflows/native-extension.yml';const y=fs.readFileSync(workflow,'utf8');const anchor="'test/dynamic-extension/**']";
+          assert.equal(y.split(anchor).length,2);fs.writeFileSync(workflow,y.replace(anchor,"'test/dynamic-extension/**', 'test/tab-control/**']"));
           JS
       - run: npm ci --no-audit --no-fund
       - name: Type and sender contract validation
