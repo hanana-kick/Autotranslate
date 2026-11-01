@@ -21,8 +21,8 @@ assert.equal(before['vendor/mediapipe/genai_bundle.js'],createHash('sha256').upd
 // permission is confined to the ephemeral localhost-only CI browser, never a user profile.
 const driver = spawn(process.env.GECKODRIVER || 'geckodriver',['--port','4444','--host','127.0.0.1','--allow-system-access','--log','error'],{stdio:['ignore','pipe','pipe']});
 let driverLog='';for(const stream of [driver.stdout,driver.stderr])stream.on('data',b=>{driverLog+=clean(b).slice(0,4000);});
-let session, server;
-async function api(method,path,data,timeout=45000) { const r=await fetch('http://127.0.0.1:4444'+path,{method,headers:{'Content-Type':'application/json'},...(data===undefined?{}:{body:JSON.stringify(data)}),signal:AbortSignal.timeout(timeout)});const result=await r.json();if(!r.ok||result.value?.error)throw Error(clean(method+' '+path+': '+(result.value?.message || r.status)));return result.value; }
+let session, server, rootWindow;
+async function api(method,path,data,timeout=45000) { summary.operation = method + ' ' + path; await save(); const r=await fetch('http://127.0.0.1:4444'+path,{method,headers:{'Content-Type':'application/json'},...(data===undefined?{}:{body:JSON.stringify(data)}),signal:AbortSignal.timeout(timeout)}).catch(error=>{throw Error(clean(method+' '+path+': '+error.message));});const result=await r.json();if(!r.ok||result.value?.error)throw Error(clean(method+' '+path+': '+(result.value?.message || r.status)));return result.value; }
 const command=(method,path,data,timeout)=>api(method,'/session/'+session+path,data,timeout);
 const js=(script,...args)=>command('POST','/execute/sync',{script,args});
 const use=handle=>command('POST','/window',{handle});
@@ -32,12 +32,15 @@ async function click(selector) { return command('POST','/element/'+await element
 async function fill(selector,text) { const id=await element(selector);await command('POST','/element/'+id+'/clear',{});await command('POST','/element/'+id+'/value',{text}); }
 async function wait(fn,label,ms=30000) { const end=Date.now()+ms;let last;while(Date.now()<end){last=await fn();if(last)return last;await sleep(250);}throw Error(label+' timed out'); }
 async function snapshot(name) { const png=await command('GET','/screenshot');await writeFile(join(out,name+'.png'),Buffer.from(png,'base64'));await writeFile(join(out,name+'.html'),clean(await js('return document.documentElement.outerHTML'))); }
-async function newTab(url) { const {handle}=await command('POST','/window/new',{type:'tab'});await use(handle);await navigate(url);return handle; }
+// A popup options window is not a tab strip. Create fixture tabs in the original
+// normal browser window, then continue operating the actual popup separately.
+async function newTab(url) { await use(rootWindow); const {handle}=await command('POST','/window/new',{type:'tab'});await use(handle);await navigate(url);return handle; }
 try {
   assert.ok(process.env.FIREFOX_BINARY,'official Firefox binary is required');
   await wait(async()=>{try{return await api('GET','/status');}catch{return false;}},'driver startup');
   const opened=await api('POST','/session',{capabilities:{alwaysMatch:{browserName:'firefox',pageLoadStrategy:'eager','moz:firefoxOptions':{binary:process.env.FIREFOX_BINARY}}}},90000);
   session=opened.sessionId;summary.browser=opened.capabilities.browserVersion;
+  rootWindow = await command('GET','/window');
   await command('POST','/timeouts',{script:15000,pageLoad:30000,implicit:0});
   await command('POST','/window/rect',{width:1200,height:850});
   const version=JSON.parse(await readFile('package.json','utf8')).version;
