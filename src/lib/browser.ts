@@ -125,7 +125,7 @@ namespace AT {
     message: Message,
     sender: Sender,
     sendResponse: (response: Response) => void
-  ) => boolean;
+  ) => boolean | Promise<Response>;
 
   /** Rejections carry no shape: an Error, a DOMException, or anything a handler threw. */
   type Rejection = { message?: unknown; code?: unknown };
@@ -260,26 +260,30 @@ namespace AT {
   };
 
   // Wraps a message listener table so handlers can be plain async functions.
-  // Returns true from the listener and answers via sendResponse, which works
-  // identically in Chrome and Firefox.
+  // Return the actual reply Promise through the standard browser API. Firefox
+  // owns this pending asynchronous response for the event-page lifetime; the
+  // Chrome polyfill converts it to its callback contract. A raw chrome fallback
+  // retains sendResponse for hosts that do not support promise listeners.
   export function onMessage(handlers: MessageHandlers): void {
     extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Own properties only: `handlers['constructor']` would otherwise resolve
       // to Object and answer a type nobody handles.
       const handler = Object.hasOwn(handlers, message?.type ?? '') ? handlers[message?.type] : undefined;
       if (!handler) return false;
-      Promise.resolve()
+      const reply: Promise<Response> = Promise.resolve()
         .then(() => handler(message, sender))
-        .then((result) => sendResponse({ ok: true, ...(result ?? {}) }))
+        .then((result) => ({ ok: true, ...(result ?? {}) }))
         .catch((error: unknown) => {
           AT.warn(message.type, error);
           const rejection = error as Rejection;
-          sendResponse({
+          return {
             ok: false,
             error: rejection?.message ?? String(error),
             code: rejection?.code ?? null
-          });
+          };
         });
+      if (globals.browser === extensionApi) return reply;
+      void reply.then(sendResponse);
       return true;
     });
   }

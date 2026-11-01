@@ -216,7 +216,9 @@ function environment({
       resolve(payload as ATNamespace);
     };
     const willAnswer = events.messages.map((listener) => listener(message, sender, respond));
-    if (!willAnswer.includes(true)) resolve(silence);
+    const promises = willAnswer.filter((value): value is Promise<unknown> => value instanceof Promise);
+    for (const promise of promises) void promise.then(respond);
+    if (!willAnswer.includes(true) && promises.length === 0) resolve(silence);
     return promise;
   };
 

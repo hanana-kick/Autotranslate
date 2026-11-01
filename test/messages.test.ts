@@ -1,6 +1,6 @@
 // Unit tests for the message plumbing in `src/lib/browser.ts`: the router that
-// lets handlers be plain async functions, the keep-alive contract (`true` from
-// the listener, the answer delivered later through sendResponse), the failure
+// lets handlers be plain async functions, the Promise response lifetime (with
+// a raw Chrome callback fallback), the failure
 // envelope every caller branches on, and the handle selection between the
 // promise-based `browser` and plain `chrome`.
 import assert from 'node:assert/strict';
@@ -8,7 +8,7 @@ import test from 'node:test';
 import { load, resetGlobals, type ATNamespace } from './helpers.ts';
 
 type Message = { type?: string; [key: string]: unknown };
-type Listener = (message: Message, sender: unknown, sendResponse: (response: unknown) => void) => boolean;
+type Listener = (message: Message, sender: unknown, sendResponse: (response: unknown) => void) => boolean | Promise<unknown>;
 
 type Harness = {
   AT: ATNamespace;
@@ -71,10 +71,12 @@ async function reply(
 ): Promise<{ keptChannel: boolean; response: unknown; answered: boolean }> {
   let response: unknown;
   let answered = false;
-  const keptChannel = listener(message, sender, (value) => {
+  const result = listener(message, sender, (value) => {
     response = value;
     answered = true;
-  }) === true;
+  });
+  const keptChannel = result === true || result instanceof Promise;
+  if (result instanceof Promise) { response = await result; answered = true; }
   await flush();
   return { keptChannel, response, answered };
 }
@@ -87,7 +89,7 @@ test('a handler answers asynchronously while the listener keeps the channel open
   assert.equal(listeners.length, 1, 'one table registers exactly one runtime listener');
 
   const result = await reply(listeners[0]!, { type: 'at/x' });
-  assert.equal(result.keptChannel, true, 'the listener must return true and answer later');
+  assert.equal(result.keptChannel, true, 'the standard API must own the asynchronous reply');
   assert.deepEqual(result.response, { ok: true, value: 1 });
 });
 
@@ -347,4 +349,31 @@ test('a detector that throws is a missing answer, not a failed translation', asy
   };
   const AT = load('lib/constants.js', 'lib/browser.js');
   assert.equal(await AT.detectLanguage('hello'), null);
+});
+
+
+test('standard browser listener returns the real pending operation, not a detached callback', async () => {
+  const { AT, listeners } = boot({});
+  let finish!: (value: unknown) => void;
+  const operation = new Promise((resolve) => { finish = resolve; });
+  AT.onMessage({ 'at/long': () => operation });
+  const response = listeners[0]!({type:'at/long'}, {}, () => assert.fail('standard API must not call sendResponse'));
+  assert.ok(response instanceof Promise);
+  let settled=false;
+  void response.then(()=>{settled=true;});
+  await flush(); assert.equal(settled,false);
+  finish({ status:'ready' });
+  assert.deepEqual(await response,{ok:true,status:'ready'});
+});
+
+test('raw Chrome listener preserves its asynchronous callback fallback', async () => {
+  resetGlobals();
+  const listeners: Listener[]=[];
+  const host=globalThis as unknown as Record<string,unknown>;
+  host.chrome={runtime:{onMessage:{addListener:(listener:Listener)=>listeners.push(listener)}}};
+  const AT=load('lib/constants.js','lib/browser.js');
+  AT.onMessage({'at/x':async()=>({value:4})});
+  let answer:unknown;
+  assert.equal(listeners[0]!({type:'at/x'}, {}, value=>{answer=value;}),true);
+  await flush(); assert.deepEqual(answer,{ok:true,value:4});
 });
