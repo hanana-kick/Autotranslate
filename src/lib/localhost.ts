@@ -634,23 +634,7 @@ namespace AT.localhost {
     const reply = await generate(batch, texts.join('\n'));
     if (texts.length === 1) return [reply.trim()];
     const parsed = L.parseNumbered(reply, texts.length);
-    if (parsed) {
-      // A numbered response can preserve the shape while echoing an English
-      // fragment unchanged. Re-ask only that fragment once, using the existing
-      // single-input prompt. Names may legitimately stay unchanged, so this is
-      // bounded validation, not a forced target-script rule or recursive retry.
-      if (source !== target) {
-        const normalized = (value: string) => value.replace(/\s+/gu, ' ').trim();
-        for (let i = 0; i < texts.length; i++) {
-          const text = texts[i]!;
-          if (!/\p{L}/u.test(text) || normalized(parsed[i]!) !== normalized(text)) continue;
-          AT.log('on-device unchanged batch segment, retrying individually', i);
-          const single = await translateChunk(source, target, [text], null);
-          parsed[i] = single[0] ?? '';
-        }
-      }
-      return parsed;
-    }
+    if (parsed) return parsed;
     AT.warn('on-device split mismatch, retrying per text', texts.length);
     const out: string[] = [];
     for (const text of texts) {
