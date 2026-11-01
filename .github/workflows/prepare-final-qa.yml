@@ -1,0 +1,62 @@
+name: Prepare final fixes
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: [.github/workflows/prepare-final-qa.yml]
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Validate exact reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'f10c3ea2bc531698db3707271e4355a3d32a2ec71fc875da35785d98b7214a12  .qa-final.patch' | sha256sum -c -
+          git apply --check .qa-final.patch
+          git apply .qa-final.patch
+          git diff --check
+          mkdir -p /tmp/final-fixes
+          git diff > /tmp/final-fixes/applied.patch
+      - run: npm ci --no-audit --no-fund
+      - name: Full type, unit and package validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run ci 2>&1 | tee /tmp/final-fixes/ci.log
+          node --check test/native-extension/youtube.mjs
+          node --check test/firefox-native/webdriver.mjs
+      - name: Prepare commit object without updating a branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import {execFileSync} from 'node:child_process';
+          const repo=process.env.GITHUB_REPOSITORY, parent=process.env.GITHUB_SHA;
+          const paths=execFileSync('git',['diff','--name-only'],{encoding:'utf8'}).trim().split('\n').filter(Boolean);
+          const remove=['.qa-final.patch','.github/workflows/qa-workspace.yml','.github/workflows/prepare-final-qa.yml'];
+          async function api(path,body){const r=await fetch(`https://api.github.com/repos/${repo}/${path}`,{method:body?'POST':'GET',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(`${path}: ${r.status}`);return d;}
+          const base=await api(`git/commits/${parent}`),entries=[];
+          for(const path of paths){const blob=await api('git/blobs',{encoding:'utf-8',content:fs.readFileSync(path,'utf8')});entries.push({path,mode:'100644',type:'blob',sha:blob.sha});}
+          for(const path of remove)entries.push({path,mode:'100644',type:'blob',sha:null});
+          const tree=await api('git/trees',{base_tree:base.tree.sha,tree:entries});
+          const commit=await api('git/commits',{message:'fix: keep model installs responsive and bound GPU probing; validate public dynamic pages',tree:tree.sha,parents:[parent]});
+          fs.writeFileSync('/tmp/final-fixes/proposal.json',JSON.stringify({parent,sha:commit.sha,tree:tree.sha,entries,validation:'npm run ci; syntax checks passed',branchUpdated:false},null,2));
+          console.log(JSON.stringify({parent,sha:commit.sha,tree:tree.sha,branchUpdated:false}));
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: final-fixes-proposal
+          path: /tmp/final-fixes/
+          retention-days: 3
