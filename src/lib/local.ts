@@ -112,6 +112,8 @@ namespace AT.local {
   export type ModelPhase = 'runtime' | 'model-read' | 'model-create' | 'warmup' | 'count' | 'generate';
   /** Enforced by the document outside the inference worker. */
   export const MODEL_LOAD_TIMEOUT_MS = 300000;
+  /** Even capability checks may hang after GPU-process loss. Keep UI bounded. */
+  export const GPU_PROBE_TIMEOUT_MS = 5000;
 
   export type ModelState = 'unloaded' | 'loading' | 'ready' | 'busy' | 'error';
 

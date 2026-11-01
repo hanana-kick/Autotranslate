@@ -190,3 +190,17 @@ test('worker host: software generation retains its explicit long deadline',async
   await new Promise(r=>setTimeout(r,25));assert.equal(worker.terminated,false);worker.reply();await req;
   await AT.localhost.handle({type:'at/local-unload'});
 });
+
+
+test('worker host: a lost GPU capability probe cannot hang status or unload', async () => {
+  const AT = fixture();
+  AT.local.GPU_PROBE_TIMEOUT_MS = 15;
+  Object.defineProperty(globalThis, 'navigator', { configurable: true,
+    value: { gpu: { requestAdapter: () => new Promise(() => {}) } } });
+  const state = await AT.localhost.status();
+  assert.equal(state.state, 'error');
+  assert.equal(state.reason, 'no-webgpu');
+  assert.match(state.lastError, /probe timed out/);
+  const reply = await AT.localhost.handle({ type: 'at/local-unload' });
+  assert.equal(reply.status.state, 'unloaded');
+});

@@ -46,9 +46,11 @@ try {
   summary.adapter=await js('return navigator.gpu.requestAdapter().then(a=>a?{vendor:a.info?.vendor,architecture:a.info?.architecture,features:[...a.features]}:null)');
   assert.ok(summary.adapter,'Firefox must expose a genuine WebGPU adapter');
   await click('#targetLang option[value="ko"]');await snapshot('01-onboarding');await step('onboarding-and-adapter',{adapter:summary.adapter});
+  await step('original-model-download');
   if(token)await fill('#modelToken',token);await click('#download');
+  await fill('#modelToken','');
   const begin=Date.now();
-  await wait(async()=>{const ui=await js('return {ready:!document.querySelector("#start").disabled,kind:document.querySelector("#status").dataset.kind,status:document.querySelector("#status").textContent}');summary.lastUI=ui;await save();if(ui.kind==='error')throw Error(ui.status);return ui.ready;},'original model preparation',20*60000);
+  await wait(async()=>{const ui=await js('return {ready:!document.querySelector("#start").disabled,kind:document.querySelector("#status").dataset.kind,status:document.querySelector("#status").textContent,received:document.querySelector("#progress").value,total:document.querySelector("#progress").max}');summary.lastUI=ui;await save();if(ui.kind==='error')throw Error(ui.status);return ui.ready;},'original model preparation',20*60000);
   await fill('#modelToken','');await snapshot('02-model-ready');await step('original-model-ready',{elapsedMs:Date.now()-begin});
   const options=await newTab(origin+'/options.html');
   await wait(()=>js('return document.querySelector("#localModel")?.value && document.querySelector("#targetLang")?.value==="ko"'),'options settings');
@@ -68,7 +70,9 @@ try {
   summary.restoration=await js('return {elements:elements.every((e,i)=>e===document.body.querySelectorAll("*")[i]),attributes:elements.every((e,i)=>JSON.stringify([...e.attributes].map(a=>[a.name,a.value]))===attrs[i]),text:[...sources].every(([n,t])=>n.nodeValue===t),input:document.querySelector("#draft").value==="private draft"}');
   assert.ok(Object.values(summary.restoration).every(Boolean));await click('#event');assert.equal(await js('return window.clicks'),1);await snapshot('06-restored');
   await step('latest-source-restored-and-events-preserved',summary.restoration);summary.passed=true;
-} catch(error) {summary.failure={stage:summary.stage,message:clean(error.message)};console.error(JSON.stringify(summary.failure));process.exitCode=1;}
+} catch(error) {summary.failure={stage:summary.stage,message:clean(error.message)};console.error(JSON.stringify(summary.failure));process.exitCode=1;
+  if(session) { await fill('#modelToken','').catch(()=>{}); await snapshot('FAIL-current-page').catch(()=>{}); }
+}
 finally {
   summary.installedFilesUnchanged=JSON.stringify(before)===JSON.stringify(await inventory('build/firefox'));
   if(!summary.installedFilesUnchanged){summary.passed=false;process.exitCode=1;}

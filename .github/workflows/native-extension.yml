@@ -28,9 +28,8 @@ jobs:
     name: Original extension / ${{ inputs.backend || 'hardware' }} / fresh profile ${{ matrix.repetition }}
     strategy:
       fail-fast: false
-      # Avoid resource contention between heavy native-model validation jobs.
-      # All five fresh profiles and every assertion remain mandatory.
-      max-parallel: 1
+      # Each repeat gets a fresh runner and browser profile. Keep every repeat.
+      max-parallel: 5
       matrix:
         repetition: ${{ fromJSON(inputs.backend == 'software' && '[1]' || '[1,2,3,4,5]') }}
     runs-on: ${{ inputs.backend == 'software' && 'ubuntu-latest' || 'macos-latest' }}

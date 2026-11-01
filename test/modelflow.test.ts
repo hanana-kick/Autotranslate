@@ -83,3 +83,14 @@ test('install: onboarding prefers the selected working model over a newer failed
   AT.modelstore.list = async () => [{ id: 'failed-stage' }, { id: 'working-model' }];
   assert.equal((await AT.modelflow.installed()).id, 'working-model');
 });
+
+
+test('install: unanswered persistence permission cannot block model installation', async () => {
+  const env = transaction();
+  const AT = (globalThis as ATNamespace).AT;
+  AT.modelstore.requestPersistence = () => new Promise(() => {});
+  const result = await env.install();
+  assert.equal(result.ok, true);
+  assert.equal(env.selected(), 'new-model');
+  assert.deepEqual(env.events, ['stage', 'prepare', 'select', 'cleanup']);
+});

@@ -34,11 +34,13 @@ namespace AT.modelflow {
 
   /** Eviction would cost the user a 3.6 GiB download, so ask for an exemption. */
   export async function keepStorage(): Promise<void> {
-    try {
-      await AT.modelstore.requestPersistence();
-    } catch (error: unknown) {
+    // Firefox can leave this promise pending while a browser-owned permission
+    // panel awaits input. Persistence is optional: download quota is checked
+    // independently. Never make accepting an eviction exemption a prerequisite
+    // for downloading/importing the user's model. No permission is auto-granted.
+    void AT.modelstore.requestPersistence().catch((error: unknown) => {
       AT.warn('asking for persistent storage failed', String((error as { message?: unknown })?.message ?? error));
-    }
+    });
   }
 
   /**

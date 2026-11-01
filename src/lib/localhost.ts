@@ -342,7 +342,20 @@ namespace AT.localhost {
     if (state.supported) return;
     const gpu = (globalThis.navigator as { gpu?: { requestAdapter?: () => Promise<unknown> } } | undefined)?.gpu;
     if (!gpu?.requestAdapter) fail('no-webgpu', 'WebGPU is not available');
-    const adapter = await gpu.requestAdapter();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let adapter: unknown;
+    try {
+      adapter = await Promise.race([
+        gpu.requestAdapter(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('WebGPU adapter probe timed out')), L.GPU_PROBE_TIMEOUT_MS);
+        })
+      ]);
+    } catch (error: unknown) {
+      fail('no-webgpu', error);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (!adapter) fail('no-webgpu', 'no WebGPU adapter was found');
     const actual = adapter as { isFallbackAdapter?: boolean; info?: { architecture?: string; description?: string } };
     state.softwareRendering = actual.isFallbackAdapter === true ||
