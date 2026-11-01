@@ -17,7 +17,7 @@ on:
         required: true
   push:
     branches: [fix/review-hardening-20261031]
-    paths: ['src/**', 'scripts/**', 'package*.json', '.github/workflows/native-extension.yml', '.github/workflows/release.yml', 'test/native-extension/**', 'test/dynamic-extension/**']
+    paths: ['src/**', 'scripts/**', 'package*.json', '.github/actions/released-chromium/**', '.github/workflows/native-extension.yml', '.github/workflows/release.yml', 'test/native-extension/**', 'test/dynamic-extension/**']
 permissions:
   contents: read
 concurrency:
@@ -28,7 +28,6 @@ jobs:
     name: Original extension / ${{ inputs.backend || 'hardware' }} / fresh profile ${{ matrix.repetition }}
     strategy:
       fail-fast: false
-      # Each repeat gets a fresh runner and browser profile. Keep every repeat.
       max-parallel: 5
       matrix:
         repetition: ${{ fromJSON(inputs.backend == 'software' && '[1]' || '[1,2,3,4,5]') }}
@@ -47,6 +46,8 @@ jobs:
       - name: Install pinned browser driver
         run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
       - run: npx playwright install --with-deps chromium
+      - uses: ./.github/actions/released-chromium
+        if: runner.os == 'macOS'
       - name: Original model - static, dynamic, multitab and exact restoration
         env:
           HEADED: '1'

@@ -3,12 +3,12 @@ on:
   workflow_dispatch:
   push:
     branches: [fix/review-hardening-20261031]
-    paths: ['src/**', 'test/native-extension/**', 'test/firefox-native/**', 'test/dynamic-extension/**', '.github/workflows/extended-qa.yml']
+    paths: ['src/**', 'test/native-extension/**', 'test/firefox-native/**', 'test/dynamic-extension/**', '.github/actions/released-chromium/**', '.github/workflows/extended-qa.yml']
 permissions:
   contents: read
 concurrency:
   group: extended-qa-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   native:
     name: Actual extension / ${{ matrix.target }}
@@ -28,15 +28,21 @@ jobs:
       - run: npm ci --no-audit --no-fund && npm run build
       - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
       - run: npx playwright install --with-deps chromium firefox
-      - name: Pinned official Firefox UI test driver
+      - uses: ./.github/actions/released-chromium
+        if: matrix.target == 'youtube'
+      - name: Official Firefox and pinned Mozilla WebDriver
         if: matrix.target == 'firefox'
         run: |
           set -euo pipefail
+          binary='/Applications/Firefox.app/Contents/MacOS/firefox'
+          test -x "$binary"
+          codesign --verify --deep --strict /Applications/Firefox.app
+          mkdir -p test-results/firefox-webdriver
+          "$binary" --version | tee test-results/firefox-webdriver/browser-release.txt
+          printf 'FIREFOX_BINARY=%s\n' "$binary" >> "$GITHUB_ENV"
           curl -fL --retry 3 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-macos-aarch64.tar.gz -o "$RUNNER_TEMP/geckodriver.tar.gz"
           echo "d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5  $RUNNER_TEMP/geckodriver.tar.gz" | shasum -a 256 -c -
           tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP"
-          # Firefox 153+ requires the documented opt-in for extension UI tests.
-          # This affects only the fresh CI WebDriver session, not addon privileges.
           mv "$RUNNER_TEMP/geckodriver" "$RUNNER_TEMP/geckodriver-real"
           printf '#!/bin/sh\nexec "%s/geckodriver-real" --allow-system-access "$@"\n' "$RUNNER_TEMP" > "$RUNNER_TEMP/geckodriver"
           chmod +x "$RUNNER_TEMP/geckodriver"
@@ -51,8 +57,8 @@ jobs:
           set -euo pipefail
           mkdir -p test-results/native-extension test-results/firefox-webdriver
           if [ "$TARGET" = firefox ]; then
-            node --check test/firefox-native/webdriver.mjs
-            node test/firefox-native/webdriver.mjs 2>&1 | tee test-results/firefox-webdriver/execution.log
+            node --check test/firefox-native/released.mjs
+            node test/firefox-native/released.mjs 2>&1 | tee test-results/firefox-webdriver/execution.log
           else
             node test/dynamic-extension/run-dynamic.mjs 2>&1 | tee test-results/native-extension/execution.log
           fi

@@ -1,0 +1,24 @@
+name: Released Chrome for Testing
+description: Install an explicit official stable browser without changing the extension
+runs:
+  using: composite
+  steps:
+    - name: Download and verify signed released browser
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=156.0.8078.80
+        platform=mac-arm64
+        test "$RUNNER_OS" = macOS
+        test "$(uname -m)" = arm64
+        mkdir -p "$RUNNER_TEMP/released-chrome" test-results/native-extension
+        url="https://storage.googleapis.com/chrome-for-testing-public/$version/$platform/chrome-$platform.zip"
+        curl -fL --retry 3 "$url" -o "$RUNNER_TEMP/released-chrome.zip"
+        unzip -q "$RUNNER_TEMP/released-chrome.zip" -d "$RUNNER_TEMP/released-chrome"
+        app="$RUNNER_TEMP/released-chrome/chrome-$platform/Google Chrome for Testing.app"
+        codesign --verify --deep --strict "$app"
+        binary="$app/Contents/MacOS/Google Chrome for Testing"
+        "$binary" --version | tee test-results/native-extension/browser-release.txt
+        "$binary" --version | grep -F "$version"
+        shasum -a 256 "$RUNNER_TEMP/released-chrome.zip" >> test-results/native-extension/browser-release.txt
+        printf 'CHROMIUM_BINARY=%s\nCHROMIUM_VERSION=%s\n' "$binary" "$version" >> "$GITHUB_ENV"
