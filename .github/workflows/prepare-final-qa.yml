@@ -17,13 +17,14 @@ jobs:
         with:
           node-version: '24'
           cache: npm
-      - name: Validate exact reviewed patch
+      - name: Validate exact reviewed patches
         shell: bash
         run: |
           set -euo pipefail
           echo 'f10c3ea2bc531698db3707271e4355a3d32a2ec71fc875da35785d98b7214a12  .qa-final.patch' | sha256sum -c -
-          git apply --check .qa-final.patch
-          git apply .qa-final.patch
+          echo '0d373fa5a4640d1162fd956699362a262c7af621a42c77087862e275935f627c  .qa-permissions.patch' | sha256sum -c -
+          git apply --check .qa-final.patch .qa-permissions.patch
+          git apply .qa-final.patch .qa-permissions.patch
           git diff --check
           mkdir -p /tmp/final-fixes
           git diff > /tmp/final-fixes/applied.patch
@@ -44,7 +45,7 @@ jobs:
           import {execFileSync} from 'node:child_process';
           const repo=process.env.GITHUB_REPOSITORY, parent=process.env.GITHUB_SHA;
           const paths=execFileSync('git',['diff','--name-only'],{encoding:'utf8'}).trim().split('\n').filter(Boolean);
-          const remove=['.qa-final.patch','.github/workflows/qa-workspace.yml','.github/workflows/prepare-final-qa.yml'];
+          const remove=['.qa-final.patch','.qa-permissions.patch','.github/workflows/qa-workspace.yml','.github/workflows/prepare-final-qa.yml'];
           async function api(path,body){const r=await fetch(`https://api.github.com/repos/${repo}/${path}`,{method:body?'POST':'GET',headers:{Authorization:`Bearer ${process.env.GH_TOKEN}`,Accept:'application/vnd.github+json','Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});const d=await r.json();if(!r.ok)throw Error(`${path}: ${r.status}`);return d;}
           const base=await api(`git/commits/${parent}`),entries=[];
           for(const path of paths){const blob=await api('git/blobs',{encoding:'utf-8',content:fs.readFileSync(path,'utf8')});entries.push({path,mode:'100644',type:'blob',sha:blob.sha});}
