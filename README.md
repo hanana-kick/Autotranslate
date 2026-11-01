@@ -3,7 +3,7 @@
 Automatic on-device web-page translation from a single Manifest V3 TypeScript source tree.
 **Chrome is the supported release. Firefox remains experimental:** the native on-device
 model initialization is failing in actual Firefox tests ([issue #2](https://github.com/hanana-kick/Autotranslate/issues/2)).
-Both browser packages can be built from source for testing, but **v0.1.3 publishes only
+Both browser packages can be built from source for testing, but **releases publish only
 the tested Chrome archive**, not an unverified Firefox addon.
 
 Pages are translated in place: text nodes are replaced, originals are kept so the page can
@@ -70,18 +70,17 @@ only thing a fresh install shows:
 | --- | --- | --- |
 | 1 | Choose the language pages are translated into (defaults to the browser's UI language) | `welcome.html` |
 | 2 | Install the model: **download** it (progress, cancel) or **pick a file** already on disk. Either route writes the file into OPFS, then asks the host to load it — a file that does not load is not "installed" | `welcome.html` → `AT.modelflow` |
-| 3 | Press *Start translating*: `enabled: true`, the model id and the language are stored, and the page closes | `welcome.html` |
+| 3 | Press *Finish setup*: save the model and language without selecting any tab, then close onboarding. Open a web tab and explicitly turn its translation ON. | `welcome.html` → tab popup |
 
 `runtime.onInstalled` (reason `install`) opens this page and stores `enabled: false`. If the
 profile already holds a working model (a reinstall, a second browser), the page says so and
-only asks for the language and the *Start* click.
+only asks for the language and the *Finish setup* click. Completing onboarding never opts a tab in.
 
-**Side panel first.** `AT.ui.openPage` docks the page to the side of the window when the
-browser has `chrome.sidePanel` (`side_panel.default_path` is `welcome.html`), and opens a tab
-when it does not. Chrome only allows `sidePanel.open` in response to a user gesture, and an
-install is not one, so the first run after installing still lands in a tab; the popup's
-settings button *is* a gesture, so on a profile without a model it reopens onboarding in the
-panel. Firefox has no side panel: it always gets the tab.
+On a fresh install, onboarding opens in a separate popup window. The toolbar popup's
+Options button opens tab-bound `options.html` in a side panel when available, otherwise
+in a separate popup window. The default side-panel page is `options.html`. No ordinary
+new tab is used as the extension-owned fallback. A browser-owned unbound Options page
+can edit general settings but cannot silently choose a translation target.
 
 **Translation is explicitly selected per tab.** Each new tab starts OFF, including tabs
 on a site already selected elsewhere. The popup and the tab-bound Options surface show
@@ -126,9 +125,9 @@ list that no longer matches the `importScripts()` call in `background.ts`.
 ```
 src/                     TypeScript, compiled to classic scripts (no bundler)
   manifest.json          single source; the build rewrites it per target
-  background.ts          menus, badge, tab state, message router, auto-translate
+  background.ts          menus, badge, explicit tab consent, session state, message router
   content.ts             injected on demand: translate / restore / selection card
-  welcome.{html,ts}      first run: language, model install, switch on
+  welcome.{html,ts}      first run: language and model install; no automatic tab selection
   popup.{html,ts}        the on/off switch and the target language
   options.{html,ts}      model store, limits, site rules, debug
   styles.css             shared by welcome, popup and options
@@ -140,7 +139,7 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
     local.ts             prompts, token budgets, model records, host status, storage keys
     modelstore.ts        model bytes in OPFS + metadata in IndexedDB (seams for tests)
     modelflow.ts         one install path (download or file) + prepare, shared by welcome and options
-    ui.ts                where an extension page is shown: side panel when the browser has one, else a tab
+    ui.ts                source-bound side panel or separate popup window, plus per-tab switch
     gemma.ts             TranslateGemma's language table and the GemmaLang type (581 codes)
     pagecontext.ts       what kind of page this is, from its own metadata (collect / analyze / hint)
     targets.ts           which region a text is in, how visible it is, and what to translate first
@@ -190,7 +189,7 @@ sequenceDiagram
   participant BG as background (SW / event page)
   participant CS as content.ts
   participant PV as on-device model
-  BG->>BG: tabs.onUpdated(complete) + site rules -> decision
+  BG->>BG: explicit per-tab ON; selected-tab reload + site rules -> decision
   BG->>CS: scripting.executeScript(CONTENT_FILES)
   BG->>CS: at/content-translate {decision, settings snapshot}
   CS->>CS: walk text nodes, group them into runs, skip ignored/edited/translated
