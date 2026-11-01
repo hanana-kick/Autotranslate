@@ -1,0 +1,32 @@
+name: Final QA workspace
+on:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: [.github/workflows/qa-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Export source and pinned dependencies only
+        run: |
+          mkdir -p /tmp/qa-workspace
+          git archive HEAD > /tmp/qa-workspace/source.tar
+          tar -czf /tmp/qa-workspace/deps.tar.gz node_modules
+          cp "$(command -v node)" /tmp/qa-workspace/node
+          git rev-parse HEAD > /tmp/qa-workspace/commit.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: final-qa-workspace
+          path: /tmp/qa-workspace/
+          retention-days: 2
