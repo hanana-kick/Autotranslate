@@ -60,7 +60,7 @@ const host = globalThis as ATNamespace;
 const silence = undefined as unknown as ATNamespace;
 
 /** A tab as the chrome stand-in reports it. */
-type Tab = { id?: number; url?: string; title?: string; ping?: boolean; translated?: number };
+type Tab = { id?: number; url?: string; title?: string; ping?: boolean; translated?: number; active?: boolean; lastAccessed?: number };
 
 /** A message the background sends into a tab. */
 type TabMessage = { type: string; text?: string };
@@ -78,6 +78,7 @@ type Events = {
   menuClicks: Listener[];
   updated: Listener[];
   removed: Listener[];
+  activated: Listener[];
   storageChanged: Listener[];
   messages: MessageListener[];
 };
@@ -195,7 +196,7 @@ function environment({
   };
 
   let hasHostDocument = resident === true;
-  const events: Events = { installed: [], startup: [], menuClicks: [], updated: [], removed: [], storageChanged: [], messages: [] };
+  const events: Events = { installed: [], startup: [], menuClicks: [], updated: [], removed: [], activated: [], storageChanged: [], messages: [] };
 
   const dispatch = (message: ATNamespace, sender: ATNamespace = {}) => {
     if (message?.to === OFFSCREEN_HOST) {
@@ -261,7 +262,7 @@ function environment({
     },
     tabs: {
       query: async () => tabs ?? (tab ? [tab] : []),
-      get: async (tabId: number) => (tab && tab.id === tabId ? tab : null),
+      get: async (tabId: number) => (tabs?.find((candidate) => candidate.id === tabId) ?? (tab && tab.id === tabId ? tab : null)),
       create: async (details: ATNamespace) => {
         recorded.created.push(details);
         return { id: 99 };
@@ -269,6 +270,7 @@ function environment({
       update: async () => {},
       onUpdated: { addListener: (fn: Listener) => events.updated.push(fn) },
       onRemoved: { addListener: (fn: Listener) => events.removed.push(fn) },
+      onActivated: { addListener: (fn: Listener) => events.activated.push(fn) },
       sendMessage: async (tabId: number, message: TabMessage) => {
         recorded.tabMessages.push({ tabId, message });
         return tabReply(message, tab);
@@ -1063,4 +1065,43 @@ test('a storage ON event outranks an older in-flight settings read', async () =>
   const messages = env.recorded.tabMessages.filter(e => e.message.type === env.AT.C.MSG.CONTENT_TRANSLATE);
   assert.ok(messages.length > 0);
   assert.ok(messages.every(e => e.message.settings.enabled === true), 'stale read must not disable a committed ON command');
+});
+
+
+test('speed: enabling with twenty open tabs starts only the foreground document', async () => {
+  const tabs = Array.from({ length: 20 }, (_, index) => ({ id: index + 1,
+    url: 'https://example.test/' + index, active: index === 7, lastAccessed: index }));
+  const env = environment({ tabs, settings: { enabled: false } });
+  const before = env.AT.settings.normalize({ enabled: false });
+  const after = env.AT.settings.normalize({ enabled: true });
+  await fire(env.events.storageChanged, { settings: { oldValue: before, newValue: after } }, 'local');
+  await settlePolicy();
+  const starts = env.recorded.tabMessages.filter((e) => e.message.type === 'at/content-translate');
+  assert.deepEqual(starts.map((e) => e.tabId), [8]);
+  assert.ok(env.recorded.injected.every((e) => e.target.tabId === 8));
+  assert.equal(env.recorded.tabMessages.filter((e) => e.message.type === 'at/content-restore').length, 19,
+    'stale inactive policy is still invalidated after worker restart');
+  tabs[7]!.active = false; tabs[2]!.active = true;
+  await fire(env.events.activated, { tabId: 3 }); await settlePolicy();
+  assert.ok(env.recorded.tabMessages.some((e) => e.tabId === 3 && e.message.type === 'at/content-translate'),
+    'the deferred page starts on real tab activation');
+});
+
+test('speed: options enable chooses only the most recently active web tab', async () => {
+  const tabs = [{ id: 1, url: 'https://a.example/', active: false, lastAccessed: 1 },
+    { id: 2, url: 'https://b.example/', active: false, lastAccessed: 9 },
+    { id: 3, url: 'chrome-extension://id/options.html', active: true, lastAccessed: 10 }];
+  const env = environment({ tabs, settings: { enabled: false } });
+  await fire(env.events.storageChanged, { settings: {
+    oldValue: env.AT.settings.normalize({ enabled: false }), newValue: env.AT.settings.normalize({ enabled: true }) } }, 'local');
+  await settlePolicy();
+  assert.deepEqual(env.recorded.tabMessages.filter((e) => e.message.type === 'at/content-translate').map((e) => e.tabId), [2]);
+});
+
+test('speed: completing a background navigation does not inject or infer', async () => {
+  const tab = { id: 3, url: 'https://quiet.example/', active: false };
+  const env = environment({ tab, settings: { enabled: true } });
+  await fire(env.events.updated, 3, { status: 'complete' }, tab); await settlePolicy();
+  assert.equal(env.recorded.injected.length, 0);
+  assert.ok(!env.types().includes('at/content-translate'));
 });

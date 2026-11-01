@@ -1,9 +1,8 @@
 name: Release (Chrome validated)
 
 # Publish Chrome ONLY when original installed Chrome/model E2E, deterministic
-# browser, planner and reproducible package checks pass. Firefox native model
-# preparation still fails (issue #2). That browser's ZIP is NOT released until
-# its own genuine model E2E passes. Its separate QA workflow stays enabled.
+# browser, planner, paired native speed and reproducible package checks pass.
+# Firefox native preparation still fails (issue #2); its ZIP is NOT released.
 on:
   push:
     branches: [main]
@@ -30,8 +29,14 @@ jobs:
       contents: read
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  speed:
+    uses: ./.github/workflows/native-speed-benchmark.yml
+    permissions:
+      contents: read
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
   release:
-    needs: [browser, native, planner]
+    needs: [browser, native, planner, speed]
     name: Package and publish verified Chrome only
     runs-on: ubuntu-latest
     steps:
@@ -61,6 +66,8 @@ jobs:
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "- original TranslateGemma .task and MediaPipe SDK in the installed Chrome extension; five independent fresh profiles"
             echo "- static and dynamic translation, exact HTML restoration and planner acceptance"
+            echo "- same-machine native speed comparison against 0.1.3: long cached pages, inline links and foreground tab contention"
+            echo "- inactive unread tabs defer inference until selected; known pending work no longer waits for mutation debounce"
             echo
             echo "Chrome: unzip and load from chrome://extensions in Developer mode."
             echo "Firefox is NOT included: its genuine model preparation fails. See https://github.com/$GITHUB_REPOSITORY/issues/2"

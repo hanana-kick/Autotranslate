@@ -27,6 +27,11 @@ export async function runEndurance({ context, options, host, capture, stage, pas
       records.push(await page.locator('#text').evaluateHandle((el) => ({ el, text: el.firstChild })));
     }
     await toggle(true);
+    // Activate deferred unread tabs once; subsequent rounds remain concurrent.
+    for (const page of tabs) {
+      await page.bringToFront();
+      await page.waitForFunction(() => /[가-힣]/u.test(document.querySelector('#text').textContent), null, { timeout: 600000 });
+    }
     const initial = (await host(options)).status.generations;
     for (let round = 0; round <= rounds; round++) {
       const start = performance.now();

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { load } from './helpers.ts';
+import { load, type ATNamespace } from './helpers.ts';
 
 // The page translation engine ties pagecontext + targets + dom together. The
 // document stand-in is deliberately small: a parent element, a rect, two
@@ -290,4 +290,32 @@ test('initial work may yield so a moved viewport is replanned before the old off
   assert.equal(e.batches[before]!.texts[0], 'Article 89');
   assert.equal(next.processedNodes, 8); assert.equal(next.hasMore, true);
   assert.ok(!e.texts[30]!.nodeValue.includes('»'), 'an old offscreen plan cannot consume the next slice first');
+});
+
+
+test('speed: 600 nodes over 38 continuations are measured once, not once per slice', async () => {
+  const fixture = page(Array.from({ length: 600 }, (_, i) => ({ text: 'Unique phrase ' + i, top: i * 20 })));
+  let measurements = 0, requests = 0;
+  const translator = pipeline.create({ doc: fixture.document, settings: () => ({ maxNodes: 600 }),
+    measure: (node: ATNamespace) => { measurements++; return node.parentElement.getBoundingClientRect(); },
+    translate: async (batch: ATNamespace) => { requests += batch.texts.length; return batch.texts.map((s: string) => '»' + s + '«'); } });
+  let result = await translator.translate(16), passes = 1;
+  while (result.hasMore && passes < 50) { result = await translator.resume(16); passes++; }
+  assert.equal(result.translated, 600); assert.equal(requests, 600); assert.equal(passes, 38);
+  assert.equal(measurements, 600, 'existing queued candidates reuse their geometry and order');
+  assert.equal(result.hasMore, false);
+  assert.equal(translator.restore().restored, 600);
+});
+
+test('speed: an external change invalidates queued geometry and preserves new text on restore', async () => {
+  const fixture = page([{ text: 'First original', top: 0 }, { text: 'Second original', top: 800 }, { text: 'Third original', top: 1600 }]);
+  let measurements = 0;
+  const translator = pipeline.create({ doc: fixture.document, settings: () => ({ maxNodes: 600 }),
+    measure: (node: ATNamespace) => { measurements++; return node.parentElement.getBoundingClientRect(); },
+    translate: async (batch: ATNamespace) => batch.texts.map((s: string) => '»' + s + '«') });
+  await translator.translate(1);
+  fixture.texts[1]!.nodeValue = 'Updated source'; translator.invalidatePlan();
+  await translator.resume(1); await translator.resume(1);
+  assert.equal(measurements, 5, 'remaining two nodes are measured exactly once after invalidation');
+  translator.restore(); assert.equal(fixture.texts[1]!.nodeValue, 'Updated source');
 });

@@ -63,6 +63,10 @@ namespace AT.pipeline {
      *  `budget` caps how many nodes this pass may take, so background work on a
      *  page that keeps mutating cannot hold the model for minutes. */
     refresh: (root?: Element | Document | null, budget?: number) => Promise<Result>;
+    /** Continue an unchanged plan without collecting/measuring the page again. */
+    resume: (budget?: number) => Promise<Result>;
+    /** External DOM/viewport changes invalidate geometry, never restore records. */
+    invalidatePlan: () => void;
     restore: () => { restored: number };
     /** Whether this node currently holds a translation of its own source text.
      *  The observer uses it to ignore the writes the pass itself made. */
@@ -181,6 +185,8 @@ namespace AT.pipeline {
     let role: AT.targets.TextRole | null = null;
     let translator: AT.dom.Translator | null = null;
     let batches = 0;
+    type Plan = { nodes: Text[]; entries: { id: string; role: AT.targets.TextRole; priority: AT.targets.Priority }[]; cursor: number };
+    let savedPlan: Plan | null = null;
 
     function executor(): AT.dom.Translator {
       if (translator) return translator;
@@ -210,7 +216,8 @@ namespace AT.pipeline {
       root: Element | Document | null | undefined,
       reset: boolean,
       budget?: number,
-      epoch = generation
+      epoch = generation,
+      resume = false
     ): Promise<Result> {
       const dom = executor();
       const cancelled = () => epoch !== generation || request.shouldAbort?.() === true;
@@ -240,10 +247,12 @@ namespace AT.pipeline {
       // A translation budget must not truncate discovery: the reader may be at
       // node 50,000. Dynamic updates already use affected subtrees. Full scans
       // collect all eligible pending nodes and cap inference only after sorting.
-      const collected = dom.collect(start, Number.POSITIVE_INFINITY);
+      const previousPlan = resume ? savedPlan : null;
+      if (!resume) savedPlan = null;
+      const collected = previousPlan ? previousPlan.nodes : dom.collect(start, Number.POSITIVE_INFINITY);
       // `done` is a memory aid, not the truth: a page that rewrites a node's
       // text in place puts it back in play (`dom.has` is false again).
-      const pending = collected.filter((node) => !done.has(node) || !dom.has(node));
+      const pending = previousPlan ? collected : collected.filter((node) => !done.has(node) || !dom.has(node));
       if (pending.length === 0) {
         return empty();
       }
@@ -258,8 +267,8 @@ namespace AT.pipeline {
       const budgeted = Number(budget) > 0;
       const remaining = budgeted ? pending.filter((node) => !swept.has(node)) : pending;
       if (budgeted && remaining.length === 0) swept = new Set<Text>();
-      const ordered = budgeted && remaining.length > 0 ? remaining : pending;
-      const candidates: AT.targets.Candidate[] = ordered.map((node, index) => {
+      const ordered = previousPlan ? previousPlan.nodes : budgeted && remaining.length > 0 ? remaining : pending;
+      const candidates: AT.targets.Candidate[] = previousPlan ? [] : ordered.map((node, index) => {
         const rect = measure(node);
         return {
           id: String(index),
@@ -270,7 +279,24 @@ namespace AT.pipeline {
           top: rect.top
         };
       });
-      const groups = AT.targets.plan(candidates, { limit, band: height });
+      const plan: Plan = previousPlan ?? { nodes: ordered, cursor: 0,
+        entries: AT.targets.plan(candidates, { band: height }).flatMap((group) =>
+          group.ids.map((id) => ({ id, role: group.role, priority: group.priority }))) };
+      const groups: AT.targets.Group[] = [];
+      const count = Number.isFinite(limit) && limit > 0 ? limit : plan.entries.length;
+      for (const entry of plan.entries.slice(plan.cursor, plan.cursor + count)) {
+        let group = groups[groups.length - 1];
+        if (!group || group.role !== entry.role || group.priority !== entry.priority) {
+          group = { role: entry.role, priority: entry.priority, ids: [] };
+          groups.push(group);
+        }
+        group.ids.push(entry.id);
+      }
+      plan.cursor += groups.reduce((sum, group) => sum + group.ids.length, 0);
+      // Subtree edits cannot replace a saved whole-page plan. The caller will
+      // rediscover once after such an edit, then reuse its remaining queue.
+      const wholePage = root == null || start === request.doc.documentElement;
+      savedPlan = wholePage && plan.cursor < plan.entries.length ? plan : null;
       const before = batches;
       let requested = 0;
       let runs = 0;
@@ -285,7 +311,7 @@ namespace AT.pipeline {
         if (cancelled()) break;
         const subset = group.ids
           .map((id) => ordered[Number(id)])
-          .filter((node): node is Text => node !== undefined);
+          .filter((node): node is Text => node !== undefined && node.isConnected !== false && !dom.has(node));
         if (subset.length === 0) continue;
         role = group.role;
         attempted += 1;
@@ -331,7 +357,7 @@ namespace AT.pipeline {
       failed = Math.max(failed, failures.size);
       error ??= failures.values().next().value?.error ?? null;
       return { requested, translated: dom.stats().translated, runs, batches: batches - before, failed, error,
-        processedNodes, hasMore: !cancelled() && ordered.length > processedNodes };
+        processedNodes, hasMore: !cancelled() && plan.cursor < plan.entries.length };
     }
 
     function schedule(root: Element | Document | null, reset: boolean, budget?: number): Promise<Result> {
@@ -342,11 +368,14 @@ namespace AT.pipeline {
     return {
       translate: (budget) => schedule(null, true, budget),
       refresh: (root, budget) => schedule(root ?? null, false, budget),
+      resume: (budget) => { const epoch = generation; return once(() => run(null, false, budget, epoch, true)); },
+      invalidatePlan: () => { savedPlan = null; },
       isTranslated(node: Text) {
         return translator ? translator.holds(node) : false;
       },
       restore() {
         generation++;
+        savedPlan = null;
         const restored = translator ? translator.restore(request.doc.documentElement).restored : 0;
         done.clear();
         failures.clear();

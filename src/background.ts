@@ -609,11 +609,20 @@ if (typeof self.importScripts === 'function') {
       void updateBadge(tabId);
       return;
     }
+    // Background navigation must not queue an entire unread feed on the shared model.
+    if (tab.active === false) return;
     getSettings()
       // `translateTab` re-reads the tab, so it must take the decision from that
       // read: the event's snapshot can belong to a page that is already gone.
       .then(() => translateTab(tabId))
       .catch((error) => AT.warn('auto translate failed', error));
+  });
+
+  api.tabs.onActivated?.addListener(({ tabId }) => {
+    void api.tabs.get(tabId).then((tab) => {
+      if (!tab || tab.active === false || !isInjectable(tab.url)) return;
+      return translateTab(tabId);
+    }).catch((error) => AT.warn('activated tab translation failed', error));
   });
 
   api.tabs.onRemoved.addListener((tabId) => {
@@ -634,12 +643,20 @@ if (typeof self.importScripts === 'function') {
     // owns the list of open documents that must receive policy changes.
     const tabs = await api.tabs.query({});
     if (revision !== policyEpoch) return;
+    const eligible = tabs.filter((tab): tab is AT.Tab => tab?.id != null && isInjectable(tab.url));
+    const foreground = eligible.filter((tab) => tab.active === true);
+    // Options/onboarding can be the foreground extension tab. Resume the most
+    // recently used web page, not every open tab. Activation handles the rest.
+    const recipients = new Set((foreground.length ? foreground : eligible.slice().sort((a, b) =>
+      (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0)).slice(0, 1)).map((tab) => tab.id));
     await Promise.all(tabs.map(async (tab) => {
       if (tab?.id == null || !isInjectable(tab.url) || revision !== policyEpoch) return;
       const id = tab.id;
       try {
         const decision = decide(tab.url, settings);
-        if (decision.action === 'skip') {
+        if (decision.action === 'skip' || !recipients.has(id)) {
+          // Restore/invalidate stale policy in existing scripts, without injecting
+          // a script or starting inference in an unread tab (also after SW restart).
           await api.tabs.sendMessage(id, { type: C.MSG.CONTENT_RESTORE });
           if (revision === policyEpoch) tabStates.delete(id);
         } else {

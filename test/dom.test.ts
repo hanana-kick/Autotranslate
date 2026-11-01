@@ -127,15 +127,16 @@ test('splitWhitespace keeps the layout apart from the content', () => {
 test('a sentence split by inline elements is translated as one sentence', async () => {
   const strong = el('strong', {}, [t('5 items')]);
   const paragraph = el('p', {}, [t('Total '), strong, t(' left')]);
-  // A provider preserves explicit segment identities, not length proportions.
+  // The existing numbered engine contract preserves each segment identity.
+  const labels: Record<string, string> = { Total: '합계', '5 items': '5개 항목', left: '남음' };
   const { calls, translator, body } = harness(el('div', {}, [paragraph]), (texts) =>
-    texts.map(() => '합계\uE0001\uE0015개 항목\uE0002\uE001남음')
+    texts.map((value) => labels[value]!)
   );
 
   const result = await translator.translateRoot(body);
 
   assert.equal(calls.length, 1, 'one batch');
-  assert.deepEqual(calls[0], ['Total\uE0001\uE0015 items\uE0002\uE001left'], 'the run carries verifiable boundaries');
+  assert.deepEqual(calls[0], ['Total', '5 items', 'left'], 'the indexed batch carries verifiable boundaries without a wasted marker attempt');
   assert.deepEqual(
     textNodes(paragraph).map((node) => node.nodeValue),
     ['합계 ', '5개 항목', ' 남음'],
@@ -146,12 +147,12 @@ test('a sentence split by inline elements is translated as one sentence', async 
   assert.equal(translator.stats().translated, 3);
 });
 
-test('an unaligned short answer falls back without clearing an element', async () => {
+test('an indexed inline batch preserves each element without a preliminary generation', async () => {
   const paragraph = el('p', {}, [t('left side '), el('em', {}, [t('middle')]), t(' right side')]);
   const dictionary: Record<string, string> = { 'left side': '왼쪽', middle: '가운데', 'right side': '오른쪽' };
   const { translator, body, calls } = harness(el('div', {}, [paragraph]), (texts) => texts.map((value) => dictionary[value] ?? '짧은 답'));
   await translator.translateRoot(body);
-  assert.equal(calls.length, 4, 'an unaligned run is retried per fragment');
+  assert.equal(calls.length, 1, 'aligned fragments share one request and no speculative marker generation');
   assert.deepEqual(textNodes(paragraph).map((node) => node.nodeValue), ['왼쪽 ', '가운데', ' 오른쪽']);
   assert.equal(textContent(paragraph), '왼쪽 가운데 오른쪽');
 });

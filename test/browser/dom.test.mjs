@@ -34,8 +34,9 @@ check('aligned inline text preserves the link and restores exact authored nodes'
     const link = root.querySelector('a');
     let clicked = 0;
     link.addEventListener('click', (event) => { event.preventDefault(); clicked++; });
+    const dictionary = { Read: '읽으세요', 'privacy policy': '개인정보처리방침', 'before you continue.': '계속하기 전에.' };
     const translator = AT.dom.createTranslator({ doc: document,
-      translate: async () => ['먼저 \uE0001\uE001개인정보처리방침\uE0002\uE001 을 읽으세요.'] });
+      translate: async (texts) => texts.map((text) => dictionary[text]) });
     await translator.translateRoot(root);
     link.click();
     const answer = { text: root.textContent, link: link.textContent, href: link.getAttribute('href'), same: link === root.querySelector('a'), clicked };
@@ -49,7 +50,7 @@ check('aligned inline text preserves the link and restores exact authored nodes'
   assert.equal(result.restored, true);
 });
 
-check('lost markers never move unrelated words into a link including unspaced CJK', async (page) => {
+check('indexed segments never move unrelated words into a link including unspaced CJK', async (page) => {
   const result = await page.evaluate(async () => {
     const root = document.querySelector('#fixture');
     root.innerHTML = '<h1>Inline link safety</h1><p>Read <a href="/privacy">privacy policy</a> before you continue.</p>';
@@ -240,20 +241,20 @@ check('long-lived virtualized DOM keeps bounded records and no extra provider wo
   assert.equal(result.final.cached, 0);
 });
 
-check('identical inline fallback units reuse the verified aligned cache', async (page) => {
+check('identical indexed inline units reuse the verified aligned cache', async (page) => {
   const result = await page.evaluate(async () => {
     const root = document.querySelector('#fixture');
     root.innerHTML = '<p>Read <a href="/guide">the guide</a> now.</p>'.repeat(2);
     const calls = [];
     const translator = AT.dom.createTranslator({ doc: document, translate: async texts => {
-      calls.push(...texts);
+      calls.push(texts);
       const dictionary = { 'Read': '읽으세요', 'the guide': '안내서', 'now.': '지금.' };
-      return texts.map(s => dictionary[s] || '마커 없이 안내서를 지금 읽으세요.');
+      return texts.map(s => dictionary[s]);
     } });
     await translator.translateRoot(root);
     return { calls, links: [...root.querySelectorAll('a')].map(a => a.textContent) };
   });
-  assert.equal(result.calls.length, 4, 'one failed alignment plus three pieces; no second alignment failure');
+  assert.deepEqual(result.calls, [['Read', 'the guide', 'now.']], 'one indexed batch; the second identical inline unit is cached');
   assert.deepEqual(result.links, ['안내서', '안내서']);
 });
 
@@ -283,7 +284,7 @@ check('invalid aligned pieces are rejected atomically before caching', async (pa
   const result = await page.evaluate(async () => {
     const root = document.querySelector('#fixture'); root.innerHTML = '<p>The &lt;pad&gt; token <a href="/guide">guide</a></p>';
     const original = root.innerHTML;
-    const translator = AT.dom.createTranslator({ doc: document, translate: async () => ['토큰 \uE0001\uE001<pad> 안내서'] });
+    const translator = AT.dom.createTranslator({ doc: document, translate: async () => ['토큰', '<pad> 안내서'] });
     let failed = false; try { await translator.translateRoot(root); } catch { failed = true; }
     return { failed, unchanged: original === root.innerHTML, ...translator.stats() };
   });

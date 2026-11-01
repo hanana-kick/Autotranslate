@@ -1187,3 +1187,23 @@ test('a new target takes effect without waiting for the obsolete target response
   await old;
   assert.deepEqual(pageTexts(env.page.body), ['새 번역']);
 });
+
+
+test('speed: a known continuation yields without the 300 ms mutation debounce', async () => {
+  const texts = Array.from({ length: 48 }, (_, i) => 'Unique sentence number ' + i + '.');
+  const clock = installClock();
+  try {
+    const env = environment({ texts });
+    const first = await env.send(translateMessage());
+    assert.equal(first.translated, 16);
+    assert.equal(clock.pending[0]?.delay, 0, 'work already waiting is scheduled immediately');
+    await clock.run();
+    assert.equal(env.boot.state.pipeline.stats().translated, 32);
+    assert.equal(clock.pending[0]?.delay, 0);
+    await clock.run();
+    assert.equal(env.boot.state.pipeline.stats().translated, 48);
+    assert.equal(clock.pending.length, 0, 'the queue terminates without a feedback loop');
+    await env.send({ type: 'at/content-restore' });
+    assert.deepEqual(pageTexts(env.page.documentElement), texts);
+  } finally { clock.restore(); }
+});

@@ -53,6 +53,9 @@ namespace AT.content {
     roots: Element[];
     /** The queue overflowed: the next tick reads the whole page instead. */
     full: boolean;
+    /** Known pending work is not a new mutation and needs no debounce. */
+    continuation: boolean;
+    immediateTimer: boolean;
     /** A pass is in flight; a tick must not start a second one. */
     working: boolean;
     observer: MutationObserver | null;
@@ -97,6 +100,8 @@ declare var __autotranslate: AT.content.Boot | undefined;
     dirty: false,
     roots: [],
     full: false,
+    continuation: false,
+    immediateTimer: false,
     working: false,
     observer: null,
     timer: 0,
@@ -188,9 +193,13 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.timer = 0;
   }
 
-  function scheduleTick(): void {
+  function scheduleTick(immediate = false): void {
     if (state.stopped || !state.pipeline) return;
     if (state.working) { state.dirty = true; return; }
+    if (state.timer !== 0 && immediate && !state.immediateTimer) {
+      clearTimeout(state.timer);
+      state.timer = 0;
+    }
     if (state.timer !== 0) {
       // A busy page - video progress, ads, live counters - mutates faster than
       // the debounce. Resetting the timer every time meant it never fired and
@@ -199,20 +208,22 @@ declare var __autotranslate: AT.content.Boot | undefined;
       state.dirty = true;
       return;
     }
+    state.immediateTimer = immediate;
     state.timer = setTimeout(() => {
       state.timer = 0;
+      state.immediateTimer = false;
       state.dirty = false;
       runTick()
         .catch(async (error) => {
           AT.warn('dynamic translation failed', error);
-          state.full = false; state.dirty = false; state.roots = [];
+          state.full = false; state.continuation = false; state.dirty = false; state.roots = [];
           await report({ status: 'error', translated: state.pipeline?.stats().translated ?? 0,
             error: String((error as Error)?.message ?? error) });
         })
         .finally(() => {
-          if (state.dirty) scheduleTick();
+          if (state.dirty || state.continuation) scheduleTick(state.continuation);
         });
-    }, C.OBSERVER_DEBOUNCE_MS);
+    }, immediate ? 0 : C.OBSERVER_DEBOUNCE_MS);
   }
 
   /** How many changed regions one tick may visit before it reads the page. */
@@ -297,19 +308,23 @@ declare var __autotranslate: AT.content.Boot | undefined;
   }
 
   function onMutations(records: MutationRecord[]): void {
-    enqueue(changedRegions(records));
+    const regions = changedRegions(records);
+    if (regions === null || regions.length) state.pipeline?.invalidatePlan();
+    enqueue(regions);
     if (!state.full && state.roots.length === 0) return;
     scheduleTick();
   }
 
   /** What this tick should read: specific regions, or the page. */
-  function takeQueue(): Element[] | 'full' | null {
+  function takeQueue(): Element[] | 'full' | 'continue' | null {
     const whole = state.full;
     const regions = state.roots;
     state.full = false;
     state.roots = [];
     if (whole) return 'full';
-    return regions.length > 0 ? regions : null;
+    if (regions.length) return regions;
+    if (state.continuation) { state.continuation = false; return 'continue'; }
+    return null;
   }
 
   function startObserver(): void {
@@ -368,7 +383,8 @@ declare var __autotranslate: AT.content.Boot | undefined;
     }
     const queue = takeQueue();
     if (!queue) return;
-    const regions = queue === 'full' ? [document.body ?? document.documentElement] : queue;
+    const continuing = queue === 'continue';
+    const regions = queue === 'full' || continuing ? [document.documentElement] : queue;
     state.working = true;
     // Background passes take a small slice: a page that keeps mutating (a video
     // site re-rendering its feed) must not hold the single model for minutes.
@@ -386,7 +402,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
         }
         // The page may have removed the region between the mutation and now.
         if (region.isConnected === false) continue;
-        const result = await pipeline.refresh(region, left);
+        const result = continuing ? await pipeline.resume(left) : await pipeline.refresh(region, left);
         if (epoch !== state.epoch || state.stopped) break;
         processed += result.processedNodes;
         translated = result.translated;
@@ -397,18 +413,24 @@ declare var __autotranslate: AT.content.Boot | undefined;
     } finally {
       if (epoch === state.epoch) {
         state.working = false;
-        if (state.dirty) { state.dirty = false; scheduleTick(); }
+        if (state.dirty) { state.dirty = false; scheduleTick(state.continuation); }
       }
     }
     if (epoch !== state.epoch || state.stopped) return;
     // Cached work may make no model requests at all, but still has DOM work
     // left. Continuation is the planner's decision, not a request-count guess.
-    if (more) requestFullPass();
+    if (more) requestContinuation();
     if (processed > 0) await report({ status: failure ? 'error' : (more ? 'translating' : 'translated'), translated, error: failure });
   }
 
   /** Ask for one pass over the whole page (the queue has no regions). */
+  function requestContinuation(): void {
+    state.continuation = true;
+    scheduleTick(true);
+  }
+
   function requestFullPass(): void {
+    state.pipeline?.invalidatePlan();
     state.full = true;
     scheduleTick();
   }
@@ -424,6 +446,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.commandPending = false;
     state.dirty = false;
     state.full = false;
+    state.continuation = false;
     state.roots = [];
     state.working = false;
     state.targetLang = null;
@@ -455,7 +478,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       // viewport plan while newly inserted, visible text waits behind it.
       const result = await pipeline.translate(C.OBSERVER_BATCH_NODES);
       if (epoch !== state.epoch || state.stopped) return { status: 'cancelled' };
-      if (result.hasMore) requestFullPass();
+      if (result.hasMore) requestContinuation();
       const status = result.failed || result.error ? 'error' : (result.hasMore ? 'translating' : 'translated');
       await report({ status, translated: result.translated, error: result.error });
       return { status, translated: result.translated, requested: result.requested,
@@ -463,9 +486,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     } finally {
       if (epoch === state.epoch) {
         state.working = false;
-        if (state.dirty || state.full || state.roots.length) {
+        if (state.dirty || state.full || state.roots.length || state.continuation) {
           state.dirty = false;
-          scheduleTick();
+          scheduleTick(state.continuation);
         }
       }
     }
@@ -491,6 +514,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       stopViewportPass();
       state.dirty = false;
       state.full = false;
+      state.continuation = false;
       state.roots = [];
       await report({ status: 'error', error: String((error as { message?: unknown })?.message ?? error) });
       throw error;
