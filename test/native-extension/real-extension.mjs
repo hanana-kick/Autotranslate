@@ -1,6 +1,7 @@
 // Actual installed extension, original bundled runtime and default .task model.
 // No production-module injection, inference doubles, network mocks or bridges.
 import assert from 'node:assert/strict';
+import { setTabThroughUI } from './tab-ui.mjs';
 import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, writeFile, mkdtemp, rm } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
@@ -139,7 +140,7 @@ try {
   options = await context.newPage(); await options.goto(`${extensionOrigin}/options.html`);
   await options.waitForFunction(async () => {
     const s = await AT.settings.load();
-    return document.querySelector('#sourceLang').value === s.sourceLang && document.querySelector('#targetLang').value === s.targetLang && document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled;
+    return document.querySelector('#sourceLang').value === s.sourceLang && document.querySelector('#targetLang').value === s.targetLang && document.querySelector('#localModel').value === s.localModelId;
   });
   await options.locator('#sourceLang').selectOption('en'); await options.locator('#targetLang').selectOption('ko');
   assert.equal(await options.locator('#localMaxTokens').inputValue(), '1024');
@@ -182,7 +183,7 @@ try {
   options = await context.newPage(); await options.goto(`${extensionOrigin}/options.html`);
   await options.waitForFunction(async () => {
     const s = await AT.settings.load();
-    return document.querySelector('#sourceLang').value === s.sourceLang && document.querySelector('#targetLang').value === s.targetLang && document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled;
+    return document.querySelector('#sourceLang').value === s.sourceLang && document.querySelector('#targetLang').value === s.targetLang && document.querySelector('#localModel').value === s.localModelId;
   });
   for (const [name, selectors] of [['basic', ['#paragraph']], ['article', ['h1', '#paragraph', '#guide']]]) {
     await stage(`translate-${name}-through-extension`);
@@ -211,13 +212,7 @@ try {
     }, selectors);
     const start = performance.now();
     if (name === 'basic') await welcome.locator('#start').click();
-    else {
-      await options.reload(); await options.waitForFunction(async () => {
-    const s = await AT.settings.load();
-    return document.querySelector('#sourceLang').value === s.sourceLang && document.querySelector('#targetLang').value === s.targetLang && document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled;
-  });
-      await options.locator('#enabled').setChecked(true); await options.locator('#save').click();
-    }
+    await setTabThroughUI(options, tabId, true);
     let complete = false;
     while (performance.now() - start < 30 * 60000) {
       // Read the completion acknowledgement BEFORE its DOM snapshot. The old
@@ -246,8 +241,8 @@ try {
     await passed(`${name}-native-page-translation`, { ms: result.translateMs, firstTextMs: result.firstTextMs, rendered: result.rendered, generations: result.afterTranslate.generations - beforeHost.generations });
 
     await stage(`restore-${name}-through-extension-options`);
-    await options.reload(); await options.waitForFunction(() => document.querySelector('#enabled').checked);
-    const restoreAt = performance.now(); await options.locator('#enabled').setChecked(false); await options.locator('#save').click();
+    const restoreAt = performance.now();
+    await setTabThroughUI(options, tabId, false);
     await page.waitForFunction(() => !/[가-힣]/u.test(document.querySelector('#paragraph').textContent));
     const restored = await original.evaluate((o) => ({ html: document.body.innerHTML === o.html,
       text: o.nodes.every(({ node, text }) => node.nodeValue === text), elements: o.elements.every((e, i) => e === document.body.querySelectorAll('*')[i]),

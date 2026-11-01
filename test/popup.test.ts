@@ -86,6 +86,8 @@ function environment({ state, script = {}, stored = null, storageFails = false }
   const area: ATNamespace = {};
   let storageFailure: string | null = storageFails ? 'storage is unavailable' : null;
   let optionsOpened = 0;
+  let consent = state?.tabEnabled ?? (stored?.enabled === true);
+  const createdWindows: ATNamespace[] = [];
   // Tabs the popup opened through `AT.ui` (the side panel is absent here, so
   // every extension page it asks for lands in one).
   const createdTabs: ATNamespace[] = [];
@@ -111,7 +113,7 @@ function environment({ state, script = {}, stored = null, storageFails = false }
         const scripted: unknown = Object.prototype.hasOwnProperty.call(replies, message?.type)
           ? replies[message?.type]
           : message?.type === 'at/get-state'
-            ? { ok: true, ...stateOf(state) }
+            ? { ok: true, ...stateOf(state), tabEnabled: consent }
             : undefined;
         return typeof scripted === 'function' ? (scripted as (message: ATNamespace) => unknown)(message) : scripted;
       },
@@ -131,6 +133,7 @@ function environment({ state, script = {}, stored = null, storageFails = false }
         }
       }
     },
+    windows: {create:async (details:ATNamespace)=>{createdWindows.push(details);return {id:5};}},
     tabs: {
       create: async (details: ATNamespace) => {
         createdTabs.push(details);
@@ -199,6 +202,7 @@ const makeField = (tagName: string, hidden = false): StubField => {
     });
   }
 
+  if (!Object.prototype.hasOwnProperty.call(replies,'at/set-tab-enabled')) replies['at/set-tab-enabled']=async(message:ATNamespace)=>{consent=message.enabled;return {ok:true,tabEnabled:consent};};
   const dispatch = (id: FieldId, type: string, event: UIEvent = { target: fields[id] }): Promise<unknown>[] =>
     (fields[id].listeners[type] ?? []).map((listener) => Promise.resolve(listener(event)));
 
@@ -218,6 +222,7 @@ const makeField = (tagName: string, hidden = false): StubField => {
     get optionsOpened(): number {
       return optionsOpened;
     },
+    createdWindows,
     get createdTabs(): ATNamespace[] {
       return createdTabs;
     },
@@ -305,7 +310,7 @@ test('an idle tab renders the idle status with the switch on and the language se
   assert.equal(h.fields.targetLang.value, 'de');
 });
 
-test('a tab the background cannot inject into disables the language select but not the switch', async () => {
+test('a tab the background cannot inject into disables both the language select and tab switch', async () => {
   const h = environment({
     state: stateOf({
       tab: { id: 3, url: 'chrome://extensions', title: null, host: null },
@@ -317,7 +322,7 @@ test('a tab the background cannot inject into disables the language select but n
   assert.deepEqual(h.status(), { text: 'popup_unavailable', kind: 'warn' });
   assert.equal(h.fields.targetLang.disabled, true);
   // The switch is the global setting, so it stays operable on any tab.
-  assert.equal(h.fields.enabled.disabled, false);
+  assert.equal(h.fields.enabled.disabled, true);
   // No host was derived, so the line falls back to the raw url.
   assert.equal(h.fields.host.textContent, 'chrome://extensions');
 });
@@ -441,184 +446,45 @@ test('an unsupported browser gets one problem, not two', async () => {
 
 // --- the switch acts on the active tab ---------------------------------------
 
-test('switching on saves enabled and translates the active tab', async () => {
-  const h = environment({ stored: { enabled: false, targetLang: 'ja' } });
-  await h.boot();
-  await h.flip(true);
-
-  assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: true } });
-  assert.deepEqual(h.sends[2], { type: 'at/translate-tab', tabId: TAB.id });
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/translate-tab', 'at/get-state']);
-  assert.equal(h.stored?.enabled, true);
-  assert.equal(h.fields.enabled.checked, true);
+test('explicit ON changes this tab, not global settings',async()=>{
+ const h=environment({stored:{enabled:false,targetLang:'ko'}});await h.boot();await h.flip(true);
+ assert.deepEqual(h.sends[1],{type:'at/set-tab-enabled',tabId:TAB.id,enabled:true});
+ assert.deepEqual(h.types(),['at/get-state','at/set-tab-enabled','at/get-state']);
+ assert.equal(h.stored?.enabled,false);assert.equal(h.fields.enabled.checked,true);
 });
-
-test('switching off saves enabled and restores the active tab', async () => {
-  const h = environment({
-    stored: { enabled: true, targetLang: 'ko' },
-    state: stateOf({ state: { status: 'translated', translated: 9, error: null, targetLang: 'ko' } })
-  });
-  await h.boot();
-  await h.flip(false);
-
-  assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: false } });
-  assert.deepEqual(h.sends[2], { type: 'at/restore-tab', tabId: TAB.id });
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/restore-tab', 'at/get-state']);
-  assert.equal(h.stored?.enabled, false);
-  // The re-render reports the stored setting, not the page state.
-  assert.deepEqual(h.status(), { text: 'popup_disabled', kind: 'warn' });
+test('explicit OFF changes this tab without pausing other tabs',async()=>{
+ const h=environment({stored:{enabled:true},state:stateOf({tabEnabled:true})});await h.boot();await h.flip(false);
+ assert.deepEqual(h.sends[1],{type:'at/set-tab-enabled',tabId:TAB.id,enabled:false});
+ assert.equal(h.stored?.enabled,true);assert.equal(h.fields.enabled.checked,false);
+ assert.deepEqual(h.status(),{text:'popup_disabled',kind:'warn'});
 });
-
-test('the switch sends no action when the tab cannot be injected into', async () => {
-  const h = environment({
-    stored: { enabled: false, targetLang: 'ko' },
-    state: stateOf({ tab: { id: 3, url: 'chrome://extensions', title: null, host: null }, canTranslate: false })
-  });
-  await h.boot();
-  await h.flip(true);
-
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/get-state']);
-  assert.ok(!h.types().includes('at/translate-tab'));
-  // The setting is global, so it is still saved.
-  assert.equal(h.stored?.enabled, true);
+test('stored global ON cannot make an unselected tab appear selected',async()=>{
+ const h=environment({stored:{enabled:true},state:stateOf({tabEnabled:false})});await h.boot();
+ assert.equal(h.fields.enabled.checked,false);assert.equal(h.status().text,'popup_disabled');
 });
-
-test('an action for a tab the background did not identify omits its id', async () => {
-  const h = environment({
-    stored: { enabled: false, targetLang: 'ko' },
-    state: stateOf({ tab: { url: 'https://example.com/plain', title: null, host: 'example.com' } })
-  });
-  await h.boot();
-  await h.flip(true);
-
-  const message = h.sends[2];
-  assert.equal(message?.type, 'at/translate-tab');
-  assert.ok(!('tabId' in (message ?? {})) || message.tabId === undefined);
+test('unsupported pages and unknown tab IDs cannot be opted in',async()=>{
+ for(const state of [stateOf({canTranslate:false}),stateOf({tab:{url:'https://example.com/'}})]){
+  const h=environment({state});await h.boot();await h.flip(true);assert.deepEqual(h.types(),['at/get-state']);assert.equal(h.fields.enabled.disabled,true);
+ }
 });
-
-// --- master switch -----------------------------------------------------------
-
-test('the master switch patches the settings it read and re-renders from them', async () => {
-  const h = environment({
-    stored: { enabled: true, targetLang: 'ko' },
-    state: stateOf({ state: { status: 'translated', translated: 3, error: null, targetLang: 'ko' } })
-  });
-  await h.boot();
-  await h.flip(false);
-
-  assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: false } });
-  assert.deepEqual(h.sends[2], { type: 'at/restore-tab', tabId: TAB.id });
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/restore-tab', 'at/get-state']);
-  assert.equal(h.stored?.enabled, false);
-  // The render after the patch reflects the settings the background kept.
-  assert.equal(h.fields.enabled.checked, false);
-  assert.deepEqual(h.status(), { text: 'popup_disabled', kind: 'warn' });
+test('a failed consent change restores the checkbox and preserves the error',async()=>{
+ const h=environment({state:stateOf({tabEnabled:true}),script:{'at/set-tab-enabled':{ok:false,error:'session unavailable'}}});await h.boot();await h.flip(false);
+ assert.equal(h.fields.enabled.checked,true);assert.deepEqual(h.status(),{text:'session unavailable',kind:'error'});
 });
-
-test('the checkbox follows the background snapshot, not the value the control holds', async () => {
-  // The control flipped to checked, but the reply (and storage) still say
-  // disabled: the following render must not keep the optimistic value.
-  const h = environment({
-    stored: { enabled: false, targetLang: 'ko' },
-    script: { 'at/set-settings': { ok: true, settings: { enabled: true, targetLang: 'ko' } } }
-  });
-  await h.boot();
-  assert.equal(h.fields.enabled.checked, false);
-
-  await h.flip(true);
-
-  assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: true } });
-  // The action still follows the switch that was flipped.
-  assert.deepEqual(h.sends[2], { type: 'at/translate-tab', tabId: TAB.id });
-  assert.equal(h.fields.enabled.checked, false);
-  assert.deepEqual(h.status(), { text: 'popup_disabled', kind: 'warn' });
+test('language edits are shared settings but never enroll a tab or duplicate work',async()=>{
+ for(const tabEnabled of [true,false]){
+  const h=environment({stored:{enabled:true,targetLang:'ko'},state:stateOf({tabEnabled,state:{status:'translated',translated:7}})});await h.boot();await h.choose('targetLang','ja');
+  assert.deepEqual(h.types(),['at/get-state','at/set-settings','at/get-state']);assert.equal(h.stored?.targetLang,'ja');assert.equal(h.fields.enabled.checked,tabEnabled);
+ }
 });
-
-test('a refused settings patch is re-rendered over by the following state', async () => {
-  const h = environment({
-    stored: { enabled: true },
-    script: { 'at/set-settings': { ok: false, error: 'settings are locked' } }
-  });
-  await h.boot();
-  await h.flip(false);
-
-  assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { enabled: false } });
-  assert.deepEqual(h.sends[2], { type: 'at/restore-tab', tabId: TAB.id });
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/restore-tab', 'at/get-state']);
-  // patchSettings() reported the refusal, then the handler re-rendered and
-  // render() overwrote the status with what storage still says: enabled.
-  assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
-  assert.equal(h.fields.enabled.checked, true);
+test('Options opens in a separate window bound to the source tab without sidePanel',async()=>{
+ const h=environment({stored:{localModelId:'model-a'}});await h.boot();await h.click('options');
+ assert.equal(h.optionsOpened,0);assert.deepEqual(h.createdTabs,[]);
+ assert.deepEqual(h.createdWindows,[{url:'chrome-extension://test/options.html?tabId=7',type:'popup',focused:true,width:560,height:800}]);
 });
-
-// --- target language ---------------------------------------------------------
-
-test('the target language patch re-triggers translation on a translated tab', async () => {
-  const h = environment({
-    stored: { enabled: true, targetLang: 'ko' },
-    state: stateOf({ state: { status: 'translated', translated: 7, error: null, targetLang: 'ko' } })
-  });
-  await h.boot();
-  await h.choose('targetLang', 'ja');
-
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/translate-tab', 'at/get-state']);
-  assert.deepEqual(h.sends[1], { type: 'at/set-settings', patch: { targetLang: 'ja' } });
-  assert.equal(h.sends[2]?.tabId, TAB.id);
-  assert.equal(h.stored?.targetLang, 'ja');
-  assert.equal(h.fields.targetLang.value, 'ja');
-});
-
-test('the target language patch leaves an untranslated tab alone', async () => {
-  const h = environment({ stored: { enabled: true, targetLang: 'en' } });
-  await h.boot();
-  await h.choose('targetLang', 'fr');
-
-  assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/get-state']);
-  assert.ok(!h.types().includes('at/translate-tab'));
-  assert.equal(h.stored?.targetLang, 'fr');
-  assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
-});
-
-test('a tab reported translated with nothing translated is still re-translated', async () => {
-  // render() calls a page translated only when `translated > 0`, while the
-  // change handler looks at `status` alone.
-  const h = environment({
-    stored: { enabled: true, targetLang: 'ko' },
-    state: stateOf({ state: { status: 'translated', translated: 0, error: null, targetLang: 'ko' } })
-  });
-  await h.boot();
-  assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
-
-  await h.choose('targetLang', 'de');
-
-  assert.ok(h.types().includes('at/translate-tab'));
-});
-
-// --- options button ----------------------------------------------------------
-
-test('the settings button opens the options page on a profile that has a model', async () => {
-  const h = environment({ stored: { enabled: true, localModelId: 'model-a' } });
-  await h.boot();
-  await h.click('options');
-
-  assert.equal(h.optionsOpened, 1);
-  assert.deepEqual(h.createdTabs, [], 'a set-up profile goes to the settings page, not the setup flow');
-  assert.deepEqual(h.types(), ['at/get-state'], 'no message is needed for a page that is not the background');
-});
-
-test('the settings button opens the setup flow while no model is installed', async () => {
-  // The onboarding page is the useful destination, and a click is a gesture, so
-  // the browser may dock it as a side panel.
-  const h = environment();
-  await h.boot();
-  await h.click('options');
-
-  assert.equal(h.optionsOpened, 0, 'there is nothing to configure yet');
-  assert.deepEqual(
-    h.createdTabs,
-    [{ url: 'chrome-extension://test/welcome.html', active: true }],
-    'the setup flow opens; without the side panel API it is a tab'
-  );
+test('onboarding uses the same panel/window policy and source tab',async()=>{
+ const h=environment();await h.boot();await h.click('options');assert.equal(h.optionsOpened,0);assert.deepEqual(h.createdTabs,[]);
+ assert.equal(h.createdWindows[0]?.url,'chrome-extension://test/options.html?tabId=7');
 });
 
 // --- failure paths -----------------------------------------------------------
@@ -633,29 +499,10 @@ test('a background that answers with nothing surfaces as a status, not a crash',
   assert.deepEqual(rejections, []);
 });
 
-test('a failing action is reported before the following render replaces it', async () => {
-  const state = stateOf();
-  const reported: string[] = [];
-  const h = environment({
-    state,
-    script: {
-      'at/translate-tab': undefined,
-      'at/get-state': () => {
-        reported.push(`${h.fields.status.textContent}|${h.fields.status.dataset.kind}`);
-        return { ok: true, ...state };
-      }
-    }
-  });
-  await h.boot();
-  const rejections = await watchingRejections(async () => {
-    await h.flip(true);
-  });
-
-  // The failure reaches the status line...
-  assert.equal(reported[1], 'no listener answered at/translate-tab|error');
-  // ...and is then overwritten by render(), which knows nothing about it.
-  assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
-  assert.deepEqual(rejections, []);
+test('an unanswered tab action stays visible and leaks no rejection',async()=>{
+ const h=environment({script:{'at/set-tab-enabled':undefined}});await h.boot();
+ const rejections=await watchingRejections(()=>h.flip(true));
+ assert.deepEqual(h.status(),{text:'no listener answered at/set-tab-enabled',kind:'error'});assert.deepEqual(rejections,[]);assert.equal(h.fields.enabled.checked,false);
 });
 
 test('a storage read that rejects is reported once and leaks nothing', async () => {

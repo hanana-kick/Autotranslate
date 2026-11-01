@@ -245,3 +245,8 @@ progress {
 .grow {
   flex: 1 1 200px;
 }
+
+/* Model filenames and URLs must not widen a narrow side panel. */
+.options .grid { grid-template-columns: minmax(0, 1fr); }
+.options .field, .options .hint, .options .rules { min-width: 0; overflow-wrap: anywhere; }
+.options select, .options input:not([type="checkbox"]) { max-width: 100%; }

@@ -1,5 +1,6 @@
 // Read-only timing observers + real UI controls. No inference or DOM-engine doubles.
 import assert from 'node:assert/strict';
+import {setTabThroughUI, pageTabId} from '../native-extension/tab-ui.mjs';
 import { createServer } from 'node:http';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -24,7 +25,11 @@ export async function runSpeedBenchmark({ context, options, host, capture, stage
   const origin='http://127.0.0.1:'+server.address().port;
   const results=summary.speed={label:process.env.SPEED_LABEL||'candidate', scope:'Actual installed extension / original runtime and model / UI toggle, DOM timing and exact restoration',samples:[],passed:false};
   const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+  let targetTabId;
+  const explicit = await options.evaluate(() => !!AT.C.MSG.SET_TAB_ENABLED);
+  results.tabConsent = explicit ? 'explicit source tab UI' : 'legacy global UI';
   async function toggle(value) {
+    if (explicit) { if (targetTabId !== undefined) await setTabThroughUI(options,targetTabId,value); else assert.equal(value,false); return; }
     await options.reload();
     await options.waitForFunction(async()=>{const s=await AT.settings.load();return document.querySelector('#enabled').checked===s.enabled && document.querySelector('#localModel').value===s.localModelId && document.querySelector('#sourceLang').value===s.sourceLang;});
     await options.locator('#enabled').setChecked(value);await options.locator('#save').click();
@@ -49,6 +54,7 @@ export async function runSpeedBenchmark({ context, options, host, capture, stage
       try {
         if(name==='foreground')for(let i=0;i<8;i++){const p=await context.newPage();unread.push(p);await p.goto(origin+'/unread?id='+i);}
         page=await context.newPage();await page.goto(origin+'/'+name);await page.bringToFront();
+        targetTabId=await pageTabId(options,page);
         assert.equal(await page.title(),'Native speed fixture');
         original=await page.evaluateHandle(()=>({html:document.body.innerHTML,elements:[...document.body.querySelectorAll('*')],attrs:[...document.body.querySelectorAll('*')].map(e=>JSON.stringify([...e.attributes].map(a=>[a.name,a.value])))}));
         timing=await page.evaluateHandle(()=>{
@@ -88,7 +94,7 @@ export async function runSpeedBenchmark({ context, options, host, capture, stage
       } finally {
         await toggle(false).catch(()=>{});
         await timing?.dispose().catch(()=>{});await original?.dispose().catch(()=>{});
-        await page?.close().catch(()=>{});for(const p of unread)await p.close().catch(()=>{});
+        await page?.close().catch(()=>{});for(const p of unread)await p.close().catch(()=>{});targetTabId=undefined;
       }
     }
     results.passed=true;

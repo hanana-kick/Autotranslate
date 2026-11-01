@@ -3,7 +3,7 @@
 Automatic on-device web-page translation from a single Manifest V3 TypeScript source tree.
 **Chrome is the supported release. Firefox remains experimental:** the native on-device
 model initialization is failing in actual Firefox tests ([issue #2](https://github.com/hanana-kick/Autotranslate/issues/2)).
-Both browser packages can be built from source for testing, but **v0.1.3 publishes only
+Both browser packages can be built from source for testing, but **v0.1.5 publishes only
 the tested Chrome archive**, not an unverified Firefox addon.
 
 Pages are translated in place: text nodes are replaced, originals are kept so the page can
@@ -70,24 +70,29 @@ only thing a fresh install shows:
 | --- | --- | --- |
 | 1 | Choose the language pages are translated into (defaults to the browser's UI language) | `welcome.html` |
 | 2 | Install the model: **download** it (progress, cancel) or **pick a file** already on disk. Either route writes the file into OPFS, then asks the host to load it — a file that does not load is not "installed" | `welcome.html` → `AT.modelflow` |
-| 3 | Press *Start translating*: `enabled: true`, the model id and the language are stored, and the page closes | `welcome.html` |
+| 3 | Press *Finish setup*: save the shared model/language and close setup. No tab is enabled automatically. | `welcome.html` |
 
 `runtime.onInstalled` (reason `install`) opens this page and stores `enabled: false`. If the
 profile already holds a working model (a reinstall, a second browser), the page says so and
 only asks for the language and the *Start* click.
 
-**Side panel first.** `AT.ui.openPage` docks the page to the side of the window when the
-browser has `chrome.sidePanel` (`side_panel.default_path` is `welcome.html`), and opens a tab
-when it does not. Chrome only allows `sidePanel.open` in response to a user gesture, and an
-install is not one, so the first run after installing still lands in a tab; the popup's
-settings button *is* a gesture, so on a profile without a model it reopens onboarding in the
-panel. Firefox has no side panel: it always gets the tab.
+**Explicit per-tab control.** Use **Translate this tab** in the popup or bound Options page.
+New tabs are OFF, even when an older version saved global ON or an always-translate site rule.
+ON opts in that tab only. Its current page, later DOM insertions, reloads and navigation are
+translated until it is switched OFF. OFF immediately restores that tab's latest original
+text and rejects late results; other selected tabs are unaffected. Merely visiting a tab
+never opts it in. Shared language/model preferences still apply to all selected tabs.
 
-After that there is one control: the popup's switch. On translates every page into the target
-language and applies at once to the tab in front of the user; off puts the page back and stops
-translating new ones. A per-site rule (`never`/`always`, set in Options or from the page's
-context menu) is the only exception. The popup also carries the target language; everything
-else lives in Options, which stays an ordinary settings page rather than part of the flow.
+The selection uses browser-session storage: it survives service-worker restarts, is removed
+when the tab closes, and is not carried into a new browser session with recycled tab IDs.
+Older site rules remain stored for migration but no longer grant automatic tab consent.
+
+**Options surface.** The popup's Options button opens the source-tab-bound settings in a
+side panel when supported. Otherwise, or when the browser refuses the panel, it opens a
+separate popup **window**, not a new tab. Window focus cannot change the source tab being
+controlled. Install-time setup also falls back to a window because installation is not a
+user gesture. Firefox window/UI checks do not establish its model-inference compatibility;
+that separate limitation remains tracked in issue #2.
 
 ## Scripts
 

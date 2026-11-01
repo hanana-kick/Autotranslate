@@ -12,9 +12,11 @@
 
       <section class="card">
         <h2 data-i18n="options_behavior"></h2>
+        <p id="tabHost" class="hint"></p>
+        <p id="tabStatus" class="status" role="status"></p>
         <div class="grid">
           <label class="switch">
-            <input type="checkbox" id="enabled" />
+            <input type="checkbox" id="enabled" disabled />
             <span data-i18n="options_enabled"></span>
           </label>
           <label class="switch">
@@ -89,7 +91,8 @@
         </div>
       </section>
 
-      <section class="card">
+      <!-- Legacy rules are retained in storage, not used to enroll tabs. -->
+      <section class="card" hidden>
         <h2 data-i18n="options_rules"></h2>
         <div class="row wrap">
           <input
@@ -122,6 +125,7 @@
     <script src="lib/local.js"></script>
     <script src="lib/modelstore.js"></script>
     <script src="lib/modelflow.js"></script>
+    <script src="lib/ui.js"></script>
     <script src="lib/settings.js"></script>
     <script src="options.js"></script>
   </body>
