@@ -1,0 +1,47 @@
+name: Verify tab-control documentation
+on:
+  push:
+    branches: [feat/explicit-tab-control]
+    paths: [.github/workflows/tab-docs-audit.yml]
+permissions:
+  contents: write
+jobs:
+  documentation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Validate exact documentation corrections and export a text blob only
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';
+          let text=fs.readFileSync('README.md','utf8');
+          const replace=(a,b)=>{assert.equal(text.split(a).length,2,'unique README anchor '+a);text=text.replace(a,b);};
+          replace('but **v0.1.3 publishes only\nthe tested Chrome archive**','but **releases publish only\nthe tested Chrome archive**');
+          replace('| 3 | Press *Start translating*: `enabled: true`, the model id and the language are stored, and the page closes | `welcome.html` |','| 3 | Press *Finish setup*: save the model and language without selecting any tab, then close onboarding. Open a web tab and explicitly turn its translation ON. | `welcome.html` → tab popup |');
+          replace('only asks for the language and the *Start* click.','only asks for the language and the *Finish setup* click. Completing onboarding never opts a tab in.');
+          const start=text.indexOf('**Side panel first.**');const end=text.indexOf('**Translation is explicitly selected per tab.**');assert.ok(start>0&&end>start);
+          text=text.slice(0,start)+'On a fresh install, onboarding opens in a separate popup window. The toolbar popup\'s\nOptions button opens tab-bound `options.html` in a side panel when available, otherwise\nin a separate popup window. The default side-panel page is `options.html`. No ordinary\nnew tab is used as the extension-owned fallback. A browser-owned unbound Options page\ncan edit general settings but cannot silently choose a translation target.\n\n'+text.slice(end);
+          replace('background.ts          menus, badge, tab state, message router, auto-translate','background.ts          menus, badge, explicit tab consent, session state, message router');
+          replace('welcome.{html,ts}      first run: language, model install, switch on','welcome.{html,ts}      first run: language and model install; no automatic tab selection');
+          replace('ui.ts                where an extension page is shown: side panel when the browser has one, else a tab','ui.ts                source-bound side panel or separate popup window, plus per-tab switch');
+          replace('BG->>BG: tabs.onUpdated(complete) + site rules -> decision','BG->>BG: explicit per-tab ON; selected-tab reload + site rules -> decision');
+          assert.ok(!text.includes('`enabled: true`, the model id'));
+          assert.ok(text.includes('No ordinary\nnew tab is used'));
+          fs.mkdirSync('test-results/tab-docs',{recursive:true});fs.writeFileSync('test-results/tab-docs/README.md',text);
+          const r=await fetch('https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+'/git/blobs',{method:'POST',headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json','Content-Type':'application/json'},body:JSON.stringify({content:text,encoding:'utf-8'})});assert.ok(r.ok,'README blob upload '+r.status);const blob=await r.json();
+          fs.writeFileSync('test-results/tab-docs/verified.json',JSON.stringify({parent:process.env.GITHUB_SHA,path:'README.md',blob:blob.sha,sha256:createHash('sha256').update(text).digest('hex'),productChanged:false},null,2));
+          console.log(JSON.stringify({blob:blob.sha,productChanged:false}));
+          JS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tab-control-documentation
+          path: test-results/tab-docs/
+          retention-days: 3
