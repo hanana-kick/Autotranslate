@@ -8,6 +8,7 @@ namespace AT {
     title?: string | null;
     active?: boolean;
     lastAccessed?: number;
+    windowId?: number;
   };
 
   /** A browser-owned channel gives long model preparation an explicit lifetime. */
@@ -45,11 +46,14 @@ namespace AT {
     onActivated?: { addListener: (listener: (info: { tabId: number; windowId?: number }) => void) => void };
   };
 
+  export type StorageArea = {
+    get: (key: string) => Promise<{ [key: string]: unknown }>;
+    set: (items: { [key: string]: unknown }) => Promise<void>;
+    remove?: (key: string) => Promise<void>;
+  };
   export type StorageApi = {
-    local: {
-      get: (key: string) => Promise<{ [key: string]: unknown }>;
-      set: (items: { [key: string]: unknown }) => Promise<void>;
-    };
+    local: StorageArea;
+    session?: StorageArea;
     onChanged?: {
       addListener: (
         listener: (changes: { [area: string]: { oldValue?: unknown; newValue?: unknown } }, areaName: string) => void
@@ -106,6 +110,7 @@ namespace AT {
     scripting?: ScriptingApi;
     offscreen?: OffscreenApi;
     sidePanel?: SidePanelApi;
+    windows?: { create: (options: { url: string; type: 'popup'; focused: boolean; width: number; height: number }) => Promise<unknown> };
     contextMenus?: ContextMenusApi;
     i18n?: I18nApi;
   };

@@ -20,6 +20,8 @@ namespace AT.settings {
 
   /** What a content script may see: no site rules, no debug flag. */
   export type ContentSnapshot = {
+    /** Session-scoped consent epoch, supplied by the background for this tab. */
+    tabEpoch?: number;
     /** Opaque generation-configuration identity; never includes credentials. */
     translationKey?: string;
     enabled: boolean;
@@ -159,5 +161,67 @@ namespace AT.settings {
     await AT.storage!.local.set({ [C.STORAGE_KEY]: next });
     AT.debug = next.debug;
     return next;
+  }
+}
+
+/** Explicit consent lives for this browser session, never in synced preferences.
+ * Tab IDs are browser-owned. Local storage would revive consent for recycled IDs.
+ * Only the background calls this module's mutators. */
+namespace AT.tabSelection {
+  export const PREFIX = 'tab-selection:';
+  export type Choice = Readonly<{ enabled: boolean; epoch: number }>;
+  const choices = new Map<number, Choice>();
+  const reads = new Map<number, Promise<Choice>>();
+  const writes = new Map<number, Promise<void>>();
+  function valid(id: number): void {
+    if (!Number.isSafeInteger(id) || id < 0) throw new Error('invalid tab id');
+  }
+  export async function get(id: number): Promise<Choice> {
+    valid(id);
+    if (choices.has(id)) return choices.get(id)!;
+    let read = reads.get(id);
+    if (!read) {
+      read = (async () => {
+        const key = PREFIX + id;
+        const raw = (await AT.storage?.session?.get(key))?.[key] as Partial<Choice> | undefined;
+        const choice = Object.freeze({ enabled: raw?.enabled === true,
+          epoch: Number.isSafeInteger(raw?.epoch) && Number(raw?.epoch) >= 0 ? Number(raw?.epoch) : 0 });
+        if (!choices.has(id)) choices.set(id, choice);
+        return choices.get(id)!;
+      })();
+      reads.set(id, read);
+      void read.finally(() => reads.delete(id)).catch(() => {});
+    }
+    return read;
+  }
+  function enqueue(id: number, write: () => Promise<void>): Promise<void> {
+    const task = (writes.get(id) ?? Promise.resolve()).catch(() => {}).then(write);
+    writes.set(id, task);
+    void task.finally(() => { if (writes.get(id) === task) writes.delete(id); }).catch(() => {});
+    return task;
+  }
+  export async function set(id: number, enabled: boolean): Promise<Choice> {
+    await get(id);
+    const previous = choices.get(id)!;
+    const next = Object.freeze({ enabled, epoch: previous.epoch + 1 });
+    choices.set(id, next); // revoke permission before persistence/DOM/native work
+    try {
+      await enqueue(id, async () => { await AT.storage?.session?.set({ [PREFIX + id]: next }); });
+    } catch (error) {
+      if (choices.get(id) === next) choices.set(id, Object.freeze({ enabled: false, epoch: next.epoch + 1 }));
+      throw error;
+    }
+    return next;
+  }
+  export async function forget(id: number): Promise<void> {
+    const before = await get(id);
+    const off = Object.freeze({ enabled: false, epoch: before.epoch + 1 });
+    choices.set(id, off);
+    await enqueue(id, async () => {
+      const area = AT.storage?.session;
+      if (area?.remove) await area.remove(PREFIX + id);
+      else await area?.set({ [PREFIX + id]: off });
+    });
+    if (choices.get(id) === off) choices.delete(id);
   }
 }

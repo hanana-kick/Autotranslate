@@ -1,0 +1,43 @@
+name: Tab UI routing (Firefox, no model)
+on:
+  push:
+    branches: [feat/explicit-tab-translation]
+    paths: ['src/**', 'test/tab-control/**', '.github/workflows/tab-ui.yml']
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  window:
+    runs-on: macos-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund && npm run build:firefox
+      - name: Official Firefox and Mozilla WebDriver
+        run: |
+          set -euo pipefail
+          binary='/Applications/Firefox.app/Contents/MacOS/firefox'
+          test -x "$binary"
+          codesign --verify --deep --strict /Applications/Firefox.app
+          printf 'FIREFOX_BINARY=%s\n' "$binary" >> "$GITHUB_ENV"
+          curl -fL --retry 3 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-macos.tar.gz -o "$RUNNER_TEMP/geckodriver.tar.gz"
+          echo "d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5  $RUNNER_TEMP/geckodriver.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP"
+      - name: Real addon UI, native popup window, per-tab consent
+        env:
+          GECKODRIVER: ${{ runner.temp }}/geckodriver
+        run: node test/tab-control/firefox-ui.mjs
+      - if: always()
+        run: git diff --exit-code -- src scripts package.json package-lock.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: firefox-tab-ui-${{ github.run_id }}
+          path: test-results/firefox-tab-ui/
+          retention-days: 14
