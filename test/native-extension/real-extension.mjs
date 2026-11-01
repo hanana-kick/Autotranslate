@@ -220,8 +220,11 @@ try {
     }
     let complete = false;
     while (performance.now() - start < 30 * 60000) {
-      const render = await bound(page.evaluate((selectors) => Object.fromEntries(selectors.map((s) => [s, document.querySelector(s).textContent])), selectors), 10000, 'rendered HTML');
+      // Read the completion acknowledgement BEFORE its DOM snapshot. The old
+      // order could pair pre-translation text with a just-completed state and
+      // fail although the actual page was already translated (release QA).
       const state = await bound(options.evaluate((tabId) => AT.sendMessage({ type: 'at/get-state', tabId }), tabId), 10000, 'tab state');
+      const render = await bound(page.evaluate((selectors) => Object.fromEntries(selectors.map((s) => [s, document.querySelector(s).textContent])), selectors), 10000, 'rendered HTML');
       result.rendered = render; result.tabState = state;
       result.telemetry.push({ elapsedMs: performance.now() - start, render, tab: state.state, host: state.local?.status });
       await save();
