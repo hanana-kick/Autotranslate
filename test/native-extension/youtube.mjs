@@ -3,16 +3,11 @@
 // tested. A blocked player/title is recorded explicitly, never bypassed or
 // claimed as verified; public comments and search remain separate assertions.
 import assert from 'node:assert/strict';
+import { setTabEnabledUI, tabIdFor } from './tab-control.mjs';
 export async function runYouTube({ context, options, host, capture, stage, passed, summary, save }) {
   const page = await context.newPage();
   const result = summary.youtube = { url: 'https://www.youtube.com/results?search_query=watercolor+tutorial&hl=en', passed: false, coverage: [] };
-  async function toggle(enabled) {
-    const stored = await options.evaluate(() => AT.settings.load());
-    await options.reload();
-    await options.waitForFunction((s) => document.querySelector('#localModel').value === s.localModelId && document.querySelector('#enabled').checked === s.enabled, stored);
-    await options.locator('#enabled').setChecked(enabled); await options.locator('#save').click();
-    await options.waitForFunction(async (enabled) => document.querySelector('#saveStatus').dataset.kind === 'ok' && (await AT.settings.load()).enabled === enabled, enabled);
-  }
+  async function toggle(enabled) { if (!page.url().startsWith('https://')) return; await setTabEnabledUI(options, await tabIdFor(options, page), enabled); }
   try {
     await stage('live-youtube-search'); await toggle(false);
     await page.goto(result.url, { waitUntil: 'domcontentloaded', timeout: 60000 });

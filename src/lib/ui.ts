@@ -1,44 +1,123 @@
-// Where an extension page is shown. The side panel is the better surface when
-// the browser has one — it stays next to the page instead of taking a tab — but
-// the browser only allows `sidePanel.open` in response to a user gesture, so a
-// caller that has none (the background opening onboarding after an install) must
-// land on a tab instead of doing nothing.
-// Load after lib/constants.js, lib/browser.js.
+// Extension-owned surfaces. A detached settings window keeps the originating
+// tab ID: opening/focusing the window must never select a different web page.
 namespace AT.ui {
-  export type Surface = 'panel' | 'tab';
+  export type Surface = 'panel' | 'window';
+  const prepared = new Map<number, { path: string; ready: Promise<void>; complete: boolean }>();
 
-  /**
-   * Shows `page` (`'welcome.html'`, `'options.html'`) and says where it went.
-   * The side panel path does two things: it registers the page as the panel's
-   * content, then asks the browser to open it. Either step can fail (no API, no
-   * gesture, a browser that refuses a panel for that window), and a failure is
-   * not an error for the caller: the tab still opens.
-   */
-  export async function openPage(page: string, surface: 'auto' | 'tab' = 'auto'): Promise<Surface> {
-    const panel = AT.sidePanelApi;
-    if (surface === 'auto' && AT.supportsSidePanel() && panel) {
-      const url = AT.getURL(page);
-      try {
-        await panel.setOptions({ path: page, enabled: true });
-        // `open` takes a window id or a tab id, and the tab API is the surface
-        // this context has: the panel then follows that tab.
-        const tabId = await activeTabId();
-        if (tabId === null) throw new Error('no active tab to dock the panel to');
-        await panel.open({ tabId });
-        return 'panel';
-      } catch (error: unknown) {
-        // A gesture-less caller lands here every time; that is expected.
-        AT.log('the side panel did not open, using a tab', String((error as { message?: unknown })?.message ?? error), url);
-      }
-    }
-    await AT.tabs!.create({ url: AT.getURL(page), active: true });
-    return 'tab';
+  export function targetTabId(): number | null {
+    const raw = new URLSearchParams(globalThis.location?.search ?? '').get('tabId');
+    if (raw === null || !/^\d+$/.test(raw)) return null;
+    const id = Number(raw);
+    return Number.isSafeInteger(id) ? id : null;
   }
 
-  /** The tab the user is looking at, for `sidePanel.open`. */
-  async function activeTabId(): Promise<number | null> {
-    const tabs = await AT.tabs?.query?.({ active: true, currentWindow: true });
-    const id = tabs?.[0]?.id;
-    return typeof id === 'number' ? id : null;
+  function pathFor(page: string, tabId: number | null): string {
+    if (!['options.html', 'welcome.html'].includes(page)) throw new Error('unsupported extension page');
+    return tabId === null ? page : `${page}?tabId=${tabId}`;
+  }
+
+  /** Preconfigure while the popup loads; the click can then open synchronously. */
+  export function preparePage(page: string, tabId: number): Promise<void> {
+    if (!AT.supportsSidePanel() || !AT.sidePanelApi) return Promise.resolve();
+    const path = pathFor(page, tabId);
+    const found = prepared.get(tabId);
+    if (found?.path === path) return found.ready;
+    const ready = AT.sidePanelApi.setOptions({ tabId, path, enabled: true });
+    const record = { path, ready, complete: false };
+    prepared.set(tabId, record);
+    void ready.then(() => { record.complete = true; }, () => { if (prepared.get(tabId) === record) prepared.delete(tabId); });
+    return ready;
+  }
+
+  /** Use a tab-scoped side panel, or a real popup window (never a new tab). */
+  export async function openPage(
+    page: string,
+    surface: 'auto' | 'window' = 'auto',
+    target?: number | null
+  ): Promise<Surface> {
+    let tabId = target;
+    if (tabId === undefined) {
+      tabId = targetTabId();
+      if (tabId === null) {
+        const active = await AT.tabs?.query({ active: true, currentWindow: true });
+        const tab = active?.find((candidate) => /^https?:/i.test(candidate?.url ?? ''));
+        tabId = tab?.id ?? null;
+      }
+    }
+    if (tabId !== null && (!Number.isSafeInteger(tabId) || tabId < 0)) throw new Error('invalid target tab');
+    const path = pathFor(page, tabId);
+    if (surface === 'auto' && tabId !== null && AT.supportsSidePanel() && AT.sidePanelApi) {
+      try {
+        // A prepared popup click reaches open() before its first await, retaining
+        // the browser's user activation. Other callers configure then attempt it.
+        if (prepared.get(tabId)?.path !== path || !prepared.get(tabId)?.complete) await preparePage(page, tabId);
+        await AT.sidePanelApi.open({ tabId });
+        return 'panel';
+      } catch (error: unknown) {
+        AT.log('side panel unavailable; opening settings window', String((error as Error)?.message ?? error));
+      }
+    }
+    if (!AT.windows) throw new Error('extension windows API is unavailable');
+    await AT.windows.create({ url: AT.getURL(path), type: 'popup', width: 520, height: 820, focused: true });
+    return 'window';
+  }
+
+  export type TabView = AT.Response & {
+    tab?: { id?: number; title?: string | null; url?: string | null; host?: string | null } | null;
+    tabEnabled?: boolean;
+    canTranslate?: boolean;
+    state?: { status?: string; translated?: number; error?: string | null } | null;
+  };
+
+  /** Shared tab switch for persistent options surfaces. No tab ID means OFF,
+   * not "guess the active tab", because this surface may itself be active. */
+  export function bindTabSwitch(input: HTMLInputElement, host: HTMLElement, status: HTMLElement): () => Promise<void> {
+    const id = targetTabId();
+    let changing = false;
+    const refresh = async (): Promise<void> => {
+      if (changing) return;
+      input.disabled = true;
+      if (id === null) {
+        host.textContent = AT.i18n.msg('tab_noTarget');
+        input.checked = false;
+        return;
+      }
+      const reply = await AT.sendMessage({ type: AT.C.MSG.GET_STATE, tabId: id }) as TabView;
+      if (changing) return;
+      if (!reply.ok || !reply.tab || !reply.canTranslate) {
+        input.checked = false;
+        host.textContent = AT.i18n.msg('tab_unavailable');
+        return;
+      }
+      host.textContent = reply.tab.title || reply.tab.host || reply.tab.url || '';
+      host.title = reply.tab.url ?? '';
+      input.checked = reply.tabEnabled === true;
+      input.disabled = false;
+      status.textContent = reply.state?.error || AT.i18n.msg(input.checked ? 'tab_enabledHint' : 'tab_disabledHint');
+      status.dataset.kind = reply.state?.error ? 'error' : 'info';
+    };
+    input.addEventListener('change', async () => {
+      if (id === null) return;
+      changing = true;
+      input.disabled = true;
+      let failure: string | null = null;
+      try {
+        const reply = await AT.sendMessage({ type: AT.C.MSG.SET_TAB_ENABLED, tabId: id, enabled: input.checked });
+        if (!reply.ok) throw new Error(String(reply.error ?? 'tab control failed'));
+      } catch (error) {
+        failure = String((error as Error)?.message ?? error);
+      } finally {
+        changing = false;
+        await refresh();
+        if (failure) { status.textContent = failure; status.dataset.kind = 'error'; }
+      }
+    });
+    AT.storage?.onChanged?.addListener((changes, area) => {
+      if (area === 'session' && changes['translationTargets.v1']) void refresh();
+    });
+    AT.tabs?.onRemoved.addListener((removed) => { if (removed === id) void refresh(); });
+    globalThis.addEventListener?.('focus', () => { void refresh(); });
+    void refresh();
+    return refresh;
   }
 }

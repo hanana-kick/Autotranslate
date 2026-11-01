@@ -1,88 +1,62 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { load } from './helpers.ts';
+import { load, resetGlobals } from './helpers.ts';
 
-// `AT.ui` decides where an extension page is shown. The browser only allows a
-// side panel to open on a user gesture, so the interesting cases are the ones
-// where the panel refuses and a tab has to happen instead.
-
-type Surface = {
-  AT: Record<string, any>;
-  calls: { setOptions: Record<string, unknown>[]; open: Record<string, unknown>[]; tabs: Record<string, unknown>[] };
-};
-
-function environment(options: { panel?: 'ok' | 'no-api' | 'refuses'; tabs?: boolean } = {}): Surface {
+function environment(mode: 'ok' | 'absent' | 'refuses' = 'ok') {
+  resetGlobals();
   const host = globalThis as Record<string, any>;
-  delete host.AT;
-  delete host.browser;
-  const calls = { setOptions: [] as Record<string, unknown>[], open: [] as Record<string, unknown>[], tabs: [] as Record<string, unknown>[] };
-  const sidePanel =
-    options.panel === 'no-api'
-      ? undefined
-      : {
-          setOptions: async (details: Record<string, unknown>) => {
-            calls.setOptions.push(details);
-          },
-          open: async (details: Record<string, unknown>) => {
-            calls.open.push(details);
-            if (options.panel === 'refuses') throw new Error('`sidePanel.open()` may only be called in response to a user gesture');
-          }
-        };
+  delete host.location;
+  const calls = { configure: [] as any[], open: [] as any[], windows: [] as any[], tabs: [] as any[] };
   host.browser = {
-    runtime: { getURL: (path: string) => path, getManifest: () => ({ version: '0' }) },
-    tabs: {
-      create: async (details: Record<string, unknown>) => {
-        calls.tabs.push(details);
-        return { id: 5 };
-      },
-      query: async () => [{ id: 7, url: 'https://example.com/' }]
-    },
-    sidePanel
+    runtime: { getURL: (path: string) => 'chrome-extension://id/' + path },
+    tabs: { query: async () => [{ id: 7, url: 'https://example.com/' }], create: async (o: unknown) => calls.tabs.push(o) },
+    windows: { create: async (o: unknown) => calls.windows.push(o) },
+    sidePanel: mode === 'absent' ? undefined : {
+      setOptions: async (o: unknown) => { calls.configure.push(o); },
+      open: (o: unknown) => { calls.open.push(o); return mode === 'refuses' ? Promise.reject(new Error('no user activation')) : Promise.resolve(); }
+    }
   };
-  const AT = load('lib/constants.js', 'lib/browser.js', 'lib/ui.js');
-  return { AT, calls };
+  return { AT: load('lib/constants.js','lib/browser.js','lib/ui.js'), calls, host };
 }
 
-test('a browser with a side panel gets the page docked, not a tab', async () => {
-  const { AT, calls } = environment({ panel: 'ok' });
-  assert.equal(AT.supportsSidePanel(), true);
-  const where = await AT.ui.openPage('welcome.html');
-
-  assert.equal(where, 'panel');
-  assert.deepEqual(calls.setOptions, [{ path: 'welcome.html', enabled: true }], 'the panel is told what to show');
-  assert.deepEqual(calls.open, [{ tabId: 7 }], 'it opens against the tab the user is looking at');
-  assert.deepEqual(calls.tabs, [], 'no tab was opened as well');
+test('options use a tab-scoped side panel with an explicit original tab ID', async () => {
+  const { AT, calls } = environment();
+  assert.equal(await AT.ui.openPage('options.html','auto',7),'panel');
+  assert.deepEqual(calls.configure,[{tabId:7,path:'options.html?tabId=7',enabled:true}]);
+  assert.deepEqual(calls.open,[{tabId:7}]); assert.equal(calls.tabs.length+calls.windows.length,0);
 });
-
-test('a gesture-less caller is refused and lands in a tab', async () => {
-  // This is the install path: `onInstalled` is not a user gesture.
-  const { AT, calls } = environment({ panel: 'refuses' });
-  const where = await AT.ui.openPage('welcome.html');
-
-  assert.equal(where, 'tab');
-  assert.equal(calls.open.length, 1, 'the panel was asked once');
-  assert.deepEqual(calls.tabs, [{ url: 'welcome.html', active: true }]);
+test('prepared popup click calls sidePanel.open synchronously, preserving user activation', async () => {
+  const { AT, calls }=environment(); await AT.ui.preparePage('options.html',7);
+  const pending=AT.ui.openPage('options.html','auto',7);
+  assert.equal(calls.open.length,1,'there is no intervening tabs.query/storage await'); await pending;
 });
-
-test('a browser without the side panel API goes straight to a tab', async () => {
-  const { AT, calls } = environment({ panel: 'no-api' });
-  assert.equal(AT.supportsSidePanel(), false);
-  assert.equal(await AT.ui.openPage('welcome.html'), 'tab');
-  assert.deepEqual(calls.setOptions, [], 'nothing is configured for a panel that does not exist');
-  assert.deepEqual(calls.open, []);
-  assert.deepEqual(calls.tabs, [{ url: 'welcome.html', active: true }]);
+test('browser without sidePanel opens a real detached window, never a tab', async () => {
+  const { AT, calls }=environment('absent');
+  assert.equal(await AT.ui.openPage('options.html','auto',7),'window');
+  assert.deepEqual(calls.windows,[{url:'chrome-extension://id/options.html?tabId=7',type:'popup',width:520,height:820,focused:true}]);
+  assert.equal(calls.tabs.length,0);
 });
-
-test('no active tab means no panel to dock to, so the page opens in a tab', async () => {
-  const { AT, calls } = environment({ panel: 'ok' });
-  AT.tabs.query = async () => [];
-  assert.equal(await AT.ui.openPage('welcome.html'), 'tab');
-  assert.deepEqual(calls.open, [], 'the panel was never asked to open without a tab');
+test('sidePanel refusal falls back exactly once to the same target in a new window', async () => {
+  const {AT,calls}=environment('refuses');
+  assert.equal(await AT.ui.openPage('options.html','auto',7),'window');
+  assert.equal(calls.open.length,1); assert.equal(calls.windows.length,1); assert.equal(calls.tabs.length,0);
+  assert.match(calls.windows[0].url,/tabId=7$/);
 });
-
-test('an explicit tab request skips the panel even when it is available', async () => {
-  const { AT, calls } = environment({ panel: 'ok' });
-  assert.equal(await AT.ui.openPage('options.html', 'tab'), 'tab');
-  assert.deepEqual(calls.open, [], 'the caller asked for a tab');
-  assert.deepEqual(calls.tabs, [{ url: 'options.html', active: true }]);
+test('install with no originating tab opens onboarding in a window without guessing a tab', async () => {
+  const {AT,calls}=environment(); await AT.ui.openPage('welcome.html','window',null);
+  assert.equal(calls.open.length,0); assert.equal(calls.windows[0].url,'chrome-extension://id/welcome.html');
+});
+test('an options window preserves its source tab even after focus changes', async () => {
+  const {AT,calls,host}=environment('absent'); host.location={search:'?tabId=23'};
+  await AT.ui.openPage('options.html'); assert.match(calls.windows[0].url,/tabId=23$/);
+});
+test('invalid tab IDs and external extension paths are rejected', async () => {
+  const {AT}=environment();
+  await assert.rejects(()=>AT.ui.openPage('https://example.com/','window',7),/unsupported/);
+  await assert.rejects(()=>AT.ui.openPage('options.html','auto',-1),/invalid target/);
+});
+test('missing or malformed origin binding never defaults to tab zero', () => {
+  const {AT,host}=environment();
+  for(const search of ['', '?tabId=', '?tabId=-1','?tabId=abc']) { host.location={search}; assert.equal(AT.ui.targetTabId(),null); }
+  host.location={search:'?tabId=0'}; assert.equal(AT.ui.targetTabId(),0);
 });

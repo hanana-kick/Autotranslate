@@ -7,6 +7,7 @@ namespace AT {
     url?: string;
     title?: string | null;
     active?: boolean;
+    windowId?: number;
     lastAccessed?: number;
   };
 
@@ -36,7 +37,7 @@ namespace AT {
   export type TabsApi = {
     create: (properties: { url: string; active?: boolean }) => Promise<Tab | undefined>;
     get: (tabId: number) => Promise<Tab | undefined>;
-    query: (queryInfo: { active?: boolean; currentWindow?: boolean }) => Promise<(Tab | undefined)[]>;
+    query: (queryInfo: { active?: boolean; currentWindow?: boolean; windowId?: number }) => Promise<(Tab | undefined)[]>;
     sendMessage: (tabId: number, message: unknown) => Promise<unknown>;
     onUpdated: {
       addListener: (listener: (tabId: number, changeInfo: { status?: string }, tab: Tab) => void) => void;
@@ -46,6 +47,11 @@ namespace AT {
   };
 
   export type StorageApi = {
+    /** Browser-session consent: survives worker sleep, never browser restart. */
+    session?: {
+      get: (key: string) => Promise<{ [key: string]: unknown }>;
+      set: (items: { [key: string]: unknown }) => Promise<void>;
+    };
     local: {
       get: (key: string) => Promise<{ [key: string]: unknown }>;
       set: (items: { [key: string]: unknown }) => Promise<void>;
@@ -55,6 +61,10 @@ namespace AT {
         listener: (changes: { [area: string]: { oldValue?: unknown; newValue?: unknown } }, areaName: string) => void
       ) => void;
     };
+  };
+
+  export type WindowsApi = {
+    create: (options: { url: string; type: 'popup'; width: number; height: number; focused: boolean }) => Promise<unknown>;
   };
 
   export type ActionApi = {
@@ -101,6 +111,7 @@ namespace AT {
   export type BrowserApi = {
     runtime: RuntimeApi;
     tabs?: TabsApi;
+    windows?: WindowsApi;
     storage?: StorageApi;
     action?: ActionApi;
     scripting?: ScriptingApi;
@@ -177,6 +188,7 @@ namespace AT {
   export let api: BrowserApi | undefined;
   export let runtime: RuntimeApi | null | undefined;
   export let tabs: TabsApi | null | undefined;
+  export let windows: WindowsApi | null | undefined;
   export let storage: StorageApi | null | undefined;
   export let action: ActionApi | null | undefined;
   export let scripting: ScriptingApi | null | undefined;
@@ -190,6 +202,7 @@ namespace AT {
   api = extensionApi;
   runtime = extensionApi.runtime ?? null;
   tabs = extensionApi.tabs ?? null;
+  windows = extensionApi.windows ?? null;
   storage = extensionApi.storage ?? null;
   action = extensionApi.action ?? null;
   scripting = extensionApi.scripting ?? null;
