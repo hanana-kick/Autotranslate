@@ -1,7 +1,7 @@
 name: Release
 
-# Publishing requires real original-model E2E, deterministic browser regression,
-# planner acceptance, and the build action's type/unit/package checks.
+# Main is an integration branch. Publishing both browser packages requires both
+# original-model runtimes, deterministic regressions, planner and package checks.
 on:
   push:
     branches: [main]
@@ -28,8 +28,14 @@ jobs:
       contents: read
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
+  firefox:
+    uses: ./.github/workflows/firefox-native.yml
+    permissions:
+      contents: read
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
   release:
-    needs: [browser, native, planner]
+    needs: [browser, native, firefox, planner]
     name: Package and publish
     runs-on: ubuntu-latest
     steps:
@@ -57,8 +63,8 @@ jobs:
             echo "Autotranslate $version, built from \`${GITHUB_SHA::12}\`."
             echo
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "- original SDK/model, static and dynamic translation and exact HTML restoration"
-            echo "- planner acceptance and bounded DOM regression checks"
+            echo "- original SDK/model: Chrome and Firefox installed-extension checks"
+            echo "- static and dynamic translation, exact HTML restoration and planner acceptance"
             echo
             echo "Chrome: unzip and load from chrome://extensions in Developer mode."
             echo "Firefox: temporary installation from about:debugging, or sign with web-ext."
