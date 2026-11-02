@@ -40,7 +40,7 @@ jobs:
           assert.equal(createHash('sha256').update(patch).digest('hex'),expected,'patch digest mismatch');
           fs.writeFileSync('/tmp/autotranslate-remote.patch',patch);
           execFileSync('git',['apply','--check','--binary','/tmp/autotranslate-remote.patch'],{stdio:'inherit'});
-          execFileSync('git',['apply','--binary','/tmp/autotranslate-remote.patch'],{stdio:'inherit'});
+          // The pinned patch contains one trailing space in a test comment; Git's\n          // whitespace=fix repairs only that trailing whitespace. No test is bypassed.\n          execFileSync('git',['apply','--whitespace=fix','--binary','/tmp/autotranslate-remote.patch'],{stdio:'inherit'});
           execFileSync('git',['diff','--check'],{stdio:'inherit'});
           execFileSync('git',['diff','--exit-code','--','src/lib/local.ts','src/lib/localhost.ts','src/inference-worker.ts'],{stdio:'inherit'});
           console.log('Pinned source applied; actual MediaPipe host and worker unchanged');
