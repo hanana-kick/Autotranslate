@@ -1,0 +1,31 @@
+name: OpenAI adapter development workspace
+on:
+  push:
+    branches: [feat/openai-server]
+    paths: [.github/workflows/openai-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund
+      - name: Export exact public source and toolchain without credentials
+        run: |
+          mkdir -p "$RUNNER_TEMP/openai-workspace"
+          git archive HEAD > "$RUNNER_TEMP/openai-workspace/source.tar"
+          git rev-parse HEAD > "$RUNNER_TEMP/openai-workspace/commit.txt"
+          tar -czf "$RUNNER_TEMP/openai-workspace/deps.tar.gz" node_modules
+          cp "$(command -v node)" "$RUNNER_TEMP/openai-workspace/node"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: openai-server-workspace
+          path: ${{ runner.temp }}/openai-workspace/
+          retention-days: 2
