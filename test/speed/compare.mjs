@@ -19,7 +19,7 @@ const checks=['cached','inline','foreground'].map(name=>{
     baselineRecoveries:a.map(s=>s.recoveries),candidateRecoveries:b.map(s=>s.recoveries),
     passed:after<=before*1.20};
 });
-const report={scope:'Matched same-machine original-model installed Chrome extensions; released v0.1.4 versus v0.1.5 candidate; three repetitions per workload, 20% max median slowdown per workload; model startup failures are not ignored and do not count as a measurement',checks};
+const report={scope:'Real installed Chrome addons and original model, v0.1.4 versus v0.1.5; options document hydration recorded separately, measured response starts immediately before a click on a prepared visible options UI; three samples, max 20% median slowdown per workload; startup or restoration failures are not excluded',checks,uiPreparationMs:{baseline:baseline.samples.map(s=>s.uiPreparationMs),candidate:candidate.samples.map(s=>s.uiPreparationMs)}};
 await writeFile(root+'/comparison.json',JSON.stringify(report,null,2));
 console.log(JSON.stringify(report,null,2));
 assert.ok(candidate.samples.filter(s=>s.name==='foreground').every(s=>s.unreadChanged===0),'unread tabs cannot compete');

@@ -1,6 +1,6 @@
 // Read-only timing observers + real UI controls. No inference or DOM-engine doubles.
 import assert from 'node:assert/strict';
-import { setTabEnabledUI, tabIdFor } from '../native-extension/tab-control.mjs';
+import { setTabEnabledUI, tabIdFor, prepareTabEnabledUI, clickPreparedTabEnabledUI } from '../native-extension/tab-control.mjs';
 import { createServer } from 'node:http';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -23,12 +23,13 @@ export async function runSpeedBenchmark({ context, options, host, capture, stage
   const server=createServer((req,res)=>{res.writeHead(200,{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store'});res.end(pages.get(new URL(req.url,'http://localhost').pathname)||shell(''));});
   await new Promise(r=>server.listen(0,'127.0.0.1',r));
   const origin='http://127.0.0.1:'+server.address().port;
-  const results=summary.speed={label:process.env.SPEED_LABEL||'candidate', scope:'Actual installed extension / original runtime and model / UI toggle, DOM timing and exact restoration',samples:[],passed:false};
+  const results=summary.speed={label:process.env.SPEED_LABEL||'candidate', scope:'Actual installed extension and original model. Report options UI setup independently; time ON-click to DOM translation and exact restoration',samples:[],passed:false};
   const sleep=ms=>new Promise(r=>setTimeout(r,ms));
   let targetId = null;
   async function toggle(value) {
     if (targetId === null && process.env.SPEED_LABEL !== 'baseline') return;
-    await setTabEnabledUI(options, targetId, value);
+    if (targetId === null) await setTabEnabledUI(options, null, value);
+    else await clickPreparedTabEnabledUI(options, targetId, value);
   }
   async function idle() {
     let last=-1,stable=0;
@@ -51,6 +52,10 @@ export async function runSpeedBenchmark({ context, options, host, capture, stage
         page=await context.newPage();await page.goto(origin+'/'+name);await page.bringToFront();
         targetId=await tabIdFor(options,page);
         assert.equal(await page.title(),'Native speed fixture');
+        const preparedAt=performance.now();
+        await prepareTabEnabledUI(options,targetId);
+        const uiPreparationMs=performance.now()-preparedAt;
+        assert.ok(Number.isFinite(uiPreparationMs)&&uiPreparationMs>=0);
         original=await page.evaluateHandle(()=>({html:document.body.innerHTML,elements:[...document.body.querySelectorAll('*')],attrs:[...document.body.querySelectorAll('*')].map(e=>JSON.stringify([...e.attributes].map(a=>[a.name,a.value])))}));
         timing=await page.evaluateHandle(()=>{
           const data={started:performance.now(),firstMs:null,allMs:null};
@@ -77,7 +82,7 @@ export async function runSpeedBenchmark({ context, options, host, capture, stage
         const after=(await host(options)).status;
         const unreadChanged=(await Promise.all(unread.map(p=>p.locator('[data-bench]').allTextContents()))).flat().filter(s=>/[가-힣]/u.test(s)).length;
         if(results.label==='candidate')assert.equal(unreadChanged,0,'unread tabs must not spend inference');
-        const item={name,repetition,firstMs:measured.firstMs,totalMs:measured.allMs,generations:after.generations-before.generations,recoveries:(after.recoveries||0)-(before.recoveries||0),unreadChanged,completed:await page.locator('[data-bench]').count(),restored:false};
+        const item={name,repetition,uiPreparationMs,firstMs:measured.firstMs,totalMs:measured.allMs,generations:after.generations-before.generations,recoveries:(after.recoveries||0)-(before.recoveries||0),unreadChanged,completed:await page.locator('[data-bench]').count(),restored:false};
         assert.ok(Number.isFinite(item.firstMs)&&Number.isFinite(item.totalMs));
         if(repetition===0)await capture(page,'speed-'+name+'-translated');
         const restoreAt=performance.now();await toggle(false);
