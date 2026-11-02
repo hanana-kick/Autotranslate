@@ -24,7 +24,33 @@ jobs:
       - name: Assemble guarded provider source and prove local inference unchanged
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: node .github/prepare-remote-concurrency.mjs
+        run: |
+          node .github/prepare-remote-concurrency.mjs
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import assert from 'node:assert/strict';
+          const path='test/browser/remote-http.test.mjs';let text=fs.readFileSync(path,'utf8');
+          const once=(a,b)=>{assert.equal(text.split(a).length,2,'browser assertion anchor '+a);text=text.replace(a,b);};
+          once("let peakRequests=0;", "let peakRequests=0; let responseDelay=140;");
+          once("await delay(140);activeRequests--;", "await delay(responseDelay);activeRequests--;");
+          once("request.url==='/parallel'", "request.url.startsWith('/parallel')");
+          once("parallel2.goto(origin+'/parallel')", "parallel2.goto(origin+'/parallel?second=1')");
+          once("serial.goto(origin+'/parallel')", "serial.goto(origin+'/parallel?serial=1')");
+          once("      await Promise.all([opt(parallel,false), opt(parallel2,false)]);", "      const peakAcrossTabs=peakRequests;\n      await Promise.all([opt(parallel,false), opt(parallel2,false)]);");
+          once("      await opt(serial,false);", `      await opt(serial,false);
+                const cancelPage=await context.newPage();await cancelPage.goto(origin+'/parallel?cancel=1');
+                const beforeCancel=serverRequests.filter(r=>r.path==='/v1/chat/completions').length;
+                responseDelay=1000;
+                await opt(cancelPage,true);
+                for(let i=0;i<100 && serverRequests.filter(r=>r.path==='/v1/chat/completions').length===beforeCancel;i++)await delay(10);
+                assert.equal(serverRequests.filter(r=>r.path==='/v1/chat/completions').length,beforeCancel+1,'observe one real in-flight HTTP request');
+                await opt(cancelPage,false);
+                await delay(1200);
+                assert.equal(serverRequests.filter(r=>r.path==='/v1/chat/completions').length,beforeCancel+1,'OFF must not dispatch pending nodes');
+                assert.equal(await cancelPage.locator('main p').first().textContent(),'First different sentence.','late HTTP result must never overwrite restored DOM');
+                responseDelay=140;`);
+          once("concurrentDomRequests:peakRequests", "concurrentDomRequests:peakRequests,peakAcrossTwoTabs:peakAcrossTabs,manualOneSerial:true,offCancelsPending:true");
+          fs.writeFileSync(path,text);
+          JS
       - run: npm ci --no-audit --no-fund
       - name: Focused shared concurrency and HTTP contract tests
         run: |
