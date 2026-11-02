@@ -66,7 +66,7 @@ jobs:
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
             echo "- original TranslateGemma .task and MediaPipe SDK in the installed Chrome extension; five independent fresh profiles"
             echo "- static and dynamic translation, exact HTML restoration and planner acceptance"
-            echo "- same-machine native speed comparison against 0.1.3: long cached pages, inline links and foreground tab contention"
+            echo "- same-machine native speed regression guard against published v0.1.4: cached pages, inline links and foreground tab contention"
             echo "- tabs default OFF: translation requires an explicit per-tab ON; OFF restores only that tab"
             echo "- Options open in the originating tab side panel when available, otherwise in a separate popup window"
             echo "- v0.1.4 scheduling and original inference runtime/model retained"

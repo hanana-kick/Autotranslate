@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 jobs:
   compare:
-    name: Same-machine 0.1.3 versus candidate / original model
+    name: Same-machine released v0.1.4 versus candidate / original model
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
@@ -36,8 +36,8 @@ jobs:
           mkdir -p test-results/speed "$RUNNER_TEMP/speed-candidate"
           cp -R build/chrome "$RUNNER_TEMP/speed-candidate/chrome"
           cp dist/*-chrome.zip "$RUNNER_TEMP/speed-candidate/tested-extension.zip"
-          curl -fL --retry 3 https://github.com/hanana-kick/Autotranslate/releases/download/v0.1.3/autotranslate-0.1.3-chrome.zip -o "$RUNNER_TEMP/speed-baseline.zip"
-          echo "1d3bc155f64c5c8ff59ec708bca78926ecc5aab981a36da6b87c32eb64a69016  $RUNNER_TEMP/speed-baseline.zip" | shasum -a 256 -c -
+          curl -fL --retry 3 https://github.com/hanana-kick/Autotranslate/releases/download/v0.1.4/autotranslate-0.1.4-chrome.zip -o "$RUNNER_TEMP/speed-baseline.zip"
+          echo "f1b0ba6edbfd0c9389d64931b89063bc3ffb790101190b0642cd3c064d01ed0e  $RUNNER_TEMP/speed-baseline.zip" | shasum -a 256 -c -
           node --input-type=module <<'JS'
           import fs from 'node:fs';
           import { pipeline } from 'node:stream/promises';
@@ -53,7 +53,7 @@ jobs:
           fs.writeFileSync('test-results/speed/model-provenance.json',JSON.stringify({file:'translategemma-4b-it-int8-web.task',bytes:3896377344,sha256:hash.digest('hex'),sameFileForBothRuns:true,runtime:'@mediapipe/tasks-genai@0.10.30'},null,2));
           fs.appendFileSync(process.env.GITHUB_ENV,'MODEL_FILE='+file+'\n');
           JS
-      - name: Measure untouched v0.1.3 extension
+      - name: Measure untouched v0.1.4 extension
         env:
           HEADED: '1'
           SPEED_LABEL: baseline
@@ -82,7 +82,7 @@ jobs:
           shasum -a 256 test-results/speed/candidate/tested-extension.zip > test-results/speed/candidate/package-sha256.txt
           cp build/chrome/manifest.json test-results/speed/candidate/manifest.json
           node test/speed/run-native.mjs 2>&1 | tee test-results/speed/candidate/execution.log
-      - name: Require functional preservation and measured improvements
+      - name: Require functional preservation and no native speed regression
         run: node test/speed/compare.mjs
       - name: Unchanged production and credential-safe evidence
         id: safe

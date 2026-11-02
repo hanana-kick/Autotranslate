@@ -18,9 +18,9 @@ export async function tabIdFor(options, page) {
 export async function setTabEnabledUI(options, tabId, enabled) {
   const modern = await options.evaluate(() => !!AT.C.MSG.SET_TAB_ENABLED);
   if (!modern) {
-    // The paired performance baseline is the untouched published 0.1.3 ZIP.
+    // The paired performance baseline is the untouched published 0.1.4 ZIP.
     assert.equal(process.env.SPEED_LABEL, 'baseline', 'legacy global switch is allowed only in the labelled historical speed baseline');
-    assert.equal(await options.evaluate(() => AT.runtime.getManifest().version), '0.1.3');
+    assert.equal(await options.evaluate(() => AT.runtime.getManifest().version), '0.1.4');
     await options.reload(); await optionsReady(options);
     await options.locator('#enabled').setChecked(enabled); await options.locator('#save').click();
     await options.waitForFunction(async value => document.querySelector('#saveStatus').dataset.kind === 'ok' && (await AT.settings.load()).enabled === value, enabled);

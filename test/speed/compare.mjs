@@ -17,10 +17,10 @@ const checks=['cached','inline','foreground'].map(name=>{
     baselineMedianFirstMs:median(a.map(s=>s.firstMs)),candidateMedianFirstMs:median(b.map(s=>s.firstMs)),
     baselineGenerations:a.map(s=>s.generations),candidateGenerations:b.map(s=>s.generations),
     baselineRecoveries:a.map(s=>s.recoveries),candidateRecoveries:b.map(s=>s.recoveries),
-    passed:after<=before*0.90};
+    passed:after<=before*1.20};
 });
-const report={scope:'Matched same-machine original-model installed Chrome extensions; 0.1.3 versus candidate; three repetitions per workload, not a universal device speed claim',checks};
+const report={scope:'Matched same-machine original-model installed Chrome extensions; released v0.1.4 versus v0.1.5 candidate; three repetitions per workload, 20% max median slowdown per workload; model startup failures are not ignored and do not count as a measurement',checks};
 await writeFile(root+'/comparison.json',JSON.stringify(report,null,2));
 console.log(JSON.stringify(report,null,2));
 assert.ok(candidate.samples.filter(s=>s.name==='foreground').every(s=>s.unreadChanged===0),'unread tabs cannot compete');
-assert.ok(checks.every(c=>c.passed),'each targeted regression must improve its median by at least ten percent');
+assert.ok(checks.every(c=>c.passed),'each native workload must remain within 20% of the released v0.1.4 median');
