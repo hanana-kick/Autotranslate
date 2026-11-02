@@ -55,6 +55,8 @@ namespace AT {
     local: {
       get: (key: string) => Promise<{ [key: string]: unknown }>;
       set: (items: { [key: string]: unknown }) => Promise<void>;
+      /** Prevent content scripts from reading a user's remote API credential. */
+      setAccessLevel?: (options: { accessLevel: 'TRUSTED_CONTEXTS' }) => Promise<void>;
     };
     onChanged?: {
       addListener: (

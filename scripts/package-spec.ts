@@ -48,6 +48,7 @@ export const ENTRIES = [
   'lib/pipeline.js',
   'lib/rules.js',
   'lib/settings.js',
+  'lib/remote.js',
   'lib/engines.js',
   'lib/dom.js',
   'lib/local.js',

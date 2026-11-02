@@ -9,6 +9,20 @@ namespace AT.options {
   // the call sites stay as short as the untyped version was.
   type Fields = {
     enabled: HTMLInputElement;
+    engineMode: HTMLSelectElement;
+    localSection: HTMLElement;
+    remoteSection: HTMLElement;
+    remoteBaseUrl: HTMLInputElement;
+    remoteKey: HTMLInputElement;
+    remoteModel: HTMLInputElement;
+    remoteModelsList: HTMLDataListElement;
+    remotePromptStyle: HTMLSelectElement;
+    remoteConcurrency: HTMLInputElement;
+    remoteMaxTokens: HTMLInputElement;
+    remoteDiscover: HTMLButtonElement;
+    remoteTest: HTMLButtonElement;
+    remoteStatus: HTMLParagraphElement;
+    remoteSecurityWarning: HTMLParagraphElement;
     showBadge: HTMLInputElement;
     debug: HTMLInputElement;
     testEngine: HTMLButtonElement;
@@ -45,9 +59,12 @@ namespace AT.options {
 
   // What the form holds: `version` comes from settings.save, and the limit
   // fields are still the input strings normalize() later coerces.
-  type FormValues = Omit<AT.settings.Settings, 'version' | 'enabled' | 'maxNodes' | 'localMaxTokens'> & {
+  type FormValues = Omit<AT.settings.Settings, 'version' | 'enabled' | 'maxNodes' |
+    'localMaxTokens' | 'remoteConcurrency' | 'remoteMaxTokens'> & {
     maxNodes: string;
     localMaxTokens: string;
+    remoteConcurrency: string;
+    remoteMaxTokens: string;
   };
 
   /** The TEST_ENGINE reply: `result` is there exactly when `ok` is. */
@@ -114,6 +131,16 @@ namespace AT.options {
   }
 
   function render(): void {
+    el('engineMode').value = settings!.engineMode;
+    el('localSection').hidden = settings!.engineMode === 'remote';
+    el('remoteSection').hidden = settings!.engineMode !== 'remote';
+    el('remoteConcurrency').disabled = settings!.engineMode !== 'remote';
+    el('remoteBaseUrl').value = settings!.remoteBaseUrl;
+    el('remoteModel').value = settings!.remoteModel;
+    el('remotePromptStyle').value = settings!.remotePromptStyle;
+    el('remoteConcurrency').value = String(settings!.remoteConcurrency);
+    el('remoteMaxTokens').value = String(settings!.remoteMaxTokens);
+    el('remoteSecurityWarning').hidden = !AT.remote.isHttpLan(settings!.remoteBaseUrl);
     el('showBadge').checked = settings!.showBadge;
     el('debug').checked = settings!.debug;
     el('targetLang').value = settings!.targetLang;
@@ -135,7 +162,13 @@ namespace AT.options {
       maxNodes: el('maxNodes').value,
       siteRules: settings!.siteRules,
       localModelId: el('localModel').value,
-      localMaxTokens: el('localMaxTokens').value
+      localMaxTokens: el('localMaxTokens').value,
+      engineMode: el('engineMode').value === 'remote' ? 'remote' : 'local',
+      remoteBaseUrl: el('remoteBaseUrl').value.trim(),
+      remoteModel: el('remoteModel').value.trim(),
+      remotePromptStyle: el('remotePromptStyle').value as AT.remote.PromptStyle,
+      remoteConcurrency: el('remoteConcurrency').value,
+      remoteMaxTokens: el('remoteMaxTokens').value
     };
   }
 
@@ -146,8 +179,22 @@ namespace AT.options {
     const patch: Partial<AT.settings.Settings> = {
       ...nextSettings,
       maxNodes: Number(nextSettings.maxNodes),
-      localMaxTokens: Number(nextSettings.localMaxTokens)
+      localMaxTokens: Number(nextSettings.localMaxTokens),
+      remoteConcurrency: Number(nextSettings.remoteConcurrency),
+      remoteMaxTokens: Number(nextSettings.remoteMaxTokens)
     };
+    if (patch.engineMode === 'remote') {
+      if (!Number.isInteger(patch.remoteConcurrency) || patch.remoteConcurrency! < 1 || patch.remoteConcurrency! > 32) {
+        throw new Error(AT.i18n.msg('options_remoteConcurrencyInvalid'));
+      }
+      const base = AT.remote.normalizeBaseUrl(patch.remoteBaseUrl);
+      if (!base || !patch.remoteModel) {
+        setStatus(el('saveStatus'), AT.i18n.msg('options_remoteInvalid'), 'error');
+        throw new Error('Configure a valid OpenAI-compatible server URL and model');
+      }
+      patch.remoteBaseUrl = base;
+    }
+    if (patch.engineMode === 'remote') await AT.remote.setKey(el('remoteKey').value);
     settings = await AT.settings.save(patch);
     render();
     setStatus(el('saveStatus'), AT.i18n.msg('options_saved'), 'ok');
@@ -387,7 +434,51 @@ namespace AT.options {
   }
 
   function wire(): void {
-    el('save').addEventListener('click', () => persist(collect()));
+    el('save').addEventListener('click', () => persist(collect()).catch(error => {
+      setStatus(el('saveStatus'), String((error as Error).message), 'error');
+    }));
+
+    el('engineMode').addEventListener('change', () => {
+      const remote = el('engineMode').value === 'remote';
+      el('remoteSection').hidden = !remote;
+      el('localSection').hidden = remote;
+      el('remoteConcurrency').disabled = !remote;
+      if (!remote) void Promise.all([refreshModels(), refreshLocalStatus()]);
+    });
+    el('remoteBaseUrl').addEventListener('change', () => {
+      el('remoteSecurityWarning').hidden = !AT.remote.isHttpLan(el('remoteBaseUrl').value);
+    });
+    el('remoteDiscover').addEventListener('click', () => {
+      void (async () => {
+        setStatus(el('remoteStatus'), AT.i18n.msg('options_testing'), 'info');
+        try {
+          const found = await AT.remote.discover(el('remoteBaseUrl').value, el('remoteKey').value);
+          el('remoteModelsList').replaceChildren(...found.models.map(item => option(item.id, item.id)));
+          const unknown = AT.i18n.msg('options_remoteUnknown');
+          setStatus(el('remoteStatus'),
+            AT.i18n.msg('options_remoteModelsFound', String(found.models.length)) +
+              ' · max_num_seqs: ' + (found.maxNumSeqs ?? unknown) +
+              ' · max_num_active_seqs: ' + (found.maxNumActiveSeqs ?? unknown), 'ok');
+        } catch (error: unknown) {
+          setStatus(el('remoteStatus'), String((error as Error).message ?? error), 'error');
+        }
+      })();
+    });
+    el('remoteTest').addEventListener('click', () => {
+      void (async () => {
+        try {
+          await persist(collect());
+          setStatus(el('remoteStatus'), AT.i18n.msg('options_testing'), 'info');
+          const reply = (await AT.sendMessage({ type: C.MSG.TEST_ENGINE,
+            target: el('targetLang').value })) as TestReply;
+          if (!reply.ok) throw new Error(reply.error ?? 'Server translation failed');
+          setStatus(el('remoteStatus'),
+            AT.i18n.msg('options_testOk', [reply.result.output ?? '', String(reply.result.ms)]), 'ok');
+        } catch (error: unknown) {
+          setStatus(el('remoteStatus'), String((error as Error).message ?? error), 'error');
+        }
+      })();
+    });
 
     el('reset').addEventListener('click', async () => {
       settings = await AT.settings.reset();
@@ -461,13 +552,14 @@ namespace AT.options {
     buildSelects();
     settings = await AT.settings.load();
     el('modelUrl').value = AT.local.MODEL_SOURCES[0]?.url ?? '';
+    el('remoteKey').value = await AT.remote.getKey().catch(() => '');
     el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     // Ask first, then report: the usage line is only meaningful once the
     // browser has answered whether it will keep the bytes.
-    await AT.modelflow.keepStorage();
+    if (settings.engineMode !== 'remote') await AT.modelflow.keepStorage();
     // The model list decides what the model select can show, so the form is
     // painted once the store has answered rather than from settings alone.
-    await Promise.all([refreshModels(), refreshLocalStatus()]);
+    if (settings.engineMode !== 'remote') await Promise.all([refreshModels(), refreshLocalStatus()]);
     render();
     // Listeners go on last: a Save before `render()` would persist the markup's
     // empty defaults over the user's settings.

@@ -1,62 +1,158 @@
 {
-  "extensionName": { "message": "Autotranslate" },
-  "shortName": { "message": "Autotranslate" },
+  "extensionName": {
+    "message": "Autotranslate"
+  },
+  "shortName": {
+    "message": "Autotranslate"
+  },
   "description": {
     "message": "Translates web pages with Google, a LibreTranslate instance, or a model that runs on this computer."
   },
-  "actionTitle": { "message": "Autotranslate this page" },
-  "menuTranslatePage": { "message": "Turn translation on for this tab" },
-  "menuRestorePage": { "message": "Turn translation off and restore this tab" },
-  "menuTranslateSelection": { "message": "Translate selection" },
-  "menuNeverSite": { "message": "Never translate this site" },
-  "menuAlwaysSite": { "message": "Allow this site in selected tabs" },
-  "content_close": { "message": "Close" },
-  "content_noSelection": { "message": "Nothing selected to translate." },
-  "popup_enabled": { "message": "Translate this tab" },
-  "popup_enabledTitle": { "message": "Enable or disable translation for this tab only." },
-  "popup_targetLanguage": { "message": "Translate to" },
-  "popup_options": { "message": "Options" },
-  "popup_idle": { "message": "Not translated yet." },
-  "popup_localUnverified": { "message": "This language pair has not been checked with the on-device model." },
-  "popup_localNoModel": { "message": "No model yet — install it in Settings" },
+  "actionTitle": {
+    "message": "Autotranslate this page"
+  },
+  "menuTranslatePage": {
+    "message": "Turn translation on for this tab"
+  },
+  "menuRestorePage": {
+    "message": "Turn translation off and restore this tab"
+  },
+  "menuTranslateSelection": {
+    "message": "Translate selection"
+  },
+  "menuNeverSite": {
+    "message": "Never translate this site"
+  },
+  "menuAlwaysSite": {
+    "message": "Allow this site in selected tabs"
+  },
+  "content_close": {
+    "message": "Close"
+  },
+  "content_noSelection": {
+    "message": "Nothing selected to translate."
+  },
+  "popup_enabled": {
+    "message": "Translate this tab"
+  },
+  "popup_enabledTitle": {
+    "message": "Enable or disable translation for this tab only."
+  },
+  "popup_targetLanguage": {
+    "message": "Translate to"
+  },
+  "popup_options": {
+    "message": "Options"
+  },
+  "popup_idle": {
+    "message": "Not translated yet."
+  },
+  "popup_localUnverified": {
+    "message": "This language pair has not been checked with the on-device model."
+  },
+  "popup_localNoModel": {
+    "message": "No model yet — install it in Settings"
+  },
   "popup_translated": {
     "message": "Translated $1$ text segments.",
-    "placeholders": { "1": { "content": "$1" } }
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
   },
-  "popup_unavailable": { "message": "This page cannot be translated." },
-  "popup_disabled": { "message": "This tab is not selected. Turn on the switch to translate it." },
-  "options_title": { "message": "Autotranslate options" },
-  "options_behavior": { "message": "Translation for this tab" },
-  "options_enabled": { "message": "Translate this tab" },
-  "options_showBadge": { "message": "Show badge on translated pages" },
-  "options_debug": { "message": "Verbose logging" },
-  "options_test": { "message": "Test provider" },
-  "options_testing": { "message": "Testing…" },
+  "popup_unavailable": {
+    "message": "This page cannot be translated."
+  },
+  "popup_disabled": {
+    "message": "This tab is not selected. Turn on the switch to translate it."
+  },
+  "options_title": {
+    "message": "Autotranslate options"
+  },
+  "options_behavior": {
+    "message": "Translation for this tab"
+  },
+  "options_enabled": {
+    "message": "Translate this tab"
+  },
+  "options_showBadge": {
+    "message": "Show badge on translated pages"
+  },
+  "options_debug": {
+    "message": "Verbose logging"
+  },
+  "options_test": {
+    "message": "Test provider"
+  },
+  "options_testing": {
+    "message": "Testing…"
+  },
   "options_testOk": {
     "message": "$1$ ($2$ ms)",
     "placeholders": {
-      "1": { "content": "$1" },
-      "2": { "content": "$2" }
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
     }
   },
-  "options_languages": { "message": "Languages" },
-  "options_targetLang": { "message": "Translate to" },
-  "options_sourceLang": { "message": "Source language" },
-  "options_sourceAuto": { "message": "Detect automatically" },
-  "options_limits": { "message": "Limits" },
-  "options_maxNodes": { "message": "Maximum text nodes per page" },
-  "options_rules": { "message": "Site rules" },
-  "options_rulePlaceholder": { "message": "example.com or example.com/news/*" },
-  "options_addRule": { "message": "Add rule" },
-  "options_ruleAlways": { "message": "Allow in selected tabs" },
-  "options_ruleNever": { "message": "Never" },
-  "options_remove": { "message": "Remove" },
-  "options_save": { "message": "Save" },
-  "options_reset": { "message": "Reset to defaults" },
-  "options_saved": { "message": "Saved." },
-  "options_resetDone": { "message": "Defaults restored." },
-  "options_noRules": { "message": "No site rules yet." },
-  "options_badRule": { "message": "Enter a valid host or URL pattern." },
+  "options_languages": {
+    "message": "Languages"
+  },
+  "options_targetLang": {
+    "message": "Translate to"
+  },
+  "options_sourceLang": {
+    "message": "Source language"
+  },
+  "options_sourceAuto": {
+    "message": "Detect automatically"
+  },
+  "options_limits": {
+    "message": "Limits"
+  },
+  "options_maxNodes": {
+    "message": "Maximum text nodes per page"
+  },
+  "options_rules": {
+    "message": "Site rules"
+  },
+  "options_rulePlaceholder": {
+    "message": "example.com or example.com/news/*"
+  },
+  "options_addRule": {
+    "message": "Add rule"
+  },
+  "options_ruleAlways": {
+    "message": "Allow in selected tabs"
+  },
+  "options_ruleNever": {
+    "message": "Never"
+  },
+  "options_remove": {
+    "message": "Remove"
+  },
+  "options_save": {
+    "message": "Save"
+  },
+  "options_reset": {
+    "message": "Reset to defaults"
+  },
+  "options_saved": {
+    "message": "Saved."
+  },
+  "options_resetDone": {
+    "message": "Defaults restored."
+  },
+  "options_noRules": {
+    "message": "No site rules yet."
+  },
+  "options_badRule": {
+    "message": "Enter a valid host or URL pattern."
+  },
   "options_local": {
     "message": "On-device translation"
   },
@@ -113,7 +209,9 @@
       }
     }
   },
-  "options_notPersisted": { "message": "storage is not pinned, so the browser may evict the model" },
+  "options_notPersisted": {
+    "message": "storage is not pinned, so the browser may evict the model"
+  },
   "options_deleted": {
     "message": "Deleted $1$",
     "placeholders": {
@@ -208,25 +306,155 @@
   "options_stateError": {
     "message": "On-device engine failed"
   },
-  "welcome_intro": { "message": "Install the model once. After that, every page you open is translated into your language, in this browser." },
-  "welcome_language": { "message": "Your language" },
-  "welcome_model": { "message": "Model" },
-  "welcome_modelHint": { "message": "Download the model once, or pick a model file you already have. It is stored on this device; pages never leave the browser." },
-  "welcome_haveFile": { "message": "Choose a file I already have" },
+  "welcome_intro": {
+    "message": "Install the model once. After that, every page you open is translated into your language, in this browser."
+  },
+  "welcome_language": {
+    "message": "Your language"
+  },
+  "welcome_model": {
+    "message": "Model"
+  },
+  "welcome_modelHint": {
+    "message": "Download the model once, or pick a model file you already have. It is stored on this device; pages never leave the browser."
+  },
+  "welcome_haveFile": {
+    "message": "Choose a file I already have"
+  },
   "welcome_modelReady": {
     "message": "Ready: $1$ ($2$)",
-    "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } }
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
   },
-  "welcome_importFailed": { "message": "That file cannot be used: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "welcome_needModel": { "message": "No model yet. Download it or pick a file to continue." },
-  "welcome_readyExisting": { "message": "The model is already installed. Press Start to turn translation on." },
-  "welcome_start": { "message": "Finish setup" },
-  "welcome_starting": { "message": "Starting the download…" },
-  "welcome_done": { "message": "Model ready. Enable translation explicitly in each tab you want to translate." },
-  "options_modelStored": { "message": "Model stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "welcome_modelStored": { "message": "The file is stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "tab_noTarget": { "message": "Open options from the extension icon on the page you want to translate." },
-  "tab_unavailable": { "message": "The target tab is closed or cannot be translated." },
-  "tab_enabledHint": { "message": "Only this selected tab is translated, including newly inserted content." },
-  "tab_disabledHint": { "message": "Translation is off in this tab. Other tabs keep their own selection." }
+  "welcome_importFailed": {
+    "message": "That file cannot be used: $1$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "welcome_needModel": {
+    "message": "No model yet. Download it or pick a file to continue."
+  },
+  "welcome_readyExisting": {
+    "message": "The model is already installed. Press Start to turn translation on."
+  },
+  "welcome_start": {
+    "message": "Finish setup"
+  },
+  "welcome_starting": {
+    "message": "Starting the download…"
+  },
+  "welcome_done": {
+    "message": "Model ready. Enable translation explicitly in each tab you want to translate."
+  },
+  "options_modelStored": {
+    "message": "Model stored, but it did not load: $1$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "welcome_modelStored": {
+    "message": "The file is stored, but it did not load: $1$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "tab_noTarget": {
+    "message": "Open options from the extension icon on the page you want to translate."
+  },
+  "tab_unavailable": {
+    "message": "The target tab is closed or cannot be translated."
+  },
+  "tab_enabledHint": {
+    "message": "Only this selected tab is translated, including newly inserted content."
+  },
+  "tab_disabledHint": {
+    "message": "Translation is off in this tab. Other tabs keep their own selection."
+  },
+  "options_engineMode": {
+    "message": "Translation engine"
+  },
+  "options_engineModeLabel": {
+    "message": "Engine"
+  },
+  "options_engineLocal": {
+    "message": "On-device TranslateGemma (unchanged)"
+  },
+  "options_engineRemote": {
+    "message": "Custom OpenAI-compatible server"
+  },
+  "options_remotePrivacy": {
+    "message": "Remote mode sends page text to the configured server. Local mode never sends text."
+  },
+  "options_remoteBaseUrl": {
+    "message": "API base URL (include /v1)"
+  },
+  "options_remoteHttpWarning": {
+    "message": "HTTP is unencrypted. Avoid sending an API key or sensitive page content over untrusted networks."
+  },
+  "options_remoteKey": {
+    "message": "API key (optional, stored separately)"
+  },
+  "options_remoteModel": {
+    "message": "Served model ID"
+  },
+  "options_remotePromptStyle": {
+    "message": "TranslateGemma chat template"
+  },
+  "options_remoteDelimiters": {
+    "message": "vLLM TranslateGemma (Infomaniak delimiters)"
+  },
+  "options_remoteOfficial": {
+    "message": "Google TranslateGemma (structured content)"
+  },
+  "options_remoteInstruction": {
+    "message": "Generic OpenAI chat (translation instructions)"
+  },
+  "options_remoteConcurrency": {
+    "message": "Simultaneous translations (all enabled tabs combined, 1–32)"
+  },
+  "options_remoteMaxTokens": {
+    "message": "Maximum generated tokens per text"
+  },
+  "options_remoteMaxNumSeqs": {
+    "message": "This is the maximum number of translation HTTP requests from this extension, shared across tabs. It is independent of server max_num_seqs. Optional server-info discovery never changes your chosen limit."
+  },
+  "options_remoteDiscover": {
+    "message": "Get server models"
+  },
+  "options_remoteUnknown": {
+    "message": "unknown (server-side setting)"
+  },
+  "options_remoteInvalid": {
+    "message": "Enter a valid server URL and model ID before saving remote mode."
+  },
+  "options_remoteModelsFound": {
+    "message": "Models found: $1$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "popup_remoteNotConfigured": {
+    "message": "Configure your OpenAI-compatible server in Options"
+  },
+  "welcome_remoteReady": {
+    "message": "Remote server configured. Finish setup; then explicitly enable a web tab."
+  },
+  "options_remoteConcurrencyInvalid": {
+    "message": "Enter a whole number from 1 to 32 for simultaneous translations."
+  }
 }

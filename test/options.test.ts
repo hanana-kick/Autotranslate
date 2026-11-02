@@ -15,6 +15,7 @@ const LIBS = [
   'lib/modelstore.js',
   'lib/modelflow.js',
   'lib/settings.js',
+  'lib/remote.js',
   'lib/ui.js'
 ];
 
@@ -179,6 +180,20 @@ type StubDocument = {
 // id, tag and the data-i18n key options.html puts on the button.
 const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['enabled', 'input'],
+  ['engineMode', 'select'],
+  ['localSection', 'section'],
+  ['remoteSection', 'section'],
+  ['remoteBaseUrl', 'input'],
+  ['remoteKey', 'input'],
+  ['remoteModel', 'input'],
+  ['remoteModelsList', 'datalist'],
+  ['remotePromptStyle', 'select'],
+  ['remoteConcurrency', 'input'],
+  ['remoteMaxTokens', 'input'],
+  ['remoteDiscover', 'button'],
+  ['remoteTest', 'button'],
+  ['remoteStatus', 'p'],
+  ['remoteSecurityWarning', 'p'],
   ['tabHost', 'p'],
   ['tabStatus', 'p'],
   ['showBadge', 'input'],
@@ -745,12 +760,12 @@ test('a failing storage write is not reported as saved', async () => {
   env.failWrites('quota exceeded');
   env.field('localMaxTokens').value = '3000';
 
-  await assert.rejects(() => click(env.field('save')), /quota exceeded/);
+  await click(env.field('save'));
 
   assert.deepEqual(env.writes, [], 'nothing was written');
   assert.deepEqual(env.store.settings, before, 'storage still holds the old settings');
-  assert.equal(env.field('saveStatus').textContent, '', 'no success message on a failed save');
-  assert.equal(env.field('saveStatus').dataset.kind, undefined);
+  assert.match(env.field('saveStatus').textContent, /quota exceeded/, 'the actual storage error is visible');
+  assert.equal(env.field('saveStatus').dataset.kind, 'error');
 });
 
 test('testing the engine probes with exactly the typed target language', async () => {

@@ -152,7 +152,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       const snapshot = { ...settings };
       state.pipeline = AT.pipeline.create({
         doc: document,
-        settings: () => ({ maxNodes: snapshot.maxNodes }),
+        settings: () => ({ maxNodes: snapshot.maxNodes, maxConcurrentJobs: snapshot.remoteConcurrency ?? 1 }),
         // A pass owns an immutable settings snapshot, not mutable global state.
         translate: (batch) => requestBatch(batch, snapshot),
         // Each paragraph is one unit; token splitting stays in the engine.
