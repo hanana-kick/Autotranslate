@@ -28,6 +28,13 @@ jobs:
           node .github/prepare-remote-concurrency.mjs
           node --input-type=module <<'JS'
           import fs from 'node:fs';import assert from 'node:assert/strict';
+          // The background harness loads production modules explicitly rather
+          // than executing importScripts. Match its list to the new manifest.
+          const fixture='test/background.test.ts';let harness=fs.readFileSync(fixture,'utf8');
+          const anchor="  'lib/settings.js',\n  'lib/engines.js',";
+          assert.equal(harness.split(anchor).length,2,'exact background module list');
+          harness=harness.replace(anchor,"  'lib/settings.js',\n  'lib/remote.js',\n  'lib/engines.js',");
+          fs.writeFileSync(fixture,harness);
           const path='test/browser/remote-http.test.mjs';let text=fs.readFileSync(path,'utf8');
           const once=(a,b)=>{assert.equal(text.split(a).length,2,'browser assertion anchor '+a);text=text.replace(a,b);};
           once("let peakRequests=0;", "let peakRequests=0; let responseDelay=140;");
@@ -52,12 +59,12 @@ jobs:
           fs.writeFileSync(path,text);
           JS
       - run: npm ci --no-audit --no-fund
-      - name: Focused shared concurrency and HTTP contract tests
+      - name: Focused background, shared concurrency and HTTP contract tests
         run: |
           set -euo pipefail
           mkdir -p test-results/remote-concurrency
           ./node_modules/.bin/tsc -p tsconfig.json
-          node --test test/remote.test.ts test/remote-concurrency.test.ts 2>&1 | tee test-results/remote-concurrency/focused.log
+          node --test test/background.test.ts test/remote.test.ts test/remote-concurrency.test.ts 2>&1 | tee test-results/remote-concurrency/focused.log
       - name: Complete unit, type, build and Chrome/Firefox package regressions
         run: |
           set -euo pipefail
