@@ -1,0 +1,47 @@
+name: Remote concurrency workspace
+on:
+  push:
+    branches: [feat/openai-compatible-remote-translation]
+    paths: [.github/workflows/concurrency-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Recover immutable implementation patch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/remote-concurrency"
+          gh api repos/$GITHUB_REPOSITORY/git/blobs/3e7108cbe0a2a815a7feb297d0afb6e68671bb8b > "$RUNNER_TEMP/remote-concurrency/blob.json"
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import {createHash} from 'node:crypto';import assert from 'node:assert/strict';
+          const dir=process.env.RUNNER_TEMP+'/remote-concurrency';
+          const blob=JSON.parse(fs.readFileSync(dir+'/blob.json','utf8'));
+          const patch=Buffer.from(blob.content,'base64');
+          assert.equal(createHash('sha256').update(patch).digest('hex'),'bc4f4bdd7cd47d0daac29e71361d96fd92250e5484d8ce7935a83ffc229dde25');
+          fs.writeFileSync(dir+'/provider.patch',patch);fs.rmSync(dir+'/blob.json');
+          JS
+          git archive HEAD > "$RUNNER_TEMP/remote-concurrency/source.tar"
+          git rev-parse HEAD > "$RUNNER_TEMP/remote-concurrency/commit.txt"
+      - name: Public pinned browser tooling only
+        run: |
+          npm ci --no-audit --no-fund
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+          npx playwright install chromium
+          tar -czf "$RUNNER_TEMP/remote-concurrency/deps.tar.gz" node_modules
+          tar -czf "$RUNNER_TEMP/remote-concurrency/browser.tar.gz" -C "$HOME/.cache" ms-playwright
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-concurrency-workspace
+          path: ${{ runner.temp }}/remote-concurrency/
+          retention-days: 2
