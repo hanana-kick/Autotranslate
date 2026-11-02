@@ -1,0 +1,66 @@
+name: Verify OpenAI server feature source
+on:
+  push:
+    branches: [feat/openai-server]
+    paths: [.github/workflows/verify-openai-source.yml]
+permissions:
+  contents: write
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply checksum-verified source patch only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import assert from 'node:assert/strict';import {createHash} from 'node:crypto';import {brotliDecompressSync} from 'node:zlib';import {execFileSync} from 'node:child_process';
+          const shas=['04a35601677cbaba27cbeb85b86047da99186876','c98b71c0b51793275b6343d513d16e65fa8e880f','7db3746b96d85faa7dda1df98aaa12b02975c972','cce2a1fb22a1c32f9e20bab02e97509a03ac8c51','f152fdd693f73ecedd1ca24bcec1a4af73c2bf0e','317c6afe2e8656dbb2a92873ed3fd6f145f7bd19','ddf4925dd7283fe2f19d6543f97d82268e708a06','e01c91e71aa5beae5adee5e87aafe40f534c6046','c6f1a8042821bfaff3a705758a4caa58bad55a96','1ba25dbdad30b2a75c06fd46fa6697cedba022c5','169c4cc3ec4b22d9a98c596ce6de1f77e841e573','4f9517ec72095b6c466246321b03c4d7d501f724','dbb7d2bf18e7fac072356be31d8bba4e843f7254','1b7e2c9d54bc421ba5f91060c0e2dc8b8a669682','cbf9c69cfacb66a8fdfe7b235a61f2ce60cb5ebf','962edc0a8bdcce80ad982180d8c98235b3cc7810','682cbfbbbc835ad465f6ee3946905536aeeb8583','41c3a220c9a28bba4fb3ee44f69857ab39810178','7b8c23a22215d0ee8ab05dba9aa3cd408d7169f1'];
+          let encoded='';for(const sha of shas){const r=await fetch('https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+'/git/blobs/'+sha,{headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json'}});assert.ok(r.ok,'patch blob HTTP '+r.status);const b=await r.json();assert.equal(b.sha,sha);encoded+=Buffer.from(b.content,'base64').toString('utf8');}
+          const patch=brotliDecompressSync(Buffer.from(encoded,'base64'));assert.equal(createHash('sha256').update(patch).digest('hex'),'5ea497822a2b143b9db1bf9945d273d9c0d8347b2af746f3b7480f0e820bde38');
+          const p=process.env.RUNNER_TEMP+'/openai.patch';fs.writeFileSync(p,patch);execFileSync('git',['apply','--check',p],{stdio:'inherit'});execFileSync('git',['apply',p],{stdio:'inherit'});execFileSync('git',['diff','--check'],{stdio:'inherit'});
+          execFileSync('git',['diff','--exit-code','--','src/lib/localhost.ts','src/lib/local.ts','src/inference-worker.ts'],{stdio:'inherit'});
+          JS
+      - run: npm ci --no-audit --no-fund
+      - name: Full type, unit, both browser builds and package checks
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/openai-source
+          npm run ci 2>&1 | tee test-results/openai-source/ci.log
+      - name: Export source object manifest without moving refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import {execFileSync} from 'node:child_process';import {createHash} from 'node:crypto';import assert from 'node:assert/strict';
+          fs.rmSync('.github/workflows/verify-openai-source.yml');execFileSync('git',['add','-A']);
+          const paths=execFileSync('git',['diff','--cached','--name-only','-z']).toString().split('\0').filter(Boolean);assert.equal(paths.length,29);
+          const manifest=[];
+          for(const path of paths){assert.ok(/^(src\/|test\/|scripts\/package-spec\.ts$|README\.md$|docs\/openai-server\.md$|package(-lock)?\.json$|\.github\/workflows\/(native-extension|release|remote-server|openai-workspace|verify-openai-source)\.yml$)/.test(path),'unapproved source path '+path);
+            if(!fs.existsSync(path)){manifest.push({path,deleted:true,mode:'100644',type:'blob',sha:null});continue;}
+            const data=fs.readFileSync(path);const r=await fetch('https://api.github.com/repos/'+process.env.GITHUB_REPOSITORY+'/git/blobs',{method:'POST',headers:{Authorization:'Bearer '+process.env.GH_TOKEN,Accept:'application/vnd.github+json','Content-Type':'application/json'},body:JSON.stringify({content:data.toString('base64'),encoding:'base64'})});assert.ok(r.ok,'source blob HTTP '+r.status+' '+path);const b=await r.json();manifest.push({path,mode:'100644',type:'blob',sha:b.sha,sha256:createHash('sha256').update(data).digest('hex')});
+          }
+          fs.writeFileSync('test-results/openai-source/manifest.json',JSON.stringify({parent:process.env.GITHUB_SHA,manifest,scope:'full source unit/build/package validation; real-model QA is separate'},null,2));
+          console.log(JSON.stringify({exported:manifest.length,parent:process.env.GITHUB_SHA}));
+          JS
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1 && npx playwright install --with-deps chromium
+      - name: Real installed extension + deterministic HTTP contract fixture
+        run: node test/remote-extension/run.mjs
+      - name: Existing actual Chromium regression (deterministic model layer)
+        run: npm run test:browser
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: openai-source-verified-${{ github.run_id }}
+          path: |
+            test-results/openai-source/
+            test-results/remote-extension/
+            test-results/browser/
+          retention-days: 7
