@@ -1,0 +1,33 @@
+name: Temporary provider workspace export
+on:
+  push:
+    branches: [feat/openai-compatible-remote-translation]
+    paths: [.github/workflows/remote-provider-export.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund
+      - name: Export exact source without auth or model weights
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/provider-workspace"
+          git archive HEAD > "$RUNNER_TEMP/provider-workspace/source.tar"
+          git rev-parse HEAD > "$RUNNER_TEMP/provider-workspace/commit.txt"
+          tar -czf "$RUNNER_TEMP/provider-workspace/deps.tar.gz" node_modules
+      - uses: actions/upload-artifact@v4
+        with:
+          name: provider-workspace
+          path: ${{ runner.temp }}/provider-workspace/
+          retention-days: 2
+          if-no-files-found: error
