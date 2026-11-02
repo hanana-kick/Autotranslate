@@ -1,6 +1,6 @@
 # Autotranslate
 
-Automatic on-device web-page translation from a single Manifest V3 TypeScript source tree.
+Automatic web-page translation with an on-device TranslateGemma default or an explicitly configured OpenAI-compatible server, from a single Manifest V3 TypeScript source tree.
 **Chrome is the supported release. Firefox remains experimental:** the native on-device
 model initialization is failing in actual Firefox tests ([issue #2](https://github.com/hanana-kick/Autotranslate/issues/2)).
 Both browser packages can be built from source for testing, but **releases publish only
@@ -8,9 +8,10 @@ the tested Chrome archive**, not an unverified Firefox addon.
 
 Pages are translated in place: text nodes are replaced, originals are kept so the page can
 be restored, and a `MutationObserver` keeps up with dynamically inserted content. Translation
-is **on-device only**: a quantised TranslateGemma model, run by the background context, so no
-page text ever leaves the browser and there is no endpoint, no API key and no account to set
-up (see [On-device translation](#on-device-translation)).
+defaults to **on-device** TranslateGemma with no text leaving the browser. The optional
+**OpenAI-compatible API** provider instead sends text to the user-selected server; it does
+not load a local model or require browser WebGPU. See [remote server configuration](docs/openai-compatible.md)
+and [on-device translation](#on-device-translation). Every tab still requires explicit ON.
 
 ## Correctness and validation
 
@@ -28,7 +29,7 @@ retired. The browser regression gate must pass before the Release job publishes.
 | Chrome | 121 | MV3 + the `background.scripts` fallback key must be ignored, not rejected |
 | Firefox | 121 | MV3 `scripting` API and `background.scripts` alongside `service_worker` |
 | Node | 24 | runs `tsc` and executes the `test/*.ts` suites directly (type stripping) |
-| WebGPU-capable GPU | — | the current host requires an adapter; this check alone does not prove the selected inference backend |
+| WebGPU-capable GPU | — | Required only for on-device TranslateGemma; remote OpenAI-compatible mode does not use local WebGPU |
 
 ## Quick start
 

@@ -31,6 +31,60 @@
       </section>
 
       <section class="card">
+        <h2 data-i18n="options_engineMode"></h2>
+        <div class="field">
+          <label for="engineMode" data-i18n="options_engineModeLabel"></label>
+          <select id="engineMode">
+            <option value="local" data-i18n="options_engineLocal"></option>
+            <option value="remote" data-i18n="options_engineRemote"></option>
+          </select>
+        </div>
+      </section>
+
+      <section class="card" id="remoteSection" hidden>
+        <h2 data-i18n="options_engineRemote"></h2>
+        <p class="hint" data-i18n="options_remotePrivacy"></p>
+        <div class="grid">
+          <div class="field">
+            <label for="remoteBaseUrl" data-i18n="options_remoteBaseUrl"></label>
+            <input type="url" id="remoteBaseUrl" placeholder="http://192.168.1.50:8000/v1" autocomplete="off" spellcheck="false" />
+          </div>
+          <p class="hint" id="remoteSecurityWarning" data-i18n="options_remoteHttpWarning" hidden></p>
+          <div class="field">
+            <label for="remoteKey" data-i18n="options_remoteKey"></label>
+            <input type="password" id="remoteKey" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="remoteModel" data-i18n="options_remoteModel"></label>
+            <input type="text" id="remoteModel" list="remoteModelsList" autocomplete="off" spellcheck="false" placeholder="translategemma-4b-it" />
+            <datalist id="remoteModelsList"></datalist>
+          </div>
+          <div class="field">
+            <label for="remotePromptStyle" data-i18n="options_remotePromptStyle"></label>
+            <select id="remotePromptStyle">
+              <option value="delimiters" data-i18n="options_remoteDelimiters"></option>
+              <option value="official" data-i18n="options_remoteOfficial"></option>
+              <option value="instruction" data-i18n="options_remoteInstruction"></option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="remoteConcurrency" data-i18n="options_remoteConcurrency"></label>
+            <input type="number" id="remoteConcurrency" min="1" max="32" step="1" />
+          </div>
+          <div class="field">
+            <label for="remoteMaxTokens" data-i18n="options_remoteMaxTokens"></label>
+            <input type="number" id="remoteMaxTokens" min="16" max="4096" step="16" />
+          </div>
+          <p class="hint" data-i18n="options_remoteMaxNumSeqs"></p>
+          <div class="row wrap">
+            <button type="button" id="remoteDiscover" data-i18n="options_remoteDiscover"></button>
+            <button type="button" id="remoteTest" class="secondary" data-i18n="options_test"></button>
+          </div>
+          <p class="status" id="remoteStatus" role="status"></p>
+        </div>
+      </section>
+
+      <section class="card" id="localSection">
         <h2 data-i18n="options_local"></h2>
         <div class="grid">
           <p class="hint" id="localSupport" data-i18n="options_localHint"></p>
@@ -125,6 +179,7 @@
     <script src="lib/modelstore.js"></script>
     <script src="lib/modelflow.js"></script>
     <script src="lib/settings.js"></script>
+    <script src="lib/remote.js"></script>
     <script src="lib/ui.js"></script>
     <script src="options.js"></script>
   </body>

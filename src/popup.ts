@@ -122,6 +122,14 @@ namespace AT.popup {
    *  language pair the user picked. */
   function renderLocal(): void {
     const node = el('localStatus');
+    if (view.settings!.engineMode === 'remote') {
+      node.hidden = false;
+      node.dataset.kind = view.settings!.remoteBaseUrl && view.settings!.remoteModel ? 'info' : 'warn';
+      node.textContent = view.settings!.remoteModel ?
+        'OpenAI-compatible: ' + view.settings!.remoteModel + ' (' + view.settings!.remoteBaseUrl + ')' :
+        AT.i18n.msg('popup_remoteNotConfigured');
+      return;
+    }
     const supported = view.local?.supported === true;
     const phrase = AT.local.describeStatus(
       view.local?.status ? AT.local.normalizeStatus(view.local.status) : null,

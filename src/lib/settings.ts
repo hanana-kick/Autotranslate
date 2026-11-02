@@ -12,6 +12,13 @@ namespace AT.settings {
     localModelId: string;
     /** Combined input and output tokens one generation may spend. */
     localMaxTokens: number;
+    /** On-device model (unchanged) or an explicitly selected OpenAI-compatible server. */
+    engineMode: 'local' | 'remote';
+    remoteBaseUrl: string;
+    remoteModel: string;
+    remotePromptStyle: 'delimiters' | 'official' | 'instruction';
+    remoteConcurrency: number;
+    remoteMaxTokens: number;
     maxNodes: number;
     showBadge: boolean;
     siteRules: AT.rules.SiteRule[];
@@ -26,6 +33,7 @@ namespace AT.settings {
     targetLang: string;
     sourceLang: string;
     maxNodes: number;
+    remoteConcurrency?: number;
     showBadge: boolean;
   };
 
@@ -37,6 +45,12 @@ namespace AT.settings {
     sourceLang?: unknown;
     localModelId?: unknown;
     localMaxTokens?: unknown;
+    engineMode?: unknown;
+    remoteBaseUrl?: unknown;
+    remoteModel?: unknown;
+    remotePromptStyle?: unknown;
+    remoteConcurrency?: unknown;
+    remoteMaxTokens?: unknown;
     maxNodes?: unknown;
     showBadge?: unknown;
     siteRules?: { pattern?: unknown; action?: unknown }[] | null;
@@ -53,6 +67,12 @@ namespace AT.settings {
       sourceLang: 'auto',
       localModelId: '',
       localMaxTokens: AT.local.DEFAULT_MAX_TOKENS,
+      engineMode: 'local',
+      remoteBaseUrl: '',
+      remoteModel: '',
+      remotePromptStyle: 'delimiters',
+      remoteConcurrency: 2,
+      remoteMaxTokens: 512,
       maxNodes: C.DEFAULT_MAX_NODES,
       showBadge: true,
       siteRules: [],
@@ -122,6 +142,13 @@ namespace AT.settings {
         AT.local.MAX_MAX_TOKENS,
         base.localMaxTokens
       ),
+      engineMode: input.engineMode === 'remote' ? 'remote' : 'local',
+      remoteBaseUrl: typeof input.remoteBaseUrl === 'string' ? input.remoteBaseUrl.trim().slice(0, 2048) : base.remoteBaseUrl,
+      remoteModel: typeof input.remoteModel === 'string' ? input.remoteModel.trim().slice(0, 200) : base.remoteModel,
+      remotePromptStyle: input.remotePromptStyle === 'official' || input.remotePromptStyle === 'instruction'
+        ? input.remotePromptStyle : 'delimiters',
+      remoteConcurrency: clampInt(input.remoteConcurrency, 1, 32, base.remoteConcurrency),
+      remoteMaxTokens: clampInt(input.remoteMaxTokens, 16, 4096, base.remoteMaxTokens),
       debug: input.debug === true
     };
   }
@@ -130,11 +157,15 @@ namespace AT.settings {
   export function contentSnapshot(normalized?: Settings | null): ContentSnapshot {
     const s = normalized ?? defaults();
     return {
-      translationKey: JSON.stringify(['prompt-v2', s.localModelId, s.localMaxTokens, s.sourceLang, s.targetLang]),
+      translationKey: s.engineMode === 'remote'
+        ? JSON.stringify(['openai-v1', s.remoteBaseUrl, s.remoteModel, s.remotePromptStyle,
+            s.remoteMaxTokens, s.remoteConcurrency, s.sourceLang, s.targetLang])
+        : JSON.stringify(['prompt-v2', s.localModelId, s.localMaxTokens, s.sourceLang, s.targetLang]),
       enabled: s.enabled,
       targetLang: s.targetLang,
       sourceLang: s.sourceLang,
       maxNodes: s.maxNodes,
+      ...(s.engineMode === 'remote' ? { remoteConcurrency: s.remoteConcurrency } : {}),
       showBadge: s.showBadge
     };
   }

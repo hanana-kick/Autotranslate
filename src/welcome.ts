@@ -37,12 +37,14 @@ namespace AT.welcome {
   /** The model this page is about: stored and loaded, so `start` may finish. */
   let readyModel: AT.local.ModelRecord | null = null;
   let inflight: AbortController | null = null;
+  const remoteReady = () => settings?.engineMode === 'remote' &&
+    Boolean(settings.remoteBaseUrl && settings.remoteModel);
 
   function setBusy(busy: boolean): void {
     el('download').disabled = busy || el('download').dataset.blocked === 'true';
     el('pick').disabled = busy;
     el('cancel').hidden = !busy;
-    el('start').disabled = busy || readyModel === null;
+    el('start').disabled = busy || (!readyModel && !remoteReady());
   }
 
   function showProgress(received: number, total: number | null): void {
@@ -69,8 +71,8 @@ namespace AT.welcome {
         AT.local.formatBytes(readyModel.size)
       ]);
     }
-    el('start').disabled = inflight !== null || readyModel === null;
-    el('start').dataset.blocked = readyModel === null ? 'true' : 'false';
+    el('start').disabled = inflight !== null || (!readyModel && !remoteReady());
+    el('start').dataset.blocked = !readyModel && !remoteReady() ? 'true' : 'false';
   }
 
   async function showSupport(): Promise<void> {
@@ -173,11 +175,12 @@ namespace AT.welcome {
 
   /** Done: the extension is on, points at the model, and has a target language. */
   async function start(): Promise<void> {
-    if (!readyModel) return;
+    settings = await AT.settings.load();
+    if (!readyModel && !remoteReady()) return;
     el('start').disabled = true;
     settings = await AT.settings.save({
       enabled: false,
-      localModelId: readyModel.id,
+      ...(readyModel && settings.engineMode !== 'remote' ? { localModelId: readyModel.id } : {}),
       targetLang: el('targetLang').value
     });
     document.body.dataset.done = 'true';
@@ -219,9 +222,17 @@ namespace AT.welcome {
     el('targetLang').value = settings.targetLang;
     el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     wire();
-    await showSupport();
+    AT.storage?.onChanged?.addListener((changes, area) => {
+      if (area === 'local' && changes[C.STORAGE_KEY]) void AT.settings.load().then(next => {
+        settings = next;
+        renderInstalled();
+        if (remoteReady()) setStatus(AT.i18n.msg('welcome_remoteReady'), 'ok');
+      });
+    });
+    if (settings.engineMode !== 'remote') await showSupport();
     // A profile that already has the file (a reinstall, a second browser) skips
     // the transfer and only has to confirm.
+    if (remoteReady()) { renderInstalled(); setStatus(AT.i18n.msg('welcome_remoteReady'), 'ok'); return; }
     const existing = await AT.modelflow.installed();
     if (existing) {
       const prepared = await AT.modelflow.prepare(existing.id);

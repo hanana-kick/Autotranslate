@@ -1,7 +1,6 @@
-// The translation call. One implementation, on-device TranslateGemma: the
-// extension has no provider, so there is nothing to fetch, no key to keep and
-// no endpoint to validate. Runs in the background context, which owns the
-// offscreen host.
+// The translation call. Default behavior stays on-device TranslateGemma.
+// The explicitly selected remote mode sends text through the trusted extension
+// background to a user-configured OpenAI-compatible server; never content scripts.
 // Load after lib/constants.js, lib/browser.js.
 namespace AT.engines {
   const C = AT.C;
@@ -117,6 +116,10 @@ namespace AT.engines {
     /** model id; empty means nothing is selected and the call is a config error */
     localModelId?: string;
     localMaxTokens?: number;
+    engineMode?: 'local' | 'remote';
+    remoteConfig?: AT.remote.Config;
+    remoteKey?: string;
+    signal?: AbortSignal;
   };
 
   export type TranslateResult = {
@@ -187,13 +190,33 @@ namespace AT.engines {
     if (typeof target !== 'string' || !C.isSupportedLang(target)) {
       throw new EngineError('config', `unsupported target language: ${target}`);
     }
-    if (!localModelId) throw new EngineError('config', 'no on-device model is selected', { detail: 'no-model' });
+    if (request.engineMode !== 'remote' && !localModelId) {
+      throw new EngineError('config', 'no on-device model is selected', { detail: 'no-model' });
+    }
     if (texts.length === 0) return { translations: [], detected: null, requested: 0 };
 
     const originals = texts.map((text) => (typeof text === 'string' ? text : ''));
     const pending = originals.filter((text) => needsTranslation(text));
     const unique = [...new Set(pending)];
     if (unique.length === 0) return { translations: originals, detected: null, requested: 0 };
+
+    if (request.engineMode === 'remote') {
+      const config = request.remoteConfig;
+      if (!config) throw new EngineError('config', 'OpenAI-compatible server is not configured');
+      const resolved = await resolveSource(source, unique);
+      const language = source !== 'auto' ? source : resolved.detected ?? resolved.lang ?? null;
+      let translated: string[];
+      try {
+        translated = await AT.remote.translate(config, request.remoteKey ?? '', unique, language, target, request.signal);
+      } catch (error: unknown) {
+        const message = String((error as Error)?.message ?? error);
+        const code = LOCAL_CODES[String((error as { code?: unknown })?.code)] ?? 'network';
+        throw new EngineError(code, message);
+      }
+      const results = new Map(unique.map((text, index) => [text, translated[index] ?? '']));
+      return { translations: originals.map(text => needsTranslation(text) ? results.get(text) ?? '' : text),
+        detected: resolved.detected, requested: unique.length };
+    }
 
     /**
      * The model is sized by tokens, so the packing asks the host — which owns

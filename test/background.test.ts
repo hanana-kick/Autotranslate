@@ -17,6 +17,7 @@ const LIBS = [
   'lib/modelstore.js',
   'lib/ui.js',
   'lib/settings.js',
+  'lib/remote.js',
   'lib/engines.js',
   'lib/localhost.js',
   'lib/dom.js'

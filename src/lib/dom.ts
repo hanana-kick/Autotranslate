@@ -44,6 +44,8 @@ namespace AT.dom {
     mergeInline?: boolean;
     /** Split long text nodes into sentences. Off when absent. */
     sentences?: Sentences | undefined;
+    /** Remote HTTP can translate independent nodes concurrently; default/local is 1. */
+    maxConcurrentJobs?: number;
     /** Checked between jobs: a restore in another task can drop a queued answer. */
     shouldAbort?: (() => boolean) | undefined;
     /** Called after each chunk's answers are written, so a pass can report progress. */
@@ -137,6 +139,7 @@ namespace AT.dom {
       translate,
       mergeInline = true,
       sentences,
+      maxConcurrentJobs = 1,
       shouldAbort,
       onApply,
       cacheScope
@@ -376,7 +379,17 @@ namespace AT.dom {
       mergedRuns = 0;
       const scope = cacheScope?.() ?? '';
       const keyFor = (kind: string, sources: string[]) => JSON.stringify([scope, kind, sources]);
+      const inFlight = new Map<string, Promise<string[]>>();
       const ask = async (texts: string[]): Promise<string[]> => {
+        const key = keyFor('in-flight', texts);
+        const existing = inFlight.get(key);
+        if (existing) return existing;
+        const work = askUnshared(texts);
+        inFlight.set(key, work);
+        try { return await work; }
+        finally { if (inFlight.get(key) === work) inFlight.delete(key); }
+      };
+      const askUnshared = async (texts: string[]): Promise<string[]> => {
         if (cancelled()) return [];
         requested += texts.length;
         const answers = await translate(texts);
@@ -419,10 +432,10 @@ namespace AT.dom {
         write(item, parts.map((part, index) => answers[index] || part).join(split?.gap ?? ''), complete);
       };
 
-      for (const items of jobs) {
-        if (cancelled()) break;
+      const translateJob = async (items: Item[]): Promise<void> => {
+        if (cancelled()) return;
         const first = items[0];
-        if (!first || !items.every(owns)) continue;
+        if (!first || !items.every(owns)) return;
         const before = wrote;
         try {
           if (items.length === 1) {
@@ -435,7 +448,7 @@ namespace AT.dom {
               // Private-use markers were normally dropped, wasting one full
               // generation before the same fragments were translated again.
               const reply = await ask(items.map((item) => item.core));
-              if (cancelled() || !items.every(owns)) continue;
+              if (cancelled() || !items.every(owns)) return;
               pieces = reply.length === items.length && reply.every(Boolean) ? reply : null;
             }
             if (pieces) {
@@ -465,12 +478,26 @@ namespace AT.dom {
             }
           }
         } catch (caught: unknown) {
-          if (cancelled()) break;
+          if (cancelled()) return;
           failed++;
           firstError ??= caught;
           error ??= String((caught as { message?: unknown })?.message ?? caught);
         }
         if (wrote > before && !cancelled()) onApply?.(completed);
+      };
+      const concurrency = Math.max(1, Math.min(32, Math.floor(maxConcurrentJobs) || 1));
+      if (concurrency === 1) {
+        // Exactly the original serial path for the built-in local model.
+        for (const items of jobs) { if (cancelled()) break; await translateJob(items); }
+      } else {
+        let cursor = 0;
+        await Promise.all(Array.from({ length: Math.min(concurrency, jobs.length) }, async () => {
+          while (!cancelled()) {
+            const at = cursor++;
+            if (at >= jobs.length) return;
+            await translateJob(jobs[at]!);
+          }
+        }));
       }
       if (!cancelled() && failed > 0 && wrote === 0) throw firstError ?? new Error(error ?? 'translation failed');
       return { requested, translated: stats().translated, runs: mergedRuns, failed, error };

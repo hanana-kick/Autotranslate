@@ -102,6 +102,7 @@ if (typeof self.importScripts === 'function') {
     'lib/modelstore.js',
     'lib/ui.js',
     'lib/settings.js',
+    'lib/remote.js',
     'lib/engines.js',
     'lib/localhost.js'
   );
@@ -116,6 +117,12 @@ if (typeof self.importScripts === 'function') {
   // AT.supportsOffscreen() / AT.offscreenApi, never assumed.
   type BackgroundApi = Required<Pick<AT.BrowserApi, 'runtime' | 'tabs' | 'storage'>> & AT.BrowserApi;
   const api = AT.api as BackgroundApi;
+  // Chrome exposes storage.local to content scripts by default. Prevent those
+  // untrusted contexts from reading the remote API key, even though normal
+  // content-script translation never receives that key. Firefox may not expose
+  // this API; there is no silent fallback involving page scripts.
+  void api.storage.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' })
+    .catch(error => AT.warn('credential storage access restriction unavailable', error));
 
   const CONTENT_FILES = Object.freeze([
     'vendor/browser-polyfill.js',
@@ -147,6 +154,15 @@ if (typeof self.importScripts === 'function') {
   const tabStates = new Map<number, AT.background.TabState>();
   let settingsCache: AT.settings.Settings | null = null;
   let policyEpoch = 0;
+  const remoteRequests = new Map<number, Set<AbortController>>();
+  function abortRemoteTab(tabId: number): void {
+    for (const controller of remoteRequests.get(tabId) ?? []) controller.abort();
+    remoteRequests.delete(tabId);
+  }
+  function abortRemoteAll(): void {
+    for (const id of remoteRequests.keys()) abortRemoteTab(id);
+    AT.remote.cancelAll();
+  }
 
   // Consent is per live tab, never derived from global enabled/site rules.
   // storage.session survives service-worker suspension but not browser restart,
@@ -188,7 +204,7 @@ if (typeof self.importScripts === 'function') {
     }
     const revision = (targetRevisions.get(id) ?? 0) + 1;
     targetRevisions.set(id, revision);
-    if (enabled) targets.add(id); else targets.delete(id);
+    if (enabled) targets.add(id); else { targets.delete(id); abortRemoteTab(id); }
     // Send cancellation immediately; persistence and an old inference must not
     // delay restoring the source. An ON response acknowledges selection, not
     // completion of inference (progress is reported independently).
@@ -237,6 +253,7 @@ if (typeof self.importScripts === 'function') {
       // Never let a delayed old read replace an authoritative enabled/target edit.
       if (revision !== policyEpoch) return getSettings();
       settingsCache = loaded;
+      if (loaded.engineMode === 'remote') AT.remote.configureConcurrency(loaded.remoteConcurrency);
       AT.debug = loaded.debug;
     }
     return settingsCache;
@@ -363,6 +380,7 @@ if (typeof self.importScripts === 'function') {
   async function restoreTab(tabId?: number): Promise<AT.MessageResult> {
     const tab = await activeTab(tabId);
     if (tab?.id == null) throw new Error('no active tab');
+    abortRemoteTab(tab.id);
     // No injection on OFF. Missing content scripts simply have nothing to restore.
     const response = await api.tabs.sendMessage(tab.id, { type: C.MSG.CONTENT_RESTORE }).catch(() => undefined) as AT.background.ContentReply | undefined;
     if (response && !response.ok) throw new Error(response.error ?? 'the content script did not answer');
@@ -407,11 +425,40 @@ if (typeof self.importScripts === 'function') {
       context: AT.pagecontext.normalize(message.context),
       role: AT.targets.normalizeRole(message.role),
       localModelId: settings.localModelId,
-      localMaxTokens: settings.localMaxTokens
+      localMaxTokens: settings.localMaxTokens,
+      engineMode: settings.engineMode,
+      ...(settings.engineMode === 'remote' ? {
+        remoteConfig: {
+          baseUrl: settings.remoteBaseUrl,
+          model: settings.remoteModel,
+          style: settings.remotePromptStyle,
+          concurrency: settings.remoteConcurrency,
+          maxOutputTokens: settings.remoteMaxTokens
+        }
+      } : {})
     };
-    // The host has to exist before the engine layer can ask it anything.
-    await ensureHost();
+    if (settings.engineMode !== 'remote') await ensureHost();
     if (!targets.has(tabId) || (targetRevisions.get(tabId) ?? 0) !== revision) throw new Error('tab translation was cancelled');
+    if (settings.engineMode === 'remote') {
+      const controller = new AbortController();
+      const set = remoteRequests.get(tabId) ?? new Set<AbortController>();
+      remoteRequests.set(tabId, set); set.add(controller);
+      const identity = AT.settings.contentSnapshot(settings).translationKey;
+      const stillCurrent = () => !controller.signal.aborted && targets.has(tabId) &&
+        (targetRevisions.get(tabId) ?? 0) === revision &&
+        identity === AT.settings.contentSnapshot(settingsCache ?? settings).translationKey;
+      try {
+        request.remoteKey = await AT.remote.getKey();
+        request.signal = controller.signal;
+        if (!stillCurrent()) throw new Error('tab translation was cancelled');
+        const result = await AT.engines.translate(request);
+        if (!stillCurrent()) throw new Error('tab translation was cancelled');
+        return { translations: result.translations, detected: result.detected };
+      } finally {
+        set.delete(controller);
+        if (!set.size && remoteRequests.get(tabId) === set) remoteRequests.delete(tabId);
+      }
+    }
     localKey = request.localModelId || null;
     const result = await AT.engines.translate(request);
     return { translations: result.translations, detected: result.detected };
@@ -419,12 +466,19 @@ if (typeof self.importScripts === 'function') {
 
   async function testModel(message: AT.background.EngineTestRequest): Promise<AT.MessageResult> {
     const settings = await getSettings({ force: true });
-    await ensureHost();
+    if (settings.engineMode !== 'remote') await ensureHost();
     const result = await AT.engines.test({
       source: settings.sourceLang,
       target: message.target ?? settings.targetLang,
       localModelId: settings.localModelId,
-      localMaxTokens: settings.localMaxTokens
+      localMaxTokens: settings.localMaxTokens,
+      engineMode: settings.engineMode,
+      ...(settings.engineMode === 'remote' ? {
+        remoteConfig: { baseUrl: settings.remoteBaseUrl, model: settings.remoteModel,
+          style: settings.remotePromptStyle, concurrency: settings.remoteConcurrency,
+          maxOutputTokens: settings.remoteMaxTokens },
+        remoteKey: await AT.remote.getKey()
+      } : {})
     });
     return { result };
   }
@@ -442,7 +496,7 @@ if (typeof self.importScripts === 'function') {
       tabEnabled: tab?.id != null && targets.has(tab.id),
       rule: rule?.action ?? null,
       state: tab?.id != null ? await tabStateOf(tab.id, tab.url) : null,
-      local: await localState(true)
+      local: settings.engineMode === 'remote' ? null : await localState(true)
     };
   }
 
@@ -674,6 +728,7 @@ if (typeof self.importScripts === 'function') {
 
   api.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.status === 'loading') {
+      abortRemoteTab(tabId);
       targetRevisions.set(tabId, (targetRevisions.get(tabId) ?? 0) + 1);
       tabStates.delete(tabId);
     }
@@ -703,6 +758,7 @@ if (typeof self.importScripts === 'function') {
   });
 
   api.tabs.onRemoved.addListener((tabId) => {
+    abortRemoteTab(tabId);
     tabStates.delete(tabId);
     void targetsReady.then(() => {
       targets.delete(tabId);
@@ -743,7 +799,9 @@ if (typeof self.importScripts === 'function') {
   // A context with storage always has onChanged; the plain-JS version relied on
   // the same guarantee, so the assertion keeps a missing member a TypeError.
   api.storage.onChanged!.addListener((changes, area) => {
-    if (area !== 'local' || !changes[C.STORAGE_KEY]) return;
+    if (area !== 'local') return;
+    if (changes[AT.remote.TOKEN_STORAGE_KEY]) abortRemoteAll();
+    if (!changes[C.STORAGE_KEY]) return;
     const revision = ++policyEpoch;
     const edited = changes[C.STORAGE_KEY];
     const previous = edited?.oldValue ? AT.settings.normalize(edited.oldValue) : null;
@@ -751,6 +809,10 @@ if (typeof self.importScripts === 'function') {
     // race unrelated tab reads and silently cancel a rapid OFF -> ON transition.
     settingsCache = edited?.newValue ? AT.settings.normalize(edited.newValue) : null;
     const committed = settingsCache;
+    if (!previous || !committed || AT.settings.contentSnapshot(previous).translationKey !== AT.settings.contentSnapshot(committed).translationKey) {
+      abortRemoteAll();
+    }
+    if (committed?.engineMode === 'remote') AT.remote.configureConcurrency(committed.remoteConcurrency);
     const next = committed ? Promise.resolve(committed) : getSettings();
     void next.then(async (settings) => {
         if (revision !== policyEpoch) return;
@@ -762,7 +824,7 @@ if (typeof self.importScripts === 'function') {
         // native inference, and must not hold every page's controls behind it.
         await Promise.all([
           previous ? retargetTabs(settings, previous, revision) : Promise.resolve(),
-          localKey !== null && localKey !== settings.localModelId ? releaseLocal() : Promise.resolve()
+          localKey !== null && (settings.engineMode === 'remote' || localKey !== settings.localModelId) ? releaseLocal() : Promise.resolve()
         ]);
       })
       .catch((error) => AT.warn('applying a settings change failed', error));
@@ -787,7 +849,10 @@ if (typeof self.importScripts === 'function') {
     }),
     [C.MSG.SET_SITE_RULE]: (message) => setSiteRule(message as AT.background.SiteRuleRequest),
     [C.MSG.REMOVE_SITE_RULE]: (message) => setSiteRule({ ...(message as AT.background.SiteRuleRequest), action: null }),
-    [C.MSG.TEST_ENGINE]: (message) => testModel(message as AT.background.EngineTestRequest),
+    [C.MSG.TEST_ENGINE]: (message, sender) => {
+      if (sender.tab && isInjectable(sender.tab.url)) throw new Error('engine testing requires extension UI');
+      return testModel(message as AT.background.EngineTestRequest);
+    },
     [C.MSG.TRANSLATE_TAB]: (message, sender) => {
       if (sender.tab && isInjectable(sender.tab.url)) throw new Error('tab controls require an extension page');
       return setTabEnabled((message as AT.background.TabRequest).tabId, true);
@@ -795,6 +860,11 @@ if (typeof self.importScripts === 'function') {
     [C.MSG.RESTORE_TAB]: (message, sender) => {
       if (sender.tab && isInjectable(sender.tab.url)) throw new Error('tab controls require an extension page');
       return setTabEnabled((message as AT.background.TabRequest).tabId, false);
+    },
+    [C.MSG.REMOTE_MODELS]: async (_message, sender) => {
+      if (sender.tab && isInjectable(sender.tab.url)) throw new Error('Only extension UI may inspect remote models');
+      const settings = await getSettings({ force: true });
+      return await AT.remote.discover(settings.remoteBaseUrl, await AT.remote.getKey());
     },
     [C.MSG.LOCAL_STATUS]: (message) => reportLocal(message as { status?: unknown }),
     [C.MSG.LOCAL_GET_STATUS]: () => getLocalState(),

@@ -14,6 +14,8 @@ namespace AT.pipeline {
   /** The settings the engine needs; the rest belong to the UI. */
   export type Settings = {
     maxNodes: number;
+    /** Remote mode only; on-device stays serial. */
+    maxConcurrentJobs?: number;
   };
 
   /** One request to the translation layer: texts, the region, the page. */
@@ -194,6 +196,7 @@ namespace AT.pipeline {
       translator = AT.dom.createTranslator({
         doc: request.doc,
         maxNodes: settings.maxNodes,
+        maxConcurrentJobs: settings.maxConcurrentJobs ?? 1,
         sentences: request.sentences,
         shouldAbort: request.shouldAbort,
         cacheScope: () => JSON.stringify([context, role]),
