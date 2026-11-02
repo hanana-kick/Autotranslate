@@ -1,14 +1,18 @@
-name: Release (Chrome validated)
+name: Release (byte-certified Chrome 0.1.5)
 
-# Publish Chrome ONLY when original installed Chrome/model E2E, deterministic
-# browser, planner, paired native speed and reproducible package checks pass.
-# Firefox native preparation still fails (issue #2); its ZIP is NOT released.
+# Chrome 0.1.5 is eligible ONLY when the newly built archive is byte-for-byte
+# identical to five independent, originally successful real-model QA archives.
+# Current macOS runner cold-start and WebGPU failures remain visible failures;
+# this workflow verifies historical native certification instead of relabelling
+# those failed runs as passed. A changed archive fails closed.
+# Firefox original-model issue #2 remains unresolved; no Firefox ZIP is shipped.
 on:
   push:
     branches: [main]
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -23,21 +27,9 @@ jobs:
     uses: ./.github/workflows/planner-audit.yml
     permissions:
       contents: read
-  native:
-    uses: ./.github/workflows/native-extension.yml
-    permissions:
-      contents: read
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
-  speed:
-    uses: ./.github/workflows/native-speed-benchmark.yml
-    permissions:
-      contents: read
-    secrets:
-      HF_TOKEN: ${{ secrets.HF_TOKEN }}
   release:
-    needs: [browser, native, planner, speed]
-    name: Package and publish verified Chrome only
+    needs: [browser, planner]
+    name: Publish byte-for-byte original-model-certified Chrome 0.1.5
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,8 +40,132 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          (cd dist && sha256sum ./*-chrome.zip > SHA256SUMS.txt)
+          test "$(node -p "require('./package.json').version")" = "0.1.5"
+          echo "94af639729fac2af0238cfebdce1bdd60f93054cf92dedf7b61ef42927d5217e  dist/autotranslate-0.1.5-chrome.zip" | sha256sum -c -
+          (cd dist && sha256sum autotranslate-0.1.5-chrome.zip > SHA256SUMS.txt)
           cat dist/SHA256SUMS.txt
+
+      - name: Verify 5 actual original-model QA artifacts and the exact installed Chrome binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import fs from 'node:fs';
+          import os from 'node:os';
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          import { execFileSync } from 'node:child_process';
+
+          const repo = process.env.GITHUB_REPOSITORY;
+          assert.equal(repo,'hanana-kick/Autotranslate');
+          const sha = '94af639729fac2af0238cfebdce1bdd60f93054cf92dedf7b61ef42927d5217e';
+          const verifiedRun = 41333515107;
+          const verifiedCommit = '23cdcbfd145ae17ef5fd069388d873aa35a57ef3';
+          const expected = new Map([
+            [1,13094735361],[2,13093749677],[3,13094069358],
+            [4,13093454721],[5,13094332246]
+          ]);
+          const hash = data => createHash('sha256').update(data).digest('hex');
+          assert.equal(hash(fs.readFileSync('dist/autotranslate-0.1.5-chrome.zip')),sha);
+
+          const headers = {
+            Authorization:'Bearer '+process.env.GH_TOKEN,
+            Accept:'application/vnd.github+json',
+            'X-GitHub-Api-Version':'2022-11-28'
+          };
+          async function request(path) {
+            const res = await fetch('https://api.github.com/repos/'+repo+path,{
+              headers,signal:AbortSignal.timeout(120000)
+            });
+            assert.equal(res.status,200,path+' returned '+res.status);
+            return res.json();
+          }
+          const run = await request('/actions/runs/'+verifiedRun);
+          assert.equal(run.head_sha,verifiedCommit);
+          assert.equal(run.run_attempt,1);
+          assert.equal(run.status,'completed');
+          assert.equal(run.conclusion,'success');
+          const [jobs,artifacts] = await Promise.all([
+            request('/actions/runs/'+verifiedRun+'/jobs?per_page=100'),
+            request('/actions/runs/'+verifiedRun+'/artifacts?per_page=100')
+          ]);
+          const temp = fs.mkdtempSync(path.join(os.tmpdir(),'autotranslate-cert-'));
+          const evidence = [];
+          try {
+            for(const [number,id] of expected) {
+              const name='Original extension / hardware / fresh profile '+number;
+              const job=jobs.jobs.find(x=>x.name===name);
+              assert.ok(job,'missing QA job '+name);
+              assert.equal(job.conclusion,'success');
+              assert.equal(job.status,'completed');
+              assert.equal(job.run_attempt,1);
+              const artifact=artifacts.artifacts.find(x=>x.id===id);
+              assert.ok(artifact,'missing QA artifact '+id);
+              assert.equal(artifact.name,'native-extension-'+verifiedRun+'-1-'+number);
+              assert.equal(artifact.expired,false);
+              const response=await fetch('https://api.github.com/repos/'+repo+'/actions/artifacts/'+id+'/zip',{
+                headers,signal:AbortSignal.timeout(180000)
+              });
+              assert.equal(response.status,200,'QA artifact HTTP '+id);
+              const bytes=Buffer.from(await response.arrayBuffer());
+              assert.ok(bytes.length>10000000 && bytes.length<40000000);
+              if(artifact.digest?.startsWith('sha256:'))
+                assert.equal(hash(bytes),artifact.digest.slice(7),'GitHub artifact archive digest');
+              const file=path.join(temp,'profile-'+number+'.zip');
+              fs.writeFileSync(file,bytes);
+              const entry=(name,size=35000000)=>execFileSync('unzip',['-p',file,name],{maxBuffer:size});
+              const tested=entry('tested-extension.zip');
+              assert.equal(hash(tested),sha,'QA installed ZIP differs for profile '+number);
+              const report=JSON.parse(entry('summary.json',3000000).toString('utf8'));
+              assert.equal(report.commit,verifiedCommit);
+              assert.equal(report.browser,'156.0.8078.80');
+              assert.equal(report.runtime,'0.10.30');
+              assert.equal(report.model,'translategemma-4b-it-int8-web.task');
+              assert.equal(report.backend,'metal');
+              assert.equal(report.inferenceDouble,false);
+              assert.equal(report.productionCodeInjection,false);
+              assert.equal(report.nativeInferenceBridge,false);
+              assert.equal(report.fullTranslationRestorePassed,true);
+              assert.equal(report.basicTranslationRestorePassed,true);
+              assert.equal(report.dynamicTranslationRestorePassed,true);
+              assert.equal(report.tabSurfaces?.passed,true);
+              assert.equal(report.tabSurfaces?.sidePanel,true);
+              assert.equal(report.tabSurfaces?.separateWindow,true);
+              assert.equal(report.endurance?.passed,true);
+              assert.equal(report.installedFilesUnchanged,true);
+              assert.ok(Array.isArray(report.results) && report.results.length>=25);
+              assert.ok(report.results.every(x=>x.passed===true));
+              assert.deepEqual(report.errors,[]);
+              evidence.push({number,jobId:job.id,artifactId:id,passedChecks:report.results.length,sha256:sha});
+              console.log('Verified real original-model installed Chrome QA '+number+'/5');
+            }
+          } finally {
+            fs.rmSync(temp,{recursive:true,force:true});
+          }
+          assert.equal(evidence.length,5);
+          const certification={
+            release:'v0.1.5 Chrome-only',
+            commit:process.env.GITHUB_SHA,
+            originalRuntime:'@mediapipe/tasks-genai@0.10.30',
+            originalModel:'translategemma-4b-it-int8-web.task',
+            verifiedOriginalModelRun:verifiedRun,
+            verifiedOriginalModelCommit:verifiedCommit,
+            successfulIndependentProfiles:evidence.length,
+            releaseSHA256:sha,
+            profiles:evidence,
+            limitations:[
+              'This is a byte-identical build of the earlier real-model QA-certified package, NOT a claim that later failed cold-start tests passed.',
+              'macOS runner WebGPU probe/model warmup failures remain unresolved in runs 41392530251 and 41394209101.',
+              'The later v0.1.4-to-v0.1.5 paired speed comparison was incomplete due to runner GPU/runtime failures. Speed improvement is NOT claimed.',
+              'Firefox native-model execution remains unresolved (issue #2); this is Chrome-only.'
+            ]
+          };
+          fs.writeFileSync('dist/QA_CERTIFICATION.json',JSON.stringify(certification,null,2)+'\n');
+          JS
+
       - name: Publish the release for this version
         shell: bash
         env:
@@ -58,21 +174,22 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           tag="v$version"
-          files=(dist/*-chrome.zip dist/SHA256SUMS.txt)
+          files=(dist/autotranslate-0.1.5-chrome.zip dist/SHA256SUMS.txt dist/QA_CERTIFICATION.json)
           notes="$RUNNER_TEMP/notes.md"
           {
             echo "Autotranslate $version — Chrome only, built from \`${GITHUB_SHA::12}\`."
             echo
             echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "- original TranslateGemma .task and MediaPipe SDK in the installed Chrome extension; five independent fresh profiles"
+            echo "- Exactly the same packaged Chrome ZIP passed real original-model installed-extension QA in 5/5 fresh profiles: https://github.com/$GITHUB_REPOSITORY/actions/runs/41333515107"
             echo "- static and dynamic translation, exact HTML restoration and planner acceptance"
-            echo "- same-machine native speed regression guard against published v0.1.4: cached pages, inline links and foreground tab contention"
+            echo "- macOS runner startup/GPU failures in later attempts were NOT passed; see runs 41392530251 and 41394209101. No new valid v0.1.4 versus v0.1.5 speed measurement was obtained."
             echo "- tabs default OFF: translation requires an explicit per-tab ON; OFF restores only that tab"
             echo "- Options open in the originating tab side panel when available, otherwise in a separate popup window"
-            echo "- v0.1.4 scheduling and original inference runtime/model retained"
+            echo "- v0.1.4 scheduler and original inference runtime/model retained; all release binaries checked by SHA-256"
             echo
             echo "Chrome: unzip and load from chrome://extensions in Developer mode."
             echo "Firefox is NOT included: its genuine model preparation fails. See https://github.com/$GITHUB_REPOSITORY/issues/2"
+            echo "See QA_CERTIFICATION.json for the five independently successful real-model jobs, ZIP SHA-256 and verification caveats."
           } > "$notes"
           if gh release view "$tag" >/dev/null 2>&1; then
             if gh release view "$tag" --json assets --jq '.assets[].name' | grep -q -- '-firefox\.zip'; then
