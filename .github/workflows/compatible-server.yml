@@ -18,7 +18,7 @@ jobs:
       OLLAMA_KEEP_ALIVE: 30m
       OLLAMA_CONTEXT_LENGTH: '4096'
       CUDA_VISIBLE_DEVICES: '-1'
-      SERVER_MODEL: qwen2.5:1.5b
+      SERVER_MODEL: qwen2.5:3b
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,15 +46,14 @@ jobs:
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:11434/api/version > test-results/server-extension/server-version.json && break; sleep 1; done
           curl -fsS http://127.0.0.1:11434/api/version
           "$RUNNER_TEMP/ollama/bin/ollama" pull "$SERVER_MODEL"
-          curl -fsS --max-time 300 http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{"model":"qwen2.5:1.5b","prompt":"","stream":false,"keep_alive":"30m","options":{"num_gpu":0}}' > test-results/server-extension/server-preload.json
+          curl -fsS --max-time 300 http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{"model":"qwen2.5:3b","prompt":"","stream":false,"keep_alive":"30m","options":{"num_gpu":0}}' > test-results/server-extension/server-preload.json
           curl -fsS http://127.0.0.1:11434/api/tags > test-results/server-extension/model-provenance.json
           curl -fsS http://127.0.0.1:11434/api/ps > test-results/server-extension/model-process.json
           node --input-type=module <<'JS'
           import fs from 'node:fs';import assert from 'node:assert/strict';
           const data=JSON.parse(fs.readFileSync('test-results/server-extension/model-process.json','utf8'));
           assert.ok(data.models.length > 0, 'actual model must be resident');
-          // This server reports AMX host allocations as size_vram. Inspect the
-          // actual native backend and launch flags instead of that estimate.
+          // AMX host allocations appear in size_vram. Check the actual backend.
           const log=fs.readFileSync('test-results/server-extension/ollama.log','utf8');
           assert.match(log,/inference compute.*id=cpu library=cpu/);
           assert.match(log,/-ngl 0(?: |")/);
