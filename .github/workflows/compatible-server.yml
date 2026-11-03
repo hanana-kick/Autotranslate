@@ -18,7 +18,8 @@ jobs:
       OLLAMA_KEEP_ALIVE: 30m
       OLLAMA_CONTEXT_LENGTH: '4096'
       CUDA_VISIBLE_DEVICES: '-1'
-      SERVER_MODEL: qwen2.5:3b
+      BASE_MODEL: qwen2.5:7b
+      SERVER_MODEL: autotranslate-qa
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,21 +46,31 @@ jobs:
           nohup "$RUNNER_TEMP/ollama/bin/ollama" serve > test-results/server-extension/ollama.log 2>&1 &
           for i in $(seq 1 60); do curl -fsS http://127.0.0.1:11434/api/version > test-results/server-extension/server-version.json && break; sleep 1; done
           curl -fsS http://127.0.0.1:11434/api/version
-          "$RUNNER_TEMP/ollama/bin/ollama" pull "$SERVER_MODEL"
-          curl -fsS --max-time 300 http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{"model":"qwen2.5:3b","prompt":"","stream":false,"keep_alive":"30m","options":{"num_gpu":0}}' > test-results/server-extension/server-preload.json
+          "$RUNNER_TEMP/ollama/bin/ollama" pull "$BASE_MODEL"
+          # Server-side sampling configuration, not canned translations or a
+          # provider-specific extension request. Keep the original failing 3B
+          # evidence; that model emitted French for a Korean heading request.
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import assert from 'node:assert/strict';
+          const model=process.env.SERVER_MODEL;
+          async function api(path,body){const r=await fetch('http://127.0.0.1:11434/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(300000)});assert.ok(r.ok,path+' HTTP '+r.status);return r.json();}
+          const created=await api('create',{model,from:process.env.BASE_MODEL,parameters:{temperature:0},stream:false});
+          assert.equal(created.status,'success');
+          fs.writeFileSync('test-results/server-extension/model-configuration.json',JSON.stringify(await api('show',{model}),null,2));
+          fs.writeFileSync('test-results/server-extension/server-preload.json',JSON.stringify(await api('generate',{model,prompt:'',stream:false,keep_alive:'30m',options:{num_gpu:0}}),null,2));
+          JS
           curl -fsS http://127.0.0.1:11434/api/tags > test-results/server-extension/model-provenance.json
           curl -fsS http://127.0.0.1:11434/api/ps > test-results/server-extension/model-process.json
           node --input-type=module <<'JS'
           import fs from 'node:fs';import assert from 'node:assert/strict';
           const data=JSON.parse(fs.readFileSync('test-results/server-extension/model-process.json','utf8'));
           assert.ok(data.models.length > 0, 'actual model must be resident');
-          // AMX host allocations appear in size_vram. Check the actual backend.
           const log=fs.readFileSync('test-results/server-extension/ollama.log','utf8');
           assert.match(log,/inference compute.*id=cpu library=cpu/);
           assert.match(log,/-ngl 0(?: |")/);
           assert.match(log,/loaded CPU backend/);
           assert.doesNotMatch(log,/offloaded [1-9]\d*\//);
-          fs.writeFileSync('test-results/server-extension/backend-evidence.json',JSON.stringify({cpuBackend:true,gpuLayers:0,reportedSizeVram:data.models.map(m=>m.size_vram),note:'CPU/AMX verified from backend and launch logs; size_vram is retained without representing it as actual GPU allocation'},null,2));
+          fs.writeFileSync('test-results/server-extension/backend-evidence.json',JSON.stringify({cpuBackend:true,gpuLayers:0,baseModel:process.env.BASE_MODEL,serverModel:process.env.SERVER_MODEL,temperature:0,reportedSizeVram:data.models.map(m=>m.size_vram),note:'CPU/AMX verified from backend and launch logs; size_vram is not treated as GPU allocation'},null,2));
           JS
       - name: Install original extension and translate via actual HTTP model responses
         shell: bash
