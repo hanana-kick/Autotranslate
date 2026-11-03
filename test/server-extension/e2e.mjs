@@ -36,7 +36,9 @@ const close = async server => { if (server) { server.closeAllConnections(); awai
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 async function screenshot(page, name) {
   await page.bringToFront();
-  await page.screenshot({ path: join(out, name + '.png'), fullPage: true, timeout: 20000 });
+  // Playwright's default caret hiding mutates input.style and may leave a new
+  // empty style attribute. Observe the authored DOM instead of changing it.
+  await page.screenshot({ path: join(out, name + '.png'), fullPage: true, caret: 'initial', timeout: 20000 });
 }
 try {
   const modelsReply = await fetch(upstream + '/models'); assert.equal(modelsReply.ok, true);
@@ -127,6 +129,7 @@ try {
   await options.goto(root + '/options.html?tabId=' + state.tabId);
   await options.waitForFunction(() => document.body.dataset.ready === 'true' && !document.querySelector('#enabled').disabled);
   const original = await page.locator('body').innerHTML();
+  await writeFile(join(out, 'original.html'), original);
   const element = await page.locator('#hello').elementHandle();
   await options.locator('#enabled').check();
   const started = performance.now();
@@ -135,10 +138,10 @@ try {
   assert.equal(await page.locator('#inline a').getAttribute('href'), '/guide');
   await screenshot(page, 'server-page-translated');
   await options.locator('#enabled').uncheck();
+  await writeFile(join(out, 'after-off.html'), await page.locator('body').innerHTML());
   await page.waitForFunction(html => document.body.innerHTML === html, original);
   assert.equal(await element.evaluate(e => e === document.querySelector('#hello')), true);
   await record('real-server-tab-opt-in-translation-and-exact-html-restoration', { elapsedMs: performance.now() - started, otherTabUnchanged: true });
-  await writeFile(join(out, 'original.html'), original);
   await writeFile(join(out, 'restored.html'), await page.locator('body').innerHTML());
   await options.locator('#enabled').check();
   await page.waitForFunction(() => /[가-힣]/u.test(document.querySelector('#hello').textContent), null, { timeout: 180000 });
@@ -195,7 +198,13 @@ try {
 } catch (error) {
   summary.failure = { message: clean(error.message), stack: clean(error.stack) };
   summary.requests = records;
-  if (context) for (const [index, p] of context.pages().entries()) await screenshot(p, 'FAIL-' + index).catch(() => {});
+  if (context) for (const [index, p] of context.pages().entries()) {
+    // Only fixture page HTML is recorded; extension settings may contain keys.
+    if (fixture && p.url().startsWith('http://127.0.0.1:' + fixture.address().port + '/')) {
+      await writeFile(join(out, 'FAIL-' + index + '.html'), await p.locator('body').innerHTML()).catch(() => {});
+    }
+    await screenshot(p, 'FAIL-' + index).catch(() => {});
+  }
   throw error;
 } finally {
   await writeFile(join(out, 'summary.json'), JSON.stringify(summary, null, 2));
