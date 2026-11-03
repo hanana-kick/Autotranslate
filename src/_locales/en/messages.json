@@ -2,7 +2,7 @@
   "extensionName": { "message": "Autotranslate" },
   "shortName": { "message": "Autotranslate" },
   "description": {
-    "message": "Translates web pages with Google, a LibreTranslate instance, or a model that runs on this computer."
+    "message": "Translate selected tabs using an on-device model or your OpenAI-compatible server."
   },
   "actionTitle": { "message": "Autotranslate this page" },
   "menuTranslatePage": { "message": "Turn translation on for this tab" },
@@ -208,7 +208,7 @@
   "options_stateError": {
     "message": "On-device engine failed"
   },
-  "welcome_intro": { "message": "Install the model once. After that, every page you open is translated into your language, in this browser." },
+  "welcome_intro": { "message": "Choose an on-device model or configure a compatible server. Each tab stays OFF until you turn it on." },
   "welcome_language": { "message": "Your language" },
   "welcome_model": { "message": "Model" },
   "welcome_modelHint": { "message": "Download the model once, or pick a model file you already have. It is stored on this device; pages never leave the browser." },
@@ -219,7 +219,7 @@
   },
   "welcome_importFailed": { "message": "That file cannot be used: $1$", "placeholders": { "1": { "content": "$1" } } },
   "welcome_needModel": { "message": "No model yet. Download it or pick a file to continue." },
-  "welcome_readyExisting": { "message": "The model is already installed. Press Start to turn translation on." },
+  "welcome_readyExisting": { "message": "The model is installed. Finish setup, then explicitly enable translation in the desired tab." },
   "welcome_start": { "message": "Finish setup" },
   "welcome_starting": { "message": "Starting the download…" },
   "welcome_done": { "message": "Model ready. Enable translation explicitly in each tab you want to translate." },
@@ -228,5 +228,23 @@
   "tab_noTarget": { "message": "Open options from the extension icon on the page you want to translate." },
   "tab_unavailable": { "message": "The target tab is closed or cannot be translated." },
   "tab_enabledHint": { "message": "Only this selected tab is translated, including newly inserted content." },
-  "tab_disabledHint": { "message": "Translation is off in this tab. Other tabs keep their own selection." }
+  "tab_disabledHint": { "message": "Translation is off in this tab. Other tabs keep their own selection." },
+  "server_engine": {"message":"Translation engine"},
+  "server_local": {"message":"On-device TranslateGemma"},
+  "server_openai": {"message":"OpenAI-compatible server"},
+  "server_privacy": {"message":"Only explicitly enabled tabs send text to this server. API keys are stored in this browser, not sent to page scripts. HTTP is unencrypted; use HTTPS outside trusted networks."},
+  "server_baseUrl": {"message":"Base URL"},
+  "server_apiKey": {"message":"API key (optional)"},
+  "server_model": {"message":"Model ID (type manually or load a list)"},
+  "server_timeout": {"message":"Request timeout (milliseconds)"},
+  "server_loadModels": {"message":"Load models"},
+  "server_modelsLoaded": {"message":"$1$ models loaded. Choose or type a model ID.","placeholders":{"1":{"content":"$1"}}},
+  "server_loadingModels": {"message":"Loading models…"},
+  "server_modelsUnavailable": {"message":"Model listing unavailable. You can enter the model ID manually."},
+  "server_badConfig": {"message":"Invalid server URL. Use an HTTP(S) Base URL without credentials, query parameters or a fragment."},
+  "server_testHint": {"message":"The test uses the fields currently shown. Save to apply them to selected tabs. Testing a server sends a sample sentence, not page content."},
+  "server_popup": {"message":"Server translation: $1$","placeholders":{"1":{"content":"$1"}}},
+  "server_needConfig": {"message":"Configure the server URL and model in Options. No local model or WebGPU is required."},
+  "server_onboarding": {"message":"Use your existing compatible server without downloading a local model or enabling WebGPU. Tabs remain OFF until explicitly enabled."},
+  "server_setup": {"message":"Configure compatible server"}
 }

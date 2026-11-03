@@ -43,6 +43,7 @@ namespace AT.background {
   /** at/test-engine; every override is optional so stored settings win. */
   export type EngineTestRequest = {
     target?: string;
+    draft?: Partial<AT.settings.Settings>;
   };
 
   /** at/local-prepare: get a model resident in the host. */
@@ -147,6 +148,18 @@ if (typeof self.importScripts === 'function') {
   const tabStates = new Map<number, AT.background.TabState>();
   let settingsCache: AT.settings.Settings | null = null;
   let policyEpoch = 0;
+  const serverRequests = new Map<number, Set<AbortController>>();
+  function cancelServerRequests(tabId?: number): void {
+    for (const [id, controllers] of serverRequests) {
+      if (tabId !== undefined && tabId !== id) continue;
+      controllers.forEach(controller => controller.abort());
+      serverRequests.delete(id);
+    }
+  }
+  function requireExtensionUI(sender: AT.Sender): void {
+    if ((typeof sender.url === 'string' && !sender.url.startsWith(AT.getURL(''))) ||
+        (sender.tab && isInjectable(sender.tab.url))) throw new Error('This operation requires an extension page.');
+  }
 
   // Consent is per live tab, never derived from global enabled/site rules.
   // storage.session survives service-worker suspension but not browser restart,
@@ -363,6 +376,7 @@ if (typeof self.importScripts === 'function') {
   async function restoreTab(tabId?: number): Promise<AT.MessageResult> {
     const tab = await activeTab(tabId);
     if (tab?.id == null) throw new Error('no active tab');
+    cancelServerRequests(tab.id);
     // No injection on OFF. Missing content scripts simply have nothing to restore.
     const response = await api.tabs.sendMessage(tab.id, { type: C.MSG.CONTENT_RESTORE }).catch(() => undefined) as AT.background.ContentReply | undefined;
     if (response && !response.ok) throw new Error(response.error ?? 'the content script did not answer');
@@ -407,8 +421,23 @@ if (typeof self.importScripts === 'function') {
       context: AT.pagecontext.normalize(message.context),
       role: AT.targets.normalizeRole(message.role),
       localModelId: settings.localModelId,
-      localMaxTokens: settings.localMaxTokens
+      localMaxTokens: settings.localMaxTokens,
+      engine: settings.engine,
+      server: AT.settings.serverOptions(settings)
     };
+    if (settings.engine === 'openai') {
+      const controller = new AbortController();
+      const controllers = serverRequests.get(tabId) ?? new Set<AbortController>();
+      controllers.add(controller); serverRequests.set(tabId, controllers);
+      try {
+        if (!targets.has(tabId) || (targetRevisions.get(tabId) ?? 0) !== revision) throw new Error('tab translation was cancelled');
+        const result = await AT.engines.translate({ ...request, signal: controller.signal });
+        return { translations: result.translations, detected: result.detected };
+      } finally {
+        controllers.delete(controller);
+        if (!controllers.size && serverRequests.get(tabId) === controllers) serverRequests.delete(tabId);
+      }
+    }
     // The host has to exist before the engine layer can ask it anything.
     await ensureHost();
     if (!targets.has(tabId) || (targetRevisions.get(tabId) ?? 0) !== revision) throw new Error('tab translation was cancelled');
@@ -418,9 +447,12 @@ if (typeof self.importScripts === 'function') {
   }
 
   async function testModel(message: AT.background.EngineTestRequest): Promise<AT.MessageResult> {
-    const settings = await getSettings({ force: true });
-    await ensureHost();
+    const stored = await getSettings({ force: true });
+    const settings = message.draft ? AT.settings.normalize({ ...stored, ...message.draft }, stored) : stored;
+    if (settings.engine === 'local') await ensureHost();
     const result = await AT.engines.test({
+      engine: settings.engine,
+      server: AT.settings.serverOptions(settings),
       source: settings.sourceLang,
       target: message.target ?? settings.targetLang,
       localModelId: settings.localModelId,
@@ -442,7 +474,7 @@ if (typeof self.importScripts === 'function') {
       tabEnabled: tab?.id != null && targets.has(tab.id),
       rule: rule?.action ?? null,
       state: tab?.id != null ? await tabStateOf(tab.id, tab.url) : null,
-      local: await localState(true)
+      local: settings.engine === 'local' ? await localState(true) : null
     };
   }
 
@@ -639,7 +671,8 @@ if (typeof self.importScripts === 'function') {
   }
 
   async function getLocalState(): Promise<AT.MessageResult> {
-    return await localState(true);
+    const settings = await getSettings();
+    return await localState(settings.engine === 'local');
   }
 
   /**
@@ -674,6 +707,7 @@ if (typeof self.importScripts === 'function') {
 
   api.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.status === 'loading') {
+      cancelServerRequests(tabId);
       targetRevisions.set(tabId, (targetRevisions.get(tabId) ?? 0) + 1);
       tabStates.delete(tabId);
     }
@@ -703,6 +737,7 @@ if (typeof self.importScripts === 'function') {
   });
 
   api.tabs.onRemoved.addListener((tabId) => {
+    cancelServerRequests(tabId);
     tabStates.delete(tabId);
     void targetsReady.then(() => {
       targets.delete(tabId);
@@ -751,6 +786,9 @@ if (typeof self.importScripts === 'function') {
     // race unrelated tab reads and silently cancel a rapid OFF -> ON transition.
     settingsCache = edited?.newValue ? AT.settings.normalize(edited.newValue) : null;
     const committed = settingsCache;
+    if (!previous || !committed ||
+        AT.settings.contentSnapshot(previous).translationKey !== AT.settings.contentSnapshot(committed).translationKey ||
+        JSON.stringify(previous.siteRules) !== JSON.stringify(committed.siteRules)) cancelServerRequests();
     const next = committed ? Promise.resolve(committed) : getSettings();
     void next.then(async (settings) => {
         if (revision !== policyEpoch) return;
@@ -762,7 +800,7 @@ if (typeof self.importScripts === 'function') {
         // native inference, and must not hold every page's controls behind it.
         await Promise.all([
           previous ? retargetTabs(settings, previous, revision) : Promise.resolve(),
-          localKey !== null && localKey !== settings.localModelId ? releaseLocal() : Promise.resolve()
+          localKey !== null && (settings.engine !== 'local' || localKey !== settings.localModelId) ? releaseLocal() : Promise.resolve()
         ]);
       })
       .catch((error) => AT.warn('applying a settings change failed', error));
@@ -779,15 +817,26 @@ if (typeof self.importScripts === 'function') {
       if (sender.tab && isInjectable(sender.tab.url)) throw new Error('tab consent requires extension UI');
       return setTabEnabled((message as AT.background.TabRequest).tabId, message.enabled as boolean);
     },
-    [C.MSG.SET_SETTINGS]: async (message) => ({
-      settings: AT.settings.contentSnapshot(await AT.settings.save((message as AT.background.SettingsPatch).patch ?? {}))
-    }),
-    [C.MSG.RESET_SETTINGS]: async () => ({
-      settings: AT.settings.contentSnapshot(await AT.settings.reset())
-    }),
+    [C.MSG.SET_SETTINGS]: async (message, sender) => {
+      requireExtensionUI(sender);
+      return { settings: AT.settings.contentSnapshot(await AT.settings.save((message as AT.background.SettingsPatch).patch ?? {})) };
+    },
+    [C.MSG.RESET_SETTINGS]: async (_message, sender) => {
+      requireExtensionUI(sender);
+      return { settings: AT.settings.contentSnapshot(await AT.settings.reset()) };
+    },
     [C.MSG.SET_SITE_RULE]: (message) => setSiteRule(message as AT.background.SiteRuleRequest),
     [C.MSG.REMOVE_SITE_RULE]: (message) => setSiteRule({ ...(message as AT.background.SiteRuleRequest), action: null }),
-    [C.MSG.TEST_ENGINE]: (message) => testModel(message as AT.background.EngineTestRequest),
+    [C.MSG.TEST_ENGINE]: (message, sender) => {
+      requireExtensionUI(sender);
+      return testModel(message as AT.background.EngineTestRequest);
+    },
+    [C.MSG.SERVER_MODELS]: async (message, sender) => {
+      requireExtensionUI(sender);
+      const stored = await getSettings({ force: true });
+      const settings = AT.settings.normalize({ ...stored, ...(message.draft as Partial<AT.settings.Settings> ?? {}) }, stored);
+      return { models: await AT.engines.listServerModels(AT.settings.serverOptions(settings)) };
+    },
     [C.MSG.TRANSLATE_TAB]: (message, sender) => {
       if (sender.tab && isInjectable(sender.tab.url)) throw new Error('tab controls require an extension page');
       return setTabEnabled((message as AT.background.TabRequest).tabId, true);

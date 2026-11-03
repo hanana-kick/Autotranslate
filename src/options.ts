@@ -9,6 +9,16 @@ namespace AT.options {
   // the call sites stay as short as the untyped version was.
   type Fields = {
     enabled: HTMLInputElement;
+    engine: HTMLSelectElement;
+    localSection: HTMLElement;
+    serverSection: HTMLElement;
+    serverBaseUrl: HTMLInputElement;
+    serverApiKey: HTMLInputElement;
+    serverModel: HTMLInputElement;
+    serverTimeoutMs: HTMLInputElement;
+    serverModels: HTMLDataListElement;
+    loadServerModels: HTMLButtonElement;
+    serverStatus: HTMLParagraphElement;
     showBadge: HTMLInputElement;
     debug: HTMLInputElement;
     testEngine: HTMLButtonElement;
@@ -45,9 +55,10 @@ namespace AT.options {
 
   // What the form holds: `version` comes from settings.save, and the limit
   // fields are still the input strings normalize() later coerces.
-  type FormValues = Omit<AT.settings.Settings, 'version' | 'enabled' | 'maxNodes' | 'localMaxTokens'> & {
+  type FormValues = Omit<AT.settings.Settings, 'version' | 'enabled' | 'maxNodes' | 'localMaxTokens' | 'serverRevision' | 'serverTimeoutMs'> & {
     maxNodes: string;
     localMaxTokens: string;
+    serverTimeoutMs: string;
   };
 
   /** The TEST_ENGINE reply: `result` is there exactly when `ok` is. */
@@ -113,7 +124,19 @@ namespace AT.options {
     );
   }
 
+  function renderEngine(): void {
+    const remote = el('engine').value === 'openai';
+    el('localSection').hidden = remote;
+    el('serverSection').hidden = !remote;
+  }
+
   function render(): void {
+    el('engine').value = settings!.engine;
+    el('serverBaseUrl').value = settings!.serverBaseUrl;
+    el('serverApiKey').value = settings!.serverApiKey;
+    el('serverModel').value = settings!.serverModel;
+    el('serverTimeoutMs').value = String(settings!.serverTimeoutMs);
+    renderEngine();
     el('showBadge').checked = settings!.showBadge;
     el('debug').checked = settings!.debug;
     el('targetLang').value = settings!.targetLang;
@@ -128,13 +151,18 @@ namespace AT.options {
 
   function collect(): FormValues {
     return {
+      engine: el('engine').value === 'openai' ? 'openai' : 'local',
+      serverBaseUrl: el('serverBaseUrl').value,
+      serverApiKey: el('serverApiKey').value,
+      serverModel: el('serverModel').value,
+      serverTimeoutMs: el('serverTimeoutMs').value,
       showBadge: el('showBadge').checked,
       debug: el('debug').checked,
       targetLang: el('targetLang').value,
       sourceLang: el('sourceLang').value,
       maxNodes: el('maxNodes').value,
       siteRules: settings!.siteRules,
-      localModelId: el('localModel').value,
+      localModelId: el('engine').value === 'openai' ? settings!.localModelId : el('localModel').value,
       localMaxTokens: el('localMaxTokens').value
     };
   }
@@ -146,7 +174,9 @@ namespace AT.options {
     const patch: Partial<AT.settings.Settings> = {
       ...nextSettings,
       maxNodes: Number(nextSettings.maxNodes),
-      localMaxTokens: Number(nextSettings.localMaxTokens)
+      localMaxTokens: Number(nextSettings.localMaxTokens),
+      serverTimeoutMs: Number(nextSettings.serverTimeoutMs),
+      serverBaseUrl: AT.settings.normalizeServerBaseUrl(nextSettings.serverBaseUrl)
     };
     settings = await AT.settings.save(patch);
     render();
@@ -387,7 +417,25 @@ namespace AT.options {
   }
 
   function wire(): void {
-    el('save').addEventListener('click', () => persist(collect()));
+    el('save').addEventListener('click', async () => {
+      try { await persist(collect()); }
+      catch { setStatus(el('saveStatus'), AT.i18n.msg('server_badConfig'), 'error'); }
+    });
+    el('engine').addEventListener('change', () => {
+      renderEngine();
+      if (el('engine').value === 'local') void refreshModels();
+    });
+    el('loadServerModels').addEventListener('click', async () => {
+      el('loadServerModels').disabled = true;
+      setStatus(el('serverStatus'), AT.i18n.msg('server_loadingModels'), 'info');
+      try {
+        const response = await AT.sendMessage({ type: C.MSG.SERVER_MODELS, draft: collect() });
+        if (!response.ok || !Array.isArray(response.models)) throw new Error(String(response.error ?? AT.i18n.msg('server_modelsUnavailable')));
+        el('serverModels').replaceChildren(...response.models.filter((id): id is string => typeof id === 'string').map(id => option(id, id)));
+        setStatus(el('serverStatus'), AT.i18n.msg('server_modelsLoaded', String(response.models.length)), 'ok');
+      } catch (error) { setStatus(el('serverStatus'), reason(error), 'error'); }
+      finally { el('loadServerModels').disabled = false; }
+    });
 
     el('reset').addEventListener('click', async () => {
       settings = await AT.settings.reset();
@@ -409,7 +457,8 @@ namespace AT.options {
       setStatus(el('testStatus'), AT.i18n.msg('options_testing'), 'info');
       const response = (await AT.sendMessage({
         type: C.MSG.TEST_ENGINE,
-        target: el('targetLang').value
+        target: el('targetLang').value,
+        draft: collect()
       })) as TestReply;
       if (!response?.ok) {
         setStatus(el('testStatus'), `${response?.code ? `[${response.code}] ` : ''}${response?.error}`, 'error');
@@ -461,13 +510,13 @@ namespace AT.options {
     buildSelects();
     settings = await AT.settings.load();
     el('modelUrl').value = AT.local.MODEL_SOURCES[0]?.url ?? '';
-    el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
+    if (settings.engine === 'local') el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     // Ask first, then report: the usage line is only meaningful once the
     // browser has answered whether it will keep the bytes.
-    await AT.modelflow.keepStorage();
+    if (settings.engine === 'local') await AT.modelflow.keepStorage();
     // The model list decides what the model select can show, so the form is
     // painted once the store has answered rather than from settings alone.
-    await Promise.all([refreshModels(), refreshLocalStatus()]);
+    if (settings.engine === 'local') await Promise.all([refreshModels(), refreshLocalStatus()]);
     render();
     // Listeners go on last: a Save before `render()` would persist the markup's
     // empty defaults over the user's settings.

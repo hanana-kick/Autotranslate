@@ -2,7 +2,7 @@
   "extensionName": { "message": "Autotranslate 자동 번역" },
   "shortName": { "message": "Autotranslate" },
   "description": {
-    "message": "Google, LibreTranslate 인스턴스, 또는 이 컴퓨터에서 실행되는 모델로 웹 페이지를 번역합니다."
+    "message": "선택한 탭을 기기 내 모델 또는 OpenAI 호환 서버로 번역합니다."
   },
   "actionTitle": { "message": "이 페이지 자동 번역" },
   "menuTranslatePage": { "message": "이 탭 번역 켜기" },
@@ -208,7 +208,7 @@
   "options_stateError": {
     "message": "온디바이스 엔진 오류"
   },
-  "welcome_intro": { "message": "모델을 한 번만 설치하면, 그 뒤로 열리는 페이지가 이 브라우저 안에서 목표 언어로 번역됩니다." },
+  "welcome_intro": { "message": "기기 내 모델 또는 호환 서버를 설정하십시오. 각 탭은 직접 켤 때까지 OFF로 유지됩니다." },
   "welcome_language": { "message": "번역할 언어" },
   "welcome_model": { "message": "모델" },
   "welcome_modelHint": { "message": "모델을 내려받거나, 이미 가지고 있는 모델 파일을 고르세요. 파일은 이 기기에 저장되고 페이지는 브라우저 밖으로 나가지 않습니다." },
@@ -219,7 +219,7 @@
   },
   "welcome_importFailed": { "message": "파일을 사용할 수 없습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
   "welcome_needModel": { "message": "모델이 없습니다. 내려받거나 파일을 골라야 시작할 수 있습니다." },
-  "welcome_readyExisting": { "message": "모델이 이미 설치되어 있습니다. 시작을 누르면 번역이 켜집니다." },
+  "welcome_readyExisting": { "message": "모델이 설치되어 있습니다. 설정을 마친 뒤 번역할 탭에서 직접 스위치를 켜십시오." },
   "welcome_start": { "message": "설정 완료" },
   "welcome_starting": { "message": "내려받기를 시작합니다…" },
   "welcome_done": { "message": "모델 준비 완료. 번역할 탭에서 스위치를 켜십시오." },
@@ -228,5 +228,23 @@
   "tab_noTarget": { "message": "번역할 페이지의 확장 아이콘에서 옵션을 여십시오." },
   "tab_unavailable": { "message": "대상 탭이 닫혔거나 번역할 수 없는 페이지입니다." },
   "tab_enabledHint": { "message": "이 탭만 번역합니다. 새로 삽입되는 내용도 처리합니다." },
-  "tab_disabledHint": { "message": "이 탭에서는 번역하지 않습니다. 다른 탭의 선택은 바뀌지 않습니다." }
+  "tab_disabledHint": { "message": "이 탭에서는 번역하지 않습니다. 다른 탭의 선택은 바뀌지 않습니다." },
+  "server_engine": {"message":"번역 엔진"},
+  "server_local": {"message":"기기 내 TranslateGemma"},
+  "server_openai": {"message":"OpenAI 호환 서버"},
+  "server_privacy": {"message":"명시적으로 켠 탭의 텍스트만 이 서버로 전송합니다. API 키는 이 브라우저에 저장하며 페이지 스크립트에 전달하지 않습니다. HTTP는 암호화되지 않으므로 신뢰할 수 있는 네트워크 외에서는 HTTPS를 사용하십시오."},
+  "server_baseUrl": {"message":"서버 Base URL"},
+  "server_apiKey": {"message":"API 키 (선택 사항)"},
+  "server_model": {"message":"모델 ID (직접 입력 또는 목록 불러오기)"},
+  "server_timeout": {"message":"요청 제한시간 (밀리초)"},
+  "server_loadModels": {"message":"모델 목록 불러오기"},
+  "server_modelsLoaded": {"message":"모델 $1$개를 불러왔습니다. 모델 ID를 선택하거나 입력하십시오.","placeholders":{"1":{"content":"$1"}}},
+  "server_loadingModels": {"message":"모델 목록을 불러오는 중…"},
+  "server_modelsUnavailable": {"message":"목록을 불러올 수 없습니다. 모델 ID를 직접 입력할 수 있습니다."},
+  "server_badConfig": {"message":"서버 주소가 올바르지 않습니다. 인증정보·쿼리·해시 없는 HTTP(S) Base URL을 입력하십시오."},
+  "server_testHint": {"message":"테스트는 현재 입력값을 사용합니다. 선택한 탭에 적용하려면 저장하십시오. 서버 테스트는 페이지 내용 대신 샘플 문장을 전송합니다."},
+  "server_popup": {"message":"서버 번역: $1$","placeholders":{"1":{"content":"$1"}}},
+  "server_needConfig": {"message":"옵션에서 서버 주소와 모델을 설정하십시오. 로컬 모델·WebGPU는 필요하지 않습니다."},
+  "server_onboarding": {"message":"로컬 모델 다운로드·WebGPU 없이 기존 호환 서버를 사용합니다. 각 탭은 명시적으로 켤 때까지 OFF로 유지됩니다."},
+  "server_setup": {"message":"호환 서버 설정"}
 }
