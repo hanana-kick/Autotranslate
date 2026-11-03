@@ -39,7 +39,6 @@ async function screenshot(page, name) {
   await page.screenshot({ path: join(out, name + '.png'), fullPage: true, timeout: 20000 });
 }
 try {
-  // The upstream must be a real available server and must list the loaded model.
   const modelsReply = await fetch(upstream + '/models'); assert.equal(modelsReply.ok, true);
   const models = await modelsReply.json(); assert.ok(models.data.some(m => m.id === model), 'real model must be available');
   summary.serverModels = models.data.map(m => m.id);
@@ -76,7 +75,7 @@ try {
   });
   context.on('page', p => p.on('pageerror', error => summary.errors.push(clean(error.message))));
   const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', { timeout: 20000 });
-  const root = new URL(worker.url()).origin;
+  const root = 'chrome-extension://' + new URL(worker.url()).hostname;
   summary.browser = context.browser().version();
   summary.extensionId = new URL(worker.url()).hostname;
   let welcome;
@@ -90,7 +89,6 @@ try {
   assert.equal(await options.locator('#engine').inputValue(), 'openai');
   assert.equal(await options.locator('#localSection').isVisible(), false);
   await record('fresh-onboarding-can-select-server-without-model');
-
   const baseUrl = 'http://127.0.0.1:' + gateway.address().port + '/v1';
   await options.locator('#serverBaseUrl').fill(baseUrl);
   await options.locator('#serverTimeoutMs').fill('120000');
@@ -104,7 +102,6 @@ try {
   await options.waitForFunction(() => ['ok', 'error'].includes(document.querySelector('#testStatus').dataset.kind), null, { timeout: 180000 });
   assert.equal(await options.locator('#testStatus').getAttribute('data-kind'), 'ok', await options.locator('#testStatus').innerText());
   await record('actual-server-model-list-and-unsaved-keyless-translation-test', { requests: records.length });
-
   requireAuth = true;
   await options.locator('#serverApiKey').fill('deliberately-wrong-test-key');
   await options.locator('#testEngine').click();
@@ -118,7 +115,6 @@ try {
   await options.waitForFunction(() => document.querySelector('#saveStatus').dataset.kind === 'ok');
   await screenshot(options, 'server-options-configured');
   await record('bearer-auth-error-and-real-authenticated-translation');
-
   const page = await context.newPage(); await page.goto('http://127.0.0.1:' + fixture.address().port + '/page');
   const other = await context.newPage(); await other.goto('http://127.0.0.1:' + fixture.address().port + '/other');
   const state = await options.evaluate(async url => {
@@ -142,7 +138,6 @@ try {
   await record('real-server-tab-opt-in-translation-and-exact-html-restoration', { elapsedMs: performance.now() - started, otherTabUnchanged: true });
   await writeFile(join(out, 'original.html'), original);
   await writeFile(join(out, 'restored.html'), await page.locator('body').innerHTML());
-
   await options.locator('#enabled').check();
   await page.waitForFunction(() => /[가-힣]/u.test(document.querySelector('#hello').textContent), null, { timeout: 180000 });
   await page.evaluate(() => { const p = document.createElement('p'); p.id = 'added'; p.textContent = 'Good morning.'; document.querySelector('#late').append(p); });
@@ -155,7 +150,6 @@ try {
   assert.equal(await page.locator('#draft').inputValue(), 'private draft');
   await page.locator('#click').click(); assert.equal(await page.evaluate(() => window.clicks), 1);
   await record('dynamic-insertion-text-node-reuse-and-current-source-restore');
-
   const count = records.length;
   await page.evaluate(() => document.querySelector('#added').textContent = 'Good night.');
   await other.bringToFront(); await sleep(1200);
@@ -172,15 +166,12 @@ try {
   assert.equal(localState.localModelId, '');
   assert.equal(localState.loadedBytes, 0);
   assert.equal(localState.generations, 0);
-  // Initial default-local onboarding may have created an unloaded capability
-  // probe document. Server translation neither loads it nor requires its GPU.
   const isolation = await options.evaluate(async id => (await chrome.scripting.executeScript({target:{tabId:id}, func:async()=> {
     try { const s=await chrome.storage.local.get('settings'); return !!s.settings?.serverApiKey; } catch { return false; }
   }}))[0].result, state.tabId);
   assert.equal(isolation, false, 'API key must not be readable from content-script storage');
   assert.equal(records.some(r => r.credentialsInBody), false);
   await record('server-mode-needs-no-local-model-or-native-generation-and-keeps-key-out-of-content', localState);
-
   forcedStatus = 429;
   await options.locator('#enabled').check();
   await options.waitForFunction(async tabId => {

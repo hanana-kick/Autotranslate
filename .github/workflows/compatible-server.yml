@@ -53,7 +53,14 @@ jobs:
           import fs from 'node:fs';import assert from 'node:assert/strict';
           const data=JSON.parse(fs.readFileSync('test-results/server-extension/model-process.json','utf8'));
           assert.ok(data.models.length > 0, 'actual model must be resident');
-          assert.ok(data.models.every(m=>m.size_vram===0), 'this check uses actual CPU inference');
+          // This server reports AMX host allocations as size_vram. Inspect the
+          // actual native backend and launch flags instead of that estimate.
+          const log=fs.readFileSync('test-results/server-extension/ollama.log','utf8');
+          assert.match(log,/inference compute.*id=cpu library=cpu/);
+          assert.match(log,/-ngl 0(?: |")/);
+          assert.match(log,/loaded CPU backend/);
+          assert.doesNotMatch(log,/offloaded [1-9]\d*\//);
+          fs.writeFileSync('test-results/server-extension/backend-evidence.json',JSON.stringify({cpuBackend:true,gpuLayers:0,reportedSizeVram:data.models.map(m=>m.size_vram),note:'CPU/AMX verified from backend and launch logs; size_vram is retained without representing it as actual GPU allocation'},null,2));
           JS
       - name: Install original extension and translate via actual HTTP model responses
         shell: bash
@@ -61,14 +68,14 @@ jobs:
           set -euo pipefail
           node --check test/server-extension/e2e.mjs
           node test/server-extension/e2e.mjs 2>&1 | tee test-results/server-extension/execution.log
-      - name: Check unchanged production and collect the tested package
+      - name: Check unchanged production and collect the candidate package
         if: always()
         shell: bash
         run: |
           set -euo pipefail
           git diff --exit-code -- src scripts package.json package-lock.json
           mkdir -p test-results/server-extension
-          cp dist/*-chrome.zip test-results/server-extension/tested-extension.zip
+          cp dist/*-chrome.zip test-results/server-extension/candidate-extension.zip
           sha256sum dist/*-chrome.zip > test-results/server-extension/package-sha256.txt
       - uses: actions/upload-artifact@v4
         if: always()
