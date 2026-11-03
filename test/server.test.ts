@@ -143,3 +143,15 @@ test('server secrets are omitted from content snapshots and key changes invalida
   assert.ok(trusted >= 2);
   assert.equal((await AT.settings.reset()).serverApiKey, '');
 });
+
+test('server prompts unambiguously translate greetings and preserve fragment boundaries', async t => {
+  const { requests, config } = await endpoint(t, (_req, res, body) => json(res,
+    response(body.messages[1].content.startsWith('[') ? '["읽으세요", "안내서를", "주의 깊게"]' : '감사합니다.')));
+  await translate(config, ['Thank you.']);
+  await translate(config, ['Read', 'the guide', 'carefully.']);
+  assert.match(requests[0].body.messages[0].content, /from English into Korean \(ko\)/);
+  assert.match(requests[0].body.messages[0].content, /greetings rather than answering them/);
+  assert.match(requests[1].body.messages[0].content, /exactly 3 translated strings/);
+  assert.deepEqual(JSON.parse(requests[1].body.messages[1].content), ['Read', 'the guide', 'carefully.']);
+  assert.equal(requests.length, 2);
+});

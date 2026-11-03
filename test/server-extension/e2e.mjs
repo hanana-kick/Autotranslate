@@ -55,13 +55,15 @@ try {
     try {
       const parts = []; for await (const part of req) parts.push(part);
       const body = parts.length ? Buffer.concat(parts).toString('utf8') : undefined;
-      if (body) { const parsed = JSON.parse(body); row.model = parsed.model; row.stream = parsed.stream; row.messageCount = parsed.messages?.length; row.credentialsInBody = body.includes(credential); }
+      if (body) { const parsed = JSON.parse(body); row.model = parsed.model; row.stream = parsed.stream; row.messageCount = parsed.messages?.length; row.messages = parsed.messages; row.credentialsInBody = body.includes(credential); }
       const response = await fetch(upstream + req.url.replace(/^\/v1/, ''), {
         method: req.method, ...(body ? { body } : {}), headers: { 'Content-Type': 'application/json' }, signal: controller.signal
       });
       row.status = response.status;
       res.writeHead(response.status, { 'Content-Type': response.headers.get('content-type') || 'application/json' });
-      for await (const part of response.body) res.write(part);
+      const output = [];
+      for await (const part of response.body) { output.push(part); res.write(part); }
+      row.response = clean(Buffer.concat(output).toString('utf8'));
       row.completed = true; res.end();
     } catch (error) { row.abort ||= controller.signal.aborted; if (!res.destroyed) { res.statusCode = 502; res.end(); } }
   });
