@@ -1,0 +1,79 @@
+name: Actual extension and compatible model server
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [feat/openai-compatible-server]
+    paths: ['src/**', 'scripts/**', 'package*.json', 'test/server-extension/**', '.github/workflows/compatible-server.yml']
+permissions:
+  contents: read
+jobs:
+  real-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OLLAMA_HOST: 127.0.0.1:11434
+      OLLAMA_NUM_PARALLEL: '1'
+      OLLAMA_MAX_LOADED_MODELS: '1'
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_CONTEXT_LENGTH: '4096'
+      CUDA_VISIBLE_DEVICES: '-1'
+      SERVER_MODEL: qwen2.5:1.5b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:chrome
+      - name: Browser test driver
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+          npx playwright install --with-deps chromium
+      - name: Verified official CPU-capable model server
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ollama" test-results/server-extension
+          curl -fL --retry 3 https://github.com/ollama/ollama/releases/download/v0.40.13/ollama-linux-amd64.tar.zst -o "$RUNNER_TEMP/ollama.tar.zst"
+          echo "c9490e0f520be21271d969e6703f012268b1d39f8b70dd58854e5bfef7a75bb6  $RUNNER_TEMP/ollama.tar.zst" | sha256sum -c -
+          tar --zstd -xf "$RUNNER_TEMP/ollama.tar.zst" -C "$RUNNER_TEMP/ollama"
+          echo "$RUNNER_TEMP/ollama/bin" >> "$GITHUB_PATH"
+          nohup "$RUNNER_TEMP/ollama/bin/ollama" serve > test-results/server-extension/ollama.log 2>&1 &
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:11434/api/version > test-results/server-extension/server-version.json && break; sleep 1; done
+          curl -fsS http://127.0.0.1:11434/api/version
+          "$RUNNER_TEMP/ollama/bin/ollama" pull "$SERVER_MODEL"
+          curl -fsS --max-time 300 http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' -d '{"model":"qwen2.5:1.5b","prompt":"","stream":false,"keep_alive":"30m","options":{"num_gpu":0}}' > test-results/server-extension/server-preload.json
+          curl -fsS http://127.0.0.1:11434/api/tags > test-results/server-extension/model-provenance.json
+          curl -fsS http://127.0.0.1:11434/api/ps > test-results/server-extension/model-process.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import assert from 'node:assert/strict';
+          const data=JSON.parse(fs.readFileSync('test-results/server-extension/model-process.json','utf8'));
+          assert.ok(data.models.length > 0, 'actual model must be resident');
+          assert.ok(data.models.every(m=>m.size_vram===0), 'this check uses actual CPU inference');
+          JS
+      - name: Install original extension and translate via actual HTTP model responses
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check test/server-extension/e2e.mjs
+          node test/server-extension/e2e.mjs 2>&1 | tee test-results/server-extension/execution.log
+      - name: Check unchanged production and collect the tested package
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- src scripts package.json package-lock.json
+          mkdir -p test-results/server-extension
+          cp dist/*-chrome.zip test-results/server-extension/tested-extension.zip
+          sha256sum dist/*-chrome.zip > test-results/server-extension/package-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: actual-server-extension-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/server-extension/
+          if-no-files-found: error
+          retention-days: 14

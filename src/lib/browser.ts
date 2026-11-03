@@ -53,6 +53,7 @@ namespace AT {
       set: (items: { [key: string]: unknown }) => Promise<void>;
     };
     local: {
+      setAccessLevel?: (options: { accessLevel: 'TRUSTED_CONTEXTS' }) => Promise<void>;
       get: (key: string) => Promise<{ [key: string]: unknown }>;
       set: (items: { [key: string]: unknown }) => Promise<void>;
     };
