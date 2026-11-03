@@ -117,7 +117,8 @@ const FIELDS: readonly (readonly [string, string])[] = [
   ['progress', 'progress'],
   ['status', 'p'],
   ['start', 'button'],
-  ['options', 'button']
+  ['options', 'button'],
+  ['serverOptions', 'button']
 ];
 
 /** welcome.html ships these with the `hidden` attribute. */

@@ -122,6 +122,13 @@ namespace AT.popup {
    *  language pair the user picked. */
   function renderLocal(): void {
     const node = el('localStatus');
+    if (view.settings!.engine === 'openai') {
+      const configured = AT.settings.serverConfigured(view.settings!);
+      node.hidden = false;
+      node.dataset.kind = configured ? 'info' : 'warn';
+      node.textContent = configured ? AT.i18n.msg('server_popup', view.settings!.serverModel) : AT.i18n.msg('server_needConfig');
+      return;
+    }
     const supported = view.local?.supported === true;
     const phrase = AT.local.describeStatus(
       view.local?.status ? AT.local.normalizeStatus(view.local.status) : null,

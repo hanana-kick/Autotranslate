@@ -3,8 +3,40 @@
 namespace AT.settings {
   const C = AT.C;
 
+  export type Engine = 'local' | 'openai';
+  export type ServerSettings = { baseUrl: string; apiKey: string; model: string; timeoutMs: number };
+
+  /** Accept a server root, API base path, or full Chat Completions URL. */
+  export function normalizeServerBaseUrl(value: string): string {
+    if (!value.trim()) return '';
+    const url = new URL(value.trim());
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      throw new Error('Use an HTTP(S) API URL without credentials, query parameters or a fragment.');
+    }
+    let path = url.pathname.replace(/\/+$/, '');
+    if (path.endsWith('/chat/completions')) path = path.slice(0, -'/chat/completions'.length);
+    url.pathname = path || '/v1';
+    return url.href.replace(/\/+$/, '');
+  }
+
+  export function serverOptions(s: Settings): ServerSettings {
+    return { baseUrl: s.serverBaseUrl, apiKey: s.serverApiKey, model: s.serverModel, timeoutMs: s.serverTimeoutMs };
+  }
+
+  export function serverConfigured(s: Settings): boolean {
+    return !!(s.serverBaseUrl && s.serverModel);
+  }
+
   export type Settings = {
     version: number;
+    engine: Engine;
+    serverBaseUrl: string;
+    /** Browser-local only; excluded from every content-script snapshot. */
+    serverApiKey: string;
+    serverModel: string;
+    serverTimeoutMs: number;
+    /** Changes when server config changes; never a credential-derived hash. */
+    serverRevision: number;
     enabled: boolean;
     targetLang: string;
     sourceLang: string;
@@ -32,6 +64,12 @@ namespace AT.settings {
   /** A stored blob: every key may be missing and no value is trusted. */
   type RawSettings = {
     version?: unknown;
+    engine?: unknown;
+    serverBaseUrl?: unknown;
+    serverApiKey?: unknown;
+    serverModel?: unknown;
+    serverTimeoutMs?: unknown;
+    serverRevision?: unknown;
     enabled?: unknown;
     targetLang?: unknown;
     sourceLang?: unknown;
@@ -46,6 +84,12 @@ namespace AT.settings {
   export function defaults(): Settings {
     return {
       version: 1,
+      engine: 'local',
+      serverBaseUrl: '',
+      serverApiKey: '',
+      serverModel: '',
+      serverTimeoutMs: 60000,
+      serverRevision: 0,
       // Nothing translates until onboarding finishes: there is no model yet,
       // and the user has not chosen a target language.
       enabled: false,
@@ -103,8 +147,17 @@ namespace AT.settings {
       siteRules.push({ pattern, action: rule.action as AT.SiteRuleAction });
       if (siteRules.length >= 200) break;
     }
+    let serverBaseUrl = '';
+    try { serverBaseUrl = normalizeServerBaseUrl(typeof input.serverBaseUrl === 'string' ? input.serverBaseUrl.slice(0, 2048) : ''); }
+    catch { /* Invalid endpoints fail closed, never fall back to another host. */ }
     return {
       version: 1,
+      engine: input.engine === 'openai' ? 'openai' : 'local',
+      serverBaseUrl,
+      serverApiKey: typeof input.serverApiKey === 'string' && !/[\r\n]/u.test(input.serverApiKey) ? input.serverApiKey.trim().slice(0, 8192) : '',
+      serverModel: typeof input.serverModel === 'string' ? input.serverModel.trim().slice(0, 200) : '',
+      serverTimeoutMs: clampInt(input.serverTimeoutMs, 5000, 300000, base.serverTimeoutMs),
+      serverRevision: clampInt(input.serverRevision, 0, Number.MAX_SAFE_INTEGER, base.serverRevision),
       enabled: input.enabled === true,
       targetLang:
         typeof input.targetLang === 'string' && C.isSupportedLang(input.targetLang) ? input.targetLang : base.targetLang,
@@ -130,7 +183,9 @@ namespace AT.settings {
   export function contentSnapshot(normalized?: Settings | null): ContentSnapshot {
     const s = normalized ?? defaults();
     return {
-      translationKey: JSON.stringify(['prompt-v2', s.localModelId, s.localMaxTokens, s.sourceLang, s.targetLang]),
+      translationKey: s.engine === 'openai'
+        ? JSON.stringify(['server-prompt-v1', s.serverRevision, s.sourceLang, s.targetLang])
+        : JSON.stringify(['prompt-v2', s.localModelId, s.localMaxTokens, s.sourceLang, s.targetLang]),
       enabled: s.enabled,
       targetLang: s.targetLang,
       sourceLang: s.sourceLang,
@@ -149,6 +204,12 @@ namespace AT.settings {
   export async function save(patch: Partial<Settings>): Promise<Settings> {
     const current = await load();
     const next = normalize({ ...current, ...patch }, current);
+    next.serverRevision = current.serverRevision;
+    if (['serverBaseUrl', 'serverApiKey', 'serverModel', 'serverTimeoutMs'].some((key) =>
+      next[key as keyof Settings] !== current[key as keyof Settings])) {
+      next.serverRevision = current.serverRevision < Number.MAX_SAFE_INTEGER ? current.serverRevision + 1 : 1;
+    }
+    await AT.storage!.local.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' });
     await AT.storage!.local.set({ [C.STORAGE_KEY]: next });
     AT.debug = next.debug;
     return next;

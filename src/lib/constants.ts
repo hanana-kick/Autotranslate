@@ -17,6 +17,7 @@ namespace AT {
     SET_SITE_RULE: string;
     REMOVE_SITE_RULE: string;
     TEST_ENGINE: string;
+    SERVER_MODELS: string;
     TRANSLATE_TAB: string;
     RESTORE_TAB: string;
     CONTENT_TRANSLATE: string;
@@ -100,6 +101,7 @@ namespace AT {
       SET_SITE_RULE: 'at/set-site-rule',
       REMOVE_SITE_RULE: 'at/remove-site-rule',
       TEST_ENGINE: 'at/test-engine',
+      SERVER_MODELS: 'at/server-models',
       TRANSLATE_TAB: 'at/translate-tab',
       RESTORE_TAB: 'at/restore-tab',
       // background -> content script

@@ -19,9 +19,15 @@ test('defaults are a complete, normalised object', () => {
   assert.deepEqual(Object.keys(base).sort(), [
     'debug',
     'enabled',
+    'engine',
     'localMaxTokens',
     'localModelId',
     'maxNodes',
+    'serverApiKey',
+    'serverBaseUrl',
+    'serverModel',
+    'serverRevision',
+    'serverTimeoutMs',
     'showBadge',
     'siteRules',
     'sourceLang',
@@ -58,7 +64,8 @@ test('junk values fall back instead of throwing', () => {
   assert.equal(coerced.debug, false);
   assert.equal(coerced.localModelId, '', 'a model id must be a string to be stored');
   assert.equal(coerced.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS, 'an unparseable budget falls back');
-  for (const gone of ['engine', 'endpoints', 'apiKey', 'batchChars', 'fallbackEngine', 'autoDetect', 'unknownKey']) {
+  assert.equal(coerced.engine, 'local');
+  for (const gone of ['endpoints', 'apiKey', 'batchChars', 'fallbackEngine', 'autoDetect', 'unknownKey']) {
     assert.equal(gone in coerced, false, `${gone} is not a setting any more`);
   }
 });

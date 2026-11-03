@@ -179,6 +179,9 @@ type StubDocument = {
 // id, tag and the data-i18n key options.html puts on the button.
 const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['enabled', 'input'],
+  ['engine', 'select'], ['localSection', 'section'], ['serverSection', 'div'],
+  ['serverBaseUrl', 'input'], ['serverApiKey', 'input'], ['serverModel', 'input'], ['serverTimeoutMs', 'input'],
+  ['serverModels', 'datalist'], ['loadServerModels', 'button', 'server_loadModels'], ['serverStatus', 'p'],
   ['tabHost', 'p'],
   ['tabStatus', 'p'],
   ['showBadge', 'input'],
@@ -714,7 +717,7 @@ test('saving writes one record with the typed values, coerced', async () => {
   assert.equal(typeof saved.localMaxTokens, 'number', 'the budget reaches storage as a number');
   assert.equal(saved.localMaxTokens, 2048);
   assert.equal(saved.maxNodes, 900);
-  assert.equal('engine' in saved, false, 'the removed provider settings are not resurrected');
+  assert.equal(saved.engine, 'local', 'existing local mode remains selected');
   assert.equal('apiKey' in saved, false);
   assert.equal(AT.debug, true, 'the debug flag reaches the logger');
 
@@ -745,12 +748,12 @@ test('a failing storage write is not reported as saved', async () => {
   env.failWrites('quota exceeded');
   env.field('localMaxTokens').value = '3000';
 
-  await assert.rejects(() => click(env.field('save')), /quota exceeded/);
+  await click(env.field('save')); // The UI now reports failure instead of leaking a rejected event handler.
 
   assert.deepEqual(env.writes, [], 'nothing was written');
   assert.deepEqual(env.store.settings, before, 'storage still holds the old settings');
-  assert.equal(env.field('saveStatus').textContent, '', 'no success message on a failed save');
-  assert.equal(env.field('saveStatus').dataset.kind, undefined);
+  assert.notEqual(env.field('saveStatus').textContent, msg('options_saved'));
+  assert.equal(env.field('saveStatus').dataset.kind, 'error');
 });
 
 test('testing the engine probes with exactly the typed target language', async () => {
@@ -765,10 +768,10 @@ test('testing the engine probes with exactly the typed target language', async (
 
   const probes = env.runtimeMessages.filter((message) => message.type === 'at/test-engine');
   assert.equal(probes.length, 1, 'one click is one probe');
-  assert.deepEqual(probes[0], {
-    type: 'at/test-engine',
-    target: 'ja'
-  }, 'the probe carries what is typed, not what is stored');
+  assert.equal(probes[0]!.type, 'at/test-engine');
+  assert.equal(probes[0]!.target, 'ja');
+  assert.equal(probes[0]!.draft.targetLang, 'ja');
+  assert.equal(probes[0]!.draft.engine, 'local');
   assert.deepEqual(env.writes, [], 'testing must not save anything');
 });
 
@@ -1000,7 +1003,7 @@ test('reset writes the defaults and repaints the form', async () => {
   assert.equal(saved.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS);
   assert.equal(saved.maxNodes, AT.C.DEFAULT_MAX_NODES);
   assert.deepEqual(saved.siteRules, []);
-  assert.equal('engine' in saved, false, 'the defaults carry no provider settings');
+  assert.equal(saved.engine, 'local', 'reset explicitly selects the local engine');
   assert.equal('endpoints' in saved, false);
   assert.deepEqual([field('enabled').checked, field('showBadge').checked, field('debug').checked], [false, true, false], 'nothing translates until onboarding finishes');
   assert.equal(field('localModel').value, '');
@@ -1241,4 +1244,41 @@ test('saving stores the on-device choices, clamping the budget', async () => {
   const second = savedSettings(env);
   assert.equal(second.localMaxTokens, AT.local.MAX_MAX_TOKENS, 'an oversized budget clamps to the ceiling');
   assert.equal(field('localMaxTokens').value, String(AT.local.MAX_MAX_TOKENS), 'the form repaints from storage');
+});
+
+test('server form boots without local model storage, WebGPU probe or hidden local requirements', async () => {
+  const env = await boot({ stored: storedSettings({ engine: 'openai', serverBaseUrl: 'http://localhost:8000/v1', serverModel: 'big', serverApiKey: 'test-secret' }) });
+  assert.equal(env.field('engine').value, 'openai');
+  assert.equal(env.field('localSection').hidden, true);
+  assert.equal(env.field('serverSection').hidden, false);
+  assert.equal(env.field('serverModel').value, 'big');
+  assert.equal(env.field('serverApiKey').value, 'test-secret');
+  assert.equal(env.runtimeMessages.some(m => m.type === 'at/local-get-status'), false);
+});
+
+test('server connection test uses unsaved server form without changing tab consent or saved endpoint', async () => {
+  const env = await boot({ stored: storedSettings({ engine: 'openai', serverModel: 'old', serverBaseUrl: 'http://localhost:8000/v1' }), replies: {
+    'at/test-engine': () => ({ ok: true, result: { output: '안녕하세요.', detected: null, ms: 10 } })
+  } });
+  env.field('serverModel').value = 'big'; env.field('serverBaseUrl').value = 'http://127.0.0.1:11434/v1';
+  await click(env.field('testEngine'));
+  const request = env.runtimeMessages.find(m => m.type === 'at/test-engine');
+  assert.equal(request!.draft.engine, 'openai'); assert.equal(request!.draft.serverModel, 'big');
+  assert.equal(request!.draft.serverBaseUrl, 'http://127.0.0.1:11434/v1');
+  assert.equal(env.store.settings.serverModel, 'old'); assert.equal(env.writes.length, 0);
+  assert.equal(env.field('testStatus').dataset.kind, 'ok');
+});
+
+test('server model list populates suggestions without requiring the models endpoint for manual input', async () => {
+  const env = await boot({ stored: storedSettings({ engine: 'openai' }), replies: {
+    'at/server-models': () => ({ ok: true, models: ['big', 'small'] })
+  } });
+  await click(env.field('loadServerModels'));
+  assert.deepEqual(env.field('serverModels').children.map(n => n.value), ['big', 'small']);
+  assert.equal(env.field('serverModel').value, '');
+  env.field('serverBaseUrl').value = 'http://localhost:8000'; env.field('serverModel').value = 'manual-model';
+  await click(env.field('save'));
+  assert.equal(savedSettings(env).serverBaseUrl, 'http://localhost:8000/v1');
+  assert.equal(savedSettings(env).serverModel, 'manual-model');
+  assert.equal(savedSettings(env).engine, 'openai');
 });

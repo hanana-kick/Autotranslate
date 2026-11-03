@@ -1,6 +1,5 @@
-// First run: pick the target language, install the model once, then turn
-// translation on. The extension is disabled until this page finishes, so a
-// fresh install never sits there translating with no model.
+// First run: choose an on-device model or configure a compatible server.
+// Setup never opts a tab in: translation still requires explicit per-tab ON.
 // Compiled as a classic script next to welcome.html; loads after
 // lib/constants.js, lib/browser.js, lib/local.js, lib/modelstore.js,
 // lib/modelflow.js and lib/settings.js.
@@ -20,6 +19,7 @@ namespace AT.welcome {
     status: HTMLParagraphElement;
     start: HTMLButtonElement;
     options: HTMLButtonElement;
+    serverOptions: HTMLButtonElement;
   };
 
   function el<K extends keyof Fields>(id: K): Fields[K] {
@@ -171,13 +171,14 @@ namespace AT.welcome {
     }
   }
 
-  /** Done: the extension is on, points at the model, and has a target language. */
+  /** Finish provider setup without selecting a tab for translation. */
   async function start(): Promise<void> {
-    if (!readyModel) return;
+    const remote = settings?.engine === 'openai' && AT.settings.serverConfigured(settings);
+    if (!readyModel && !remote) return;
     el('start').disabled = true;
     settings = await AT.settings.save({
       enabled: false,
-      localModelId: readyModel.id,
+      localModelId: readyModel?.id ?? settings!.localModelId,
       targetLang: el('targetLang').value
     });
     document.body.dataset.done = 'true';
@@ -195,6 +196,9 @@ namespace AT.welcome {
   }
 
   function wire(): void {
+    el('serverOptions').addEventListener('click', () => {
+      void AT.settings.save({ engine: 'openai' }).then(() => AT.ui.openPage('options.html', 'auto', AT.ui.targetTabId()));
+    });
     el('download').addEventListener('click', () => void download());
     el('cancel').addEventListener('click', () => inflight?.abort());
     el('pick').addEventListener('click', () => el('modelFile').click());
@@ -217,8 +221,13 @@ namespace AT.welcome {
       })
     );
     el('targetLang').value = settings.targetLang;
-    el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     wire();
+    if (settings.engine === 'openai') {
+      el('start').disabled = !AT.settings.serverConfigured(settings);
+      setStatus(AT.i18n.msg('server_needConfig'), 'info');
+      return;
+    }
+    el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     await showSupport();
     // A profile that already has the file (a reinstall, a second browser) skips
     // the transfer and only has to confirm.
