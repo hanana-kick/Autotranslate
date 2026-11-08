@@ -59,7 +59,8 @@ namespace AT.settings {
   }
 
   // Browser UI language -> one of C.LANGS, region folded where we have no
-  // regional variant ('pt-BR' -> 'pt').
+  // regional variant ('ja-JP' -> 'ja'). A UI language the picker does not
+  // offer becomes 'en'.
   export function uiLang(): string {
     const raw =
       AT.api?.i18n?.getUILanguage?.() ??
@@ -68,7 +69,6 @@ namespace AT.settings {
     const exact = C.LANG_CODES.has(raw) ? raw : null;
     if (exact) return exact;
     const base = raw.toLowerCase().split('-')[0] ?? '';
-    if (base === 'zh') return raw.toLowerCase().endsWith('-tw') || raw.toLowerCase().endsWith('-hk') ? 'zh-TW' : 'zh-CN';
     return C.LANG_CODES.has(base) ? base : 'en';
   }
 

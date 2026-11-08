@@ -1,21 +1,18 @@
-// The translation call. One implementation, on-device TranslateGemma: the
-// extension has no provider, so there is nothing to fetch, no key to keep and
-// no endpoint to validate. Runs in the background context, which owns the
-// offscreen host.
+// The translation call. One implementation, on-device: the extension has no
+// provider, so there is nothing to fetch, no key to keep and no endpoint to
+// validate. The engine is the installed file - PLaMo 3 Translate is the card
+// the extension offers, and a file the user imports answers as itself. Runs in
+// the background context, which owns the offscreen host.
 // Load after lib/constants.js, lib/browser.js.
 namespace AT.engines {
   const C = AT.C;
 
   export const TEST_SENTENCE = 'The extension is configured correctly.';
 
-  export type EngineErrorCode =
-    | 'config'
-    | 'network'
-    | 'timeout'
-    | 'rate-limit'
-    | 'provider'
-    | 'http'
-    | 'format';
+  // Only the codes the on-device path can produce: a model that cannot load is
+  // `config`, a model that cannot answer is `provider`, a generation that ran
+  // out of budget is `timeout`, an answer that cannot be used is `format`.
+  export type EngineErrorCode = 'config' | 'timeout' | 'provider' | 'format';
 
   /** Why a well-answered request still could not be used. */
   export type EngineErrorReason = 'count';
@@ -70,35 +67,28 @@ namespace AT.engines {
   const snippet = (text: unknown, max = 180) =>
     typeof text === 'string' ? text.replace(/\s+/g, ' ').trim().slice(0, max) : '';
 
+  // The host reports `AT.local.codeForReason()`; anything else that arrives
+  // over the channel is treated as a runtime failure, not a configuration one.
   const LOCAL_CODES: Record<string, EngineErrorCode | undefined> = {
     config: 'config',
-    network: 'network',
     timeout: 'timeout',
-    'rate-limit': 'rate-limit',
-    provider: 'provider',
-    http: 'http',
-    format: 'format'
+    provider: 'provider'
   };
 
   /**
-   * The source language the model should be told about. An explicit setting
-   * wins; `auto` asks the browser's own detector (CLD behind
-   * `i18n.detectLanguage`), which is what the page cannot tell us. A detector
-   * answer with no code in the model's table leaves the source unknown, and the
-   * host then asks for the target without claiming one.
+   * What the page could not tell us: which language the text is really in.
+   * `auto` asks the browser's own detector (CLD behind `i18n.detectLanguage`);
+   * an explicit setting is reported back as it stands. No prompt ever names the
+   * answer — the model's instruction names only the target, and a wrong
+   * language claim moves the translation — so this feeds nothing but the
+   * popup's "detected" line, and it stays silent about a language the model
+   * could not handle in any case.
    */
-  async function resolveSource(
-    setting: string | undefined,
-    texts: string[]
-  ): Promise<{ lang: AT.gemma.GemmaLang | null; detected: string | null }> {
-    if (setting && setting !== 'auto') return { lang: AT.gemma.langFor(setting), detected: null };
-    const sample = texts.join(' ').slice(0, 400);
-    const answer = await AT.detectLanguage(sample);
-    if (!answer) return { lang: null, detected: null };
-    return {
-      lang: AT.gemma.langForDetected(answer.code),
-      detected: C.isSupportedLang(answer.code) ? answer.code : null
-    };
+  async function resolveSource(setting: string | undefined, texts: string[]): Promise<string | null> {
+    if (setting && setting !== 'auto') return C.isSupportedLang(setting) ? setting : null;
+    const answer = await AT.detectLanguage(texts.join(' ').slice(0, 400));
+    if (!answer || !C.isSupportedLang(answer.code)) return null;
+    return answer.code;
   }
 
   export function needsTranslation(text: unknown): boolean {
@@ -133,24 +123,32 @@ namespace AT.engines {
 
   /**
    * One generation per chunk. The model is the only engine, so a chunk is a
-   * prompt: nothing to retry, because a repeat would spend another minute on the
-   * same 4B model for the same answer.
+   * prompt: nothing to retry, because a repeat would spend another minute on
+   * the same model for the same answer.
    */
   async function translateChunk(
-    args: TranslateRequest & { texts: string[]; target: string; localModelId: string; localMaxTokens: number }
-  ): Promise<{ translations: string[]; detected: string | null }> {
-    const target = AT.gemma.langFor(args.target);
+    args: TranslateRequest & {
+      texts: string[];
+      target: string;
+      localModelId: string;
+      localMaxTokens: number;
+      detected: string | null;
+    }
+  ): Promise<{ translations: string[] }> {
+    // The code the settings page offers has to become the code the model was
+    // released with: PLaMo spells Chinese `zh-hans` and `zh-hant` and carries
+    // five of the 53 its card lists. A null here is a language the weights never
+    // learned, which no retry answers.
+    const target = AT.plamo3.langFor(args.target);
     if (!target) {
       throw new EngineError('config', `the on-device model does not translate into ${args.target || 'that language'}`, {
         detail: 'no-target'
       });
     }
-    const { lang: source, detected } = await resolveSource(args.source, args.texts);
     const reply = await AT.local.callHost({
       type: C.MSG.LOCAL_TRANSLATE,
       modelId: args.localModelId,
       texts: args.texts,
-      source: source ?? '',
       target,
       maxTokens: args.localMaxTokens,
       // Rendered once, here: the host only has to paste bounded lines. The page
@@ -178,11 +176,11 @@ namespace AT.engines {
         got: translations?.length ?? 0
       });
     }
-    return { translations, detected };
+    return { translations };
   }
 
   export async function translate(request: TranslateRequest = {}): Promise<TranslateResult> {
-    const { texts = [], source = 'auto', target, localModelId = '', localMaxTokens = AT.local.DEFAULT_MAX_TOKENS } = request;
+    const { texts = [], target, localModelId = '', localMaxTokens = AT.local.DEFAULT_MAX_TOKENS } = request;
     if (!Array.isArray(texts)) throw new EngineError('config', 'texts must be an array');
     if (typeof target !== 'string' || !C.isSupportedLang(target)) {
       throw new EngineError('config', `unsupported target language: ${target}`);
@@ -195,43 +193,35 @@ namespace AT.engines {
     const unique = [...new Set(pending)];
     if (unique.length === 0) return { translations: originals, detected: null, requested: 0 };
 
-    /**
-     * The model is sized by tokens, so the packing asks the host — which owns
-     * the tokenizer — how many tokens each text is, rather than dividing
-     * characters by a constant. The estimate is only the fallback for a host
-     * that cannot answer (an older document, a failed load).
-     */
-    const counted = await AT.local.callHost({
-      type: C.MSG.LOCAL_COUNT,
-      modelId: localModelId,
-      maxTokens: localMaxTokens,
-      texts: unique,
-      source: AT.gemma.isLang(source) ? source : '',
-      target: AT.gemma.isLang(target) ? target : '',
-      context: AT.pagecontext.hint(request.context ?? null) ?? ''
-    });
-    const counts = Array.isArray(counted?.counts) ? counted.counts.map((value) => Number(value)) : null;
-    const overhead = Number(counted?.overhead);
-    let chunks: string[][];
-    if (counted?.ok && counts && counts.length === unique.length && Number.isFinite(overhead)) {
-      chunks = AT.local.chunkByCounts(unique, counts, localMaxTokens, overhead);
-    } else {
-      AT.warn('the host did not count tokens, packing by estimate');
-      chunks = AT.local.chunkByTokens(unique, localMaxTokens);
-    }
+    // The packer works in tokens, on the characters-per-token ratios measured
+    // against this model's own tokenizer. Every generation reports its real
+    // prompt cost back (`AT.local.setCalibration`), so the packing tightens as
+    // the page runs instead of trusting one published average.
+    const chunks = AT.local.chunkByTokens(unique, localMaxTokens);
 
+    // One detection for the whole request: the detector is a browser call, not
+    // part of the model's instruction, and the answer cannot differ per chunk.
+    const detected = await resolveSource(request.source, unique);
     const batchOut = new Map<string, string>();
-    let detected: string | null = null;
     for (const chunk of chunks) {
-      const result = await translateChunk({ ...request, texts: chunk, target, localModelId, localMaxTokens });
-      chunk.forEach((text, index) => batchOut.set(text, result.translations[index] ?? text));
-      detected ??= result.detected;
+      const result = await translateChunk({
+        ...request,
+        texts: chunk,
+        target,
+        localModelId,
+        localMaxTokens,
+        detected
+      });
+      chunk.forEach((text, index) => batchOut.set(text, result.translations[index] ?? ''));
     }
 
     const translations = originals.map((text) => {
       if (!needsTranslation(text)) return text;
       const translated = batchOut.get(text);
-      return typeof translated === 'string' && translated.length > 0 ? translated : text;
+      // The answer goes through blank included. "No answer" is what tells the
+      // page to ask again; a source substituted here would be recorded as a
+      // translation, and the node would keep its own language forever.
+      return typeof translated === 'string' ? translated : text;
     });
     return { translations, detected, requested: unique.length };
   }

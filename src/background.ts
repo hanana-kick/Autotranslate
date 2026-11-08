@@ -47,6 +47,7 @@ namespace AT.background {
   /** at/local-prepare: get a model resident in the host. */
   export type LocalRequest = {
     modelId?: string;
+    target?: string;
     maxTokens?: number;
   };
 
@@ -93,16 +94,20 @@ if (typeof self.importScripts === 'function') {
     'vendor/browser-polyfill.js',
     'lib/constants.js',
     'lib/browser.js',
-    'lib/gemma.js',
+    'lib/plamo3.js',
     'lib/pagecontext.js',
     'lib/targets.js',
     'lib/rules.js',
+    'vendor/onnxruntime/ort-common.all.js',
+    'vendor/onnxruntime/ort-webgpu.all.js',
+    'vendor/onnxruntime/transformers.web.js',
     'lib/local.js',
     'lib/modelstore.js',
     'lib/ui.js',
     'lib/settings.js',
     'lib/engines.js',
-    'lib/localhost.js'
+    'lib/localhost.js',
+    'lib/onnxhost.js'
   );
 }
 
@@ -295,6 +300,28 @@ if (typeof self.importScripts === 'function') {
     tabStates.delete(tab.id);
     await updateBadge(tab.id);
     return { status: 'idle' };
+  }
+
+  /**
+   * Translate the tabs that were already open when this worker woke up.
+   * `onUpdated` only reports pages that finish loading while the worker is
+   * alive: after a browser start, an extension update (which drops the content
+   * script from every tab) or a worker restart that raced a fast page, the
+   * pages in front of the user would stay untranslated until each was reloaded
+   * by hand. Tabs still loading are left alone - they emit their own
+   * `complete` event, and translating a half-built document would strand the
+   * rest of it in the source language.
+   */
+  async function resyncOpenTabs(): Promise<void> {
+    const settings = await getSettings();
+    if (!settings.enabled) return;
+    const tabs = await api.tabs.query({});
+    for (const tab of tabs) {
+      if (!tab?.id || tab.status !== 'complete' || !isInjectable(tab.url)) continue;
+      // One page at a time: every pass goes through the single model queue, so
+      // starting them together would only make each page wait longer.
+      await translateTab(tab.id).catch((error: unknown) => AT.warn('resync of an open tab failed', error));
+    }
   }
 
   async function setSiteRule(message: AT.background.SiteRuleRequest): Promise<AT.MessageResult> {
@@ -500,18 +527,21 @@ if (typeof self.importScripts === 'function') {
   function readLocalRequest(
     message: AT.background.LocalRequest,
     settings: AT.settings.Settings
-  ): { modelId: string; maxTokens: number } {
+  ): { modelId: string; maxTokens: number; target: string } {
     const modelId = typeof message?.modelId === 'string' && message.modelId ? message.modelId : settings.localModelId;
     const maxTokens = Number(message?.maxTokens) > 0 ? Number(message.maxTokens) : settings.localMaxTokens;
-    return { modelId, maxTokens };
+    // The warm-up generation is written in the language the page is about to be
+    // translated into, so the first real answer does not pay for a cold start.
+    const target = typeof message?.target === 'string' && message.target ? message.target : settings.targetLang;
+    return { modelId, maxTokens, target };
   }
 
   async function prepareLocal(message: AT.background.LocalRequest): Promise<AT.MessageResult> {
     const settings = await getSettings({ force: true });
-    const { modelId, maxTokens } = readLocalRequest(message, settings);
+    const { modelId, maxTokens, target } = readLocalRequest(message, settings);
     if (!modelId) throw new Error('no on-device model is selected');
     await ensureHost();
-    const reply = await AT.local.callHost({ type: C.MSG.LOCAL_LOAD, modelId, maxTokens });
+    const reply = await AT.local.callHost({ type: C.MSG.LOCAL_LOAD, modelId, maxTokens, target });
     if (!reply?.ok) {
       // The host decides whether its failure is a configuration or a provider
       // problem; dropping that code here would turn every case into a generic one.
@@ -574,10 +604,14 @@ if (typeof self.importScripts === 'function') {
     }
     settingsCache = null;
     await setupMenus();
+    // An update drops the content script from every open tab, so the pages the
+    // user is already reading are picked up here rather than on reload.
+    void resyncOpenTabs().catch((error: unknown) => AT.warn('resyncing open tabs failed', error));
   });
 
   api.runtime.onStartup.addListener(() => {
     setupMenus();
+    void resyncOpenTabs().catch((error: unknown) => AT.warn('resyncing open tabs failed', error));
   });
 
   if (AT.contextMenus?.onClicked) {

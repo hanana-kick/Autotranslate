@@ -6,6 +6,7 @@ namespace AT {
     id?: number;
     url?: string;
     title?: string | null;
+    status?: string;
   };
 
   export type RuntimeApi = {

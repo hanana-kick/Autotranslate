@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SRC, load, resetGlobals, deferred, type ATNamespace } from './helpers.ts';
+import { SRC, load, resetGlobals, deferred, ggufHead, type ATNamespace } from './helpers.ts';
 
 // The options page is a plain script page: constants + browser + rules +
 // local + modelstore + modelflow + settings first (the order options.html
@@ -11,6 +11,7 @@ const LIBS = [
   'lib/constants.js',
   'lib/browser.js',
   'lib/rules.js',
+  'lib/plamo3.js',
   'lib/local.js',
   'lib/modelstore.js',
   'lib/modelflow.js',
@@ -188,7 +189,6 @@ const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['localUsage', 'p'],
   ['modelList', 'ul'],
   ['modelUrl', 'input'],
-  ['modelToken', 'input'],
   ['downloadModel', 'button', 'options_download'],
   ['cancelDownload', 'button', 'options_cancel'],
   ['modelFile', 'input'],
@@ -292,17 +292,20 @@ function clone<T>(value: T): T {
 // `AT.modelstore` runs its real logic against the two seams `configure()`
 // exposes, so no test opens IndexedDB, OPFS or a socket.
 
-/** The size the catalogue advertises for the one model it offers. */
-const MODEL_BYTES = 3896377344;
+/** The bytes the fake transfer streams: the size PFN's Q4_K_M card declares, so
+ *  the progress bars are measured against a real file's length. */
+const MODEL_BYTES = 573_125_952;
 
 type ModelFixtures = {
   /** Raw metadata rows the fake IndexedDB answers `all()` with. */
   rows?: ATNamespace[];
-  /** The Hugging Face token the fake blob store holds. */
-  token?: string;
   /** What the fake `storage.estimate()` answers. */
   estimate?: { usage: number; quota: number; persisted: boolean };
-  /** Byte counts the scripted download streams back, one entry per chunk. */
+  /** Total bytes the scripted download serves; the card's size is what the
+   *  store will hold it against. */
+  bytes?: number;
+  /** Byte counts the scripted download streams back, one entry per chunk after
+   *  the GGUF header. */
   chunks?: number[];
   /** The HTTP status the scripted download answers with. */
   status?: number;
@@ -311,10 +314,10 @@ type ModelFixtures = {
 /** A metadata row `AT.local.normalizeModel` accepts. */
 function modelRow(overrides: ATNamespace = {}): ATNamespace {
   return {
-    id: 'translategemma-4b-it-int8-web-a1b2c3',
-    name: 'translategemma-4b-it-int8-web.task',
+    id: 'plamo-3-translate-0.8b-q4_k_m-a1b2c3',
+    name: 'plamo-3-translate-0.8b-Q4_K_M.gguf',
     size: MODEL_BYTES,
-    sourceUrl: 'https://models.example.test/files/translategemma-4b-it-int8-web.task',
+    sourceUrl: 'https://models.example.test/files/plamo-3-translate-0.8b-Q4_K_M.gguf',
     createdAt: 1700000000000,
     ...overrides
   };
@@ -324,7 +327,8 @@ function modelRow(overrides: ATNamespace = {}): ATNamespace {
 type ModelCalls = {
   removed: string[];
   downloads: ATNamespace[];
-  fetches: { url: string; init: ATNamespace }[];
+  ingests: ATNamespace[];
+  fetchedUrls: string[];
   rows: () => ATNamespace[];
 };
 
@@ -332,26 +336,37 @@ function fakeModelstore(AT: ATNamespace, fixtures: ModelFixtures, onBytes: (writ
   const S = AT.local.STORE as ATNamespace;
   const meta = new Map<string, ATNamespace>();
   for (const row of fixtures.rows ?? []) meta.set(String(row.id), row);
-  const blobs = new Map<string, ATNamespace>();
-  if (fixtures.token !== undefined) blobs.set(String(S.settingsKey), { hfToken: fixtures.token });
   const held = new Set<string>();
+  const ages = new Map<string, number>();
   const estimate = fixtures.estimate ?? { usage: 5 * 1024 ** 3, quota: 20 * 1024 ** 3, persisted: true };
-  const chunks = fixtures.chunks ?? [MODEL_BYTES / 2, MODEL_BYTES / 2];
-  const total = chunks.reduce((sum, size) => sum + size, 0);
-  const calls: ModelCalls = { removed: [], downloads: [], fetches: [], rows: () => [...meta.values()] };
+  // A model file is a GGUF, and its first bytes are a header the ingest reads
+  // and rewrites, so the head is real. Everything after it is only ever
+  // measured, and nobody allocates a gigabyte to watch a progress bar move.
+  const parts = new Map<string, number>();
+  const head = ggufHead();
+  const bytes = fixtures.bytes ?? MODEL_BYTES;
+  const chunks = fixtures.chunks ?? [Math.max(0, bytes - head.length)];
+  const total = head.length + chunks.reduce((sum, size) => sum + size, 0);
+  const fetchedUrls: string[] = [];
+  const calls: ModelCalls = { removed: [], downloads: [], ingests: [], fetchedUrls, rows: () => [...meta.values()] };
   // One tick per chunk, always past the progress throttle, so every chunk reports.
   const clock = { now: 1000 };
-  const bucket = (name: string) => (name === String(S.metaStore) ? meta : blobs);
+  // One object store, the model records: any other name is a store the
+  // extension no longer has, and must fail here rather than quietly persist.
+  const storeOf = (name: string) => {
+    if (name !== String(S.metaStore)) throw new Error(`unexpected object store ${name}`);
+    return meta;
+  };
 
   const driver = {
-    get: async (name: string, key: string) => bucket(name).get(key),
+    get: async (name: string, key: string) => storeOf(name).get(key),
     put: async (name: string, key: string, value: unknown) => {
-      bucket(name).set(key, value as ATNamespace);
+      storeOf(name).set(key, value as ATNamespace);
     },
     remove: async (name: string, key: string) => {
-      bucket(name).delete(key);
+      storeOf(name).delete(key);
     },
-    all: async (name: string) => (name === String(S.metaStore) ? [...meta.values()] : [])
+    all: async (name: string) => [...storeOf(name).values()]
   };
 
   const files = {
@@ -365,13 +380,33 @@ function fakeModelstore(AT: ATNamespace, fixtures: ModelFixtures, onBytes: (writ
         onBytes(written);
       }
       held.add(id);
+      ages.set(id, clock.now);
       return written;
     },
     async read(id: string) {
       return held.has(id) ? { size: MODEL_BYTES } : null;
     },
+    async writePart(id: string, name: string, stream: ReadableStream<Uint8Array>) {
+      const reader = stream.getReader() as ATNamespace;
+      let written = 0;
+      for (;;) {
+        const chunk = (await reader.read()) as ATNamespace;
+        if (chunk.done === true) break;
+        written += Number(chunk.value?.byteLength ?? 0);
+      }
+      parts.set(`${id}/${name}`, written);
+      return written;
+    },
+    async readPart(id: string, name: string) {
+      return parts.has(`${id}/${name}`) ? { size: parts.get(`${id}/${name}`)! } : null;
+    },
     async remove(id: string) {
       held.delete(id);
+      ages.delete(id);
+      for (const key of [...parts.keys()]) if (key.startsWith(id + '/')) parts.delete(key);
+    },
+    async list() {
+      return [...held].map((name) => ({ name, lastModified: ages.get(name) ?? clock.now }));
     },
     async estimate() {
       return { ...estimate };
@@ -381,25 +416,42 @@ function fakeModelstore(AT: ATNamespace, fixtures: ModelFixtures, onBytes: (writ
     }
   };
 
-  const fetchImpl = async (url: string, init: ATNamespace) => {
-    calls.fetches.push({ url, init });
+  // The url and the headers are the store's business; the page only ever sees
+  // the bytes and the outcome, so nothing is recorded here.
+  const fetchImpl = async (url: string, _init: ATNamespace) => {
+    fetchedUrls.push(url);
     const status = fixtures.status ?? 200;
     const ok = status >= 200 && status < 300;
     let next = 0;
+    // Small parts (config, tokenizer) are served whole; only the graph is chunked.
+    const isGraph = /\.onnx$/.test(url);
+    const partTotal = isGraph ? total : Math.max(1, chunks[0] ?? 1);
     return {
       ok,
       status,
-      headers: { get: (name: string) => (name.toLowerCase() === 'content-length' ? String(total) : null) },
+      headers: { get: (name: string) => (name.toLowerCase() === 'content-length' ? String(partTotal) : null) },
       body: ok
         ? {
-            read: async () => {
-              const size = chunks[next];
-              if (size === undefined) return { done: true as const };
-              next += 1;
-              clock.now += Number(AT.local.DOWNLOAD_PROGRESS_INTERVAL_MS) + 100;
-              // Only `byteLength` is ever read, so nobody allocates 3.6 GiB.
-              return { done: false as const, value: { byteLength: size } };
-            }
+            getReader: () => ({
+              read: async () => {
+                // A non-graph part is served in one chunk and then closes.
+                if (!isGraph) {
+                  if (next > 0) return { done: true as const };
+                  next += 1;
+                  clock.now += Number(AT.local.DOWNLOAD_PROGRESS_INTERVAL_MS) + 100;
+                  return { done: false as const, value: { byteLength: partTotal } };
+                }
+                const first = next === 0;
+                const size = first ? head.length : chunks[next - 1];
+                if (size === undefined) return { done: true as const };
+                next += 1;
+                clock.now += Number(AT.local.DOWNLOAD_PROGRESS_INTERVAL_MS) + 100;
+                // Only `byteLength` is ever read past the header, so nobody
+                // allocates the gigabyte the card advertises.
+                return { done: false as const, value: first && isGraph ? head : { byteLength: size } };
+              },
+              cancel: async (_reason: unknown) => undefined
+            })
           }
         : null
     };
@@ -496,6 +548,11 @@ async function boot(options: BootOptions = {}) {
   AT.modelstore.download = async (request: ATNamespace) => {
     model.calls.downloads.push(request);
     return download(request);
+  };
+  const ingestOnnx = AT.modelstore.ingestOnnx as (request: ATNamespace) => Promise<unknown>;
+  AT.modelstore.ingestOnnx = async (request: ATNamespace) => {
+    model.calls.ingests.push(request);
+    return ingestOnnx(request);
   };
   // The page hands the transfer to `AT.modelflow`; the real module still runs,
   // so this only records what the page asked it to do.
@@ -647,7 +704,7 @@ test('junk in storage renders a coerced form, never a half-filled one', async ()
   const { field } = env;
 
   assert.equal(field('targetLang').value, 'en', 'an unknown language falls back to the default target');
-  assert.equal(field('sourceLang').value, 'de');
+  assert.equal(field('sourceLang').value, 'auto', 'a source outside the three targets falls back to auto');
   assert.equal(field('localModel').value, '', 'a non-string model id is dropped');
   assert.equal(field('localMaxTokens').value, '1024', 'a non-numeric budget falls back');
   assert.equal(field('maxNodes').value, '600');
@@ -782,7 +839,7 @@ test('a successful probe renders the output and the elapsed time, no leftover pl
   assert.equal(field('testStatus').textContent, msg('options_testing'), 'the row reports the running probe');
   assert.equal(field('testStatus').dataset.kind, 'info');
 
-  resolveProbe({ ok: true, result: { output: 'Hallo Welt', detected: 'de', ms: 42 } });
+  resolveProbe({ ok: true, result: { output: 'Hallo Welt', detected: 'ja', ms: 42 } });
   await flying;
 
   const rendered = field('testStatus').textContent;
@@ -794,18 +851,17 @@ test('a successful probe renders the output and the elapsed time, no leftover pl
   assert.equal(field('testStatus').dataset.kind, 'ok');
 });
 
-test('a probe whose engine returned no text still renders a number, not undefined', async () => {
+test('a probe the model answered with nothing is not reported as a success', async () => {
   const env = await boot({
     stored: storedSettings(),
-    replies: { 'at/test-engine': { ok: true, result: { output: undefined, detected: null, ms: 7 } } }
+    replies: { 'at/test-engine': { ok: true, result: { output: '   ', detected: null, ms: 7 } } }
   });
   await click(env.field('testEngine'));
 
-  const rendered = env.field('testStatus').textContent;
-  assert.equal(rendered, ' (7 ms)');
-  assert.ok(!rendered.includes('undefined'), 'a missing output is not spelled out');
-  assert.doesNotMatch(rendered, /\$\d\$/);
-  assert.equal(env.field('testStatus').dataset.kind, 'ok');
+  const status = env.field('testStatus');
+  assert.equal(status.textContent, msg('options_testEmpty'), 'the page says the model said nothing');
+  assert.equal(status.dataset.kind, 'warn', 'an empty answer is not a working translation');
+  assert.ok(!String(status.textContent).includes('undefined'), 'a missing output is not spelled out');
 });
 
 test('a failed probe renders the error and never claims success', async () => {
@@ -1019,13 +1075,17 @@ test('the local support line describes the host state', async () => {
   const env = await boot({
     stored: storedSettings(),
     replies: {
-      'at/local-get-status': { ok: true, supported: true, status: { state: 'ready', modelName: 'Gemma', loadMs: 12 } }
+      'at/local-get-status': {
+        ok: true,
+        supported: true,
+        status: { state: 'ready', modelName: 'plamo-3-translate-0.8b-Q4_K_M.gguf', loadMs: 12 }
+      }
     }
   });
 
   assert.equal(
     env.field('localSupport').textContent,
-    `${msg('options_stateReady')} · Gemma (12 ms)`,
+    `${msg('options_stateReady')} · plamo-3-translate-0.8b-Q4_K_M.gguf (12 ms)`,
     'the host describes itself through the catalogue'
   );
 });
@@ -1040,7 +1100,6 @@ test('the injected models render in the picker, the list and the usage line', as
   const env = await boot({
     stored: storedSettings({ localModelId: 'alpha-task' }),
     models: {
-      token: 'hf-secret',
       rows: [
         modelRow({ id: 'alpha-task', name: 'alpha.task' }),
         modelRow({ id: 'beta-task', name: 'beta.task', createdAt: 1800000000000 })
@@ -1053,8 +1112,8 @@ test('the injected models render in the picker, the list and the usage line', as
     field('localModel').children.map((node) => [node.value, node.textContent]),
     [
       ['', msg('options_localNone')],
-      ['beta-task', 'beta.task (3.6 GiB)'],
-      ['alpha-task', 'alpha.task (3.6 GiB)']
+      ['beta-task', 'beta.task (547 MiB)'],
+      ['alpha-task', 'alpha.task (547 MiB)']
     ],
     'newest first, each labelled with its size'
   );
@@ -1064,16 +1123,15 @@ test('the injected models render in the picker, the list and the usage line', as
     'the stored model is offered in the picker'
   );
   assert.equal(field('localMaxTokens').value, '1024', 'the budget is the stored number');
-  assert.equal(field('modelToken').value, 'hf-secret', 'the token comes back out of the blob store');
 
   const items = field('modelList').querySelectorAll('li.rule');
   assert.deepEqual(items.map((item) => item.querySelectorAll('code')[0]!.textContent), ['beta.task', 'alpha.task']);
   assert.deepEqual(
     items.map((item) => item.querySelectorAll('span.tag')[0]!.textContent),
-    ['3.6 GiB', '● 3.6 GiB'],
+    ['547 MiB', '● 547 MiB'],
     'the chosen model carries the bullet'
   );
-  assert.equal(field('localUsage').textContent, msg('options_usage', ['5.0 GiB', '20.0 GiB', '2', '7.3 GiB']));
+  assert.equal(field('localUsage').textContent, msg('options_usage', ['5.0 GiB', '20.0 GiB', '2', '1.1 GiB']));
 });
 
 test('the usage line admits when the browser may evict the model', async () => {
@@ -1085,7 +1143,7 @@ test('the usage line admits when the browser may evict the model', async () => {
   });
   assert.equal(
     env.field('localUsage').textContent,
-    `${msg('options_usage', ['5.0 GiB', '20.0 GiB', '1', '3.6 GiB'])} · ${msg('options_notPersisted')}`,
+    `${msg('options_usage', ['5.0 GiB', '20.0 GiB', '1', '547 MiB'])} · ${msg('options_notPersisted')}`,
     'an unpinned store is named, not left to vanish between visits'
   );
 });
@@ -1155,60 +1213,79 @@ test('deleting an unselected model leaves the settings and the host alone', asyn
   assert.equal(field('localModel').value, 'alpha-task', 'and the selection stays');
 });
 
-test('downloading a model streams its progress and then registers it', async () => {
+test('downloading the ONNX card fetches the graph and its parts, then registers the model', async () => {
+  // The store refuses a body whose size drifts more than 5% from the number the
+  // page hands it, so the fake transfer has to stream exactly what the card
+  // declares. The card is read from a throwaway boot because the fake is fixed
+  // when the page boots, and the page decides the size to hand over.
+  const card = (await boot({})).AT.local.defaultSource();
+  const bytes = Number(card.size);
+  const name = String(String(card.url).split('/').pop());
   const env = await boot({
     stored: storedSettings({ localModelId: '' }),
-    models: { token: 'hf-secret' },
+    models: { bytes },
     // The install loads the model once before calling itself finished.
     replies: { 'at/local-prepare': { ok: true } }
   });
   const { AT, field } = env;
 
-  assert.equal(field('modelUrl').value, AT.local.MODEL_SOURCES[0].url, 'the catalogue url is prefilled');
+  assert.equal(field('modelUrl').value, card.url, 'the card the extension can fetch is prefilled');
   assert.equal(field('modelProgress').hidden, true, 'nothing is in flight before the click');
   assert.equal(env.installs.length, 0, 'boot never downloads');
   assert.equal(env.model.downloads.length, 0, 'boot never downloads');
+  assert.equal(env.model.ingests.length, 0, 'boot never installs');
 
   await click(field('downloadModel'));
   await idle();
 
   assert.equal(env.installs.length, 1, 'one click is one install');
   const install = env.installs[0]!;
-  assert.equal(install.url, AT.local.MODEL_SOURCES[0].url);
-  assert.equal(install.token, 'hf-secret', 'the typed token travels with the install');
+  assert.equal(install.url, card.url);
   assert.ok(install.signal instanceof AbortSignal, 'the install gets a signal the cancel button can abort');
   assert.equal(install.signal.aborted, false);
   assert.equal(typeof install.onProgress, 'function', 'the page draws the progress');
 
-  assert.equal(env.model.downloads.length, 1, 'the install asks the store for one transfer');
-  const request = env.model.downloads[0]!;
-  assert.equal(request.url, AT.local.MODEL_SOURCES[0].url);
-  assert.equal(request.token, 'hf-secret', 'the typed token travels with the request');
-  assert.equal(request.expectedSize, AT.local.MODEL_SOURCES[0].size, 'the catalogue size is the sanity check');
-  assert.equal(env.model.fetches[0]!.init.headers.Authorization, 'Bearer hf-secret');
+  assert.equal(env.model.downloads.length, 0, 'an ONNX card is not one byte stream');
+  assert.equal(env.model.ingests.length, 1, 'the install asks the store for the multi-file ingest');
+  const request = env.model.ingests[0]!;
+  assert.equal(request.graphUrl, card.url);
+  assert.equal(request.expectedSize, bytes, 'the card size is the sanity check the store is given');
+  assert.deepEqual(request.parts, card.parts, 'every small file beside the graph is fetched');
 
+  const base = card.url.slice(0, card.url.lastIndexOf('/onnx/') + 1);
+  assert.deepEqual(
+    env.model.fetchedUrls,
+    [card.url, ...(card.parts ?? []).map((part: string) => base + part)],
+    'the graph first, then each part from the same directory'
+  );
+
+  // An ONNX graph has no GGUF header, so the first chunk is already body bytes.
   assert.deepEqual(
     env.progress.map((tick) => [tick.value, tick.max, tick.hidden]),
     [
-      [1948188672, MODEL_BYTES, false],
-      [MODEL_BYTES, MODEL_BYTES, false]
+      [ggufHead().length, bytes, false],
+      [bytes, bytes, false]
     ],
-    'every chunk moves the bar'
+    'the first chunk arrives and the body fills the bar'
   );
-  assert.equal(env.progress[0]!.status, msg('options_downloading', ['1.8 GiB', '3.6 GiB']), 'and reports the bytes');
+  assert.equal(
+    env.progress[1]!.status,
+    msg('options_downloading', [AT.local.formatBytes(bytes), AT.local.formatBytes(bytes)]),
+    'and the line reports the bytes'
+  );
 
   assert.equal(field('modelProgress').hidden, true, 'the bar is hidden once the file is stored');
   assert.equal(field('downloadModel').disabled, false, 'the buttons are live again');
   const rows = env.model.rows();
   assert.equal(rows.length, 1, 'a complete file is the only thing registered');
-  assert.equal(rows[0]!.name, 'translategemma-4b-it-int8-web.task', 'named after the url');
-  assert.equal(rows[0]!.size, MODEL_BYTES);
+  assert.equal(rows[0]!.name, name, 'named after the url');
+  assert.equal(rows[0]!.size, bytes);
   assert.equal(savedSettings(env).localModelId, rows[0]!.id, 'the first model becomes the selected one');
   assert.equal(field('localModel').value, rows[0]!.id, 'and the picker follows');
-  assert.match(
-    String(field('modelStatus').textContent),
-    /^translategemma-4b-it-int8-web\.task \(3\.6 GiB\) stored in \d+ s$/,
-    'the line names the file, its size and how long it took'
+  assert.equal(
+    String(field('modelStatus').textContent).replace(/ stored in \d+ s$/, ''),
+    `${name} (${AT.local.formatBytes(bytes)})`,
+    'the line names the file and its size'
   );
 });
 

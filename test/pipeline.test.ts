@@ -121,6 +121,37 @@ test('a paragraph below the fold is translated after the one on screen', async (
   );
 });
 
+test('the post goes before the menu when the page gave its text no semantics', async () => {
+  // What the live pass measured on reddit: Korean labels, English post. The
+  // engine now reads how much text a node carries, which is the one signal a
+  // feed built out of `div`s does carry.
+  const post = 'The build used to take four minutes on a laptop, so nobody ran it before pushing.';
+  const { translator, batches } = engine([
+    { text: 'Sign in', top: 10, tag: 'div' },
+    { text: 'Home', top: 20, tag: 'div', attrs: { role: 'navigation' } },
+    { text: post, top: 300, tag: 'div' }
+  ]);
+  await translator.translate();
+  assert.deepEqual(
+    batches.map((batch) => batch.texts.join(',')),
+    [post, 'Sign in', 'Home'],
+    'the paragraph is paid for before either label'
+  );
+});
+
+test('a post is found by the name the site gave it', async () => {
+  const { translator, batches } = engine([
+    { text: 'Sign in', top: 10, tag: 'div' },
+    { text: 'Nine seconds', top: 120, tag: 'div', attrs: { class: 'shreddit-post-title' } }
+  ]);
+  await translator.translate();
+  assert.deepEqual(
+    batches.map((batch) => `${batch.role}:${batch.texts.join(',')}`),
+    ['article:Nine seconds', 'unknown:Sign in'],
+    'a short title still leads, because the site called it a post'
+  );
+});
+
 test('refresh only pays for what is new, and keeps the page context', async () => {
   const { translator, batches } = engine([{ text: 'First', top: 10 }]);
 
@@ -155,7 +186,7 @@ test('collection looks past the sidebar so the visible body is still in the plan
 });
 
 test('a node the provider answered with nothing is retried, not marked done', async () => {
-  // A 4B model returns an empty answer for some short labels. That is not a
+  // The model answers some short labels with nothing. That is not a
   // translation: the node must stay eligible, or the page keeps that label in
   // the source language forever.
   const { document, texts } = page([{ text: 'Subspecies', top: 10 }, { text: 'The body', top: 40 }]);

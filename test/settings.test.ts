@@ -65,10 +65,10 @@ test('junk values fall back instead of throwing', () => {
 
 test('the on-device fields are clamped', () => {
   const picked = settings.normalize({
-    localModelId: '  translategemma-4b-it-int8-web  ',
+    localModelId: `  ${AT.local.MODEL_SOURCES[0]!.id}  `,
     localMaxTokens: '4096'
   });
-  assert.equal(picked.localModelId, 'translategemma-4b-it-int8-web', 'the id is trimmed before it is stored');
+  assert.equal(picked.localModelId, AT.local.MODEL_SOURCES[0]!.id, 'the id is trimmed before it is stored');
   assert.equal(picked.localMaxTokens, 4096, 'a string budget from the form still counts');
 
   // The budget sizes one generation, so it stays inside the range the host can
@@ -109,13 +109,17 @@ test('the content snapshot carries only what a page needs', () => {
 });
 
 test('the UI language picks a supported target', () => {
+  // A region folds onto the language the pickers carry; a UI language outside
+  // the three offered targets becomes the default, never a dead option.
   const cases = [
     ['ko-KR', 'ko'],
-    ['pt-BR', 'pt'],
-    ['zh-TW', 'zh-TW'],
-    ['zh-HK', 'zh-TW'],
-    ['zh-CN', 'zh-CN'],
+    ['ja-JP', 'ja'],
     ['en-GB', 'en'],
+    ['pt-BR', 'en'],
+    ['zh-CN', 'en'],
+    ['zh-HK', 'en'],
+    ['de', 'en'],
+    ['ko', 'ko'],
   ];
   for (const [ui, expected] of cases) {
     AT.api = { i18n: { getUILanguage: () => ui } };

@@ -85,6 +85,45 @@ test('the page content is finished in reading order before its chrome', () => {
   assert.equal(targets.isContent('comment'), false, 'a comment thread is content the reader did not ask for first');
 });
 
+test('a long stretch of unstructured text is planned as content, a short label is not', () => {
+  // reddit and X build their posts out of `div`s with no role, no `article`,
+  // no heading: `roleOf` has nothing to read, and the reader watched the menus
+  // come back in Korean while the post stayed in the source language.
+  const post = 'The build used to take four minutes on a laptop, so nobody ran it before pushing.';
+  const candidates = [
+    { id: 'menu', role: 'navigation', priority: 'visible', order: 0, top: 40, chars: 6 },
+    { id: 'post', role: 'unknown', priority: 'visible', order: 1, top: 300, chars: post.length },
+    { id: 'label', role: 'unknown', priority: 'visible', order: 2, top: 200, chars: 8 }
+  ];
+  const groups = targets.plan(candidates, { band: 900 });
+  assert.deepEqual(
+    groups.map((group: { ids: string[] }) => group.ids.join(',')),
+    ['post', 'menu', 'label'],
+    'the post before the menu, and the menu before an unstructured label'
+  );
+});
+
+test('a comment thread stays chrome however long it is', () => {
+  const candidates = [
+    { id: 'thread', role: 'comment', priority: 'visible', order: 0, top: 100, chars: 400 },
+    { id: 'post', role: 'unknown', priority: 'visible', order: 1, top: 200, chars: 120 }
+  ];
+  const groups = targets.plan(candidates, { band: 900 });
+  assert.deepEqual(
+    groups.map((group: { ids: string[] }) => group.ids.join(',')),
+    ['post', 'thread'],
+    'length promotes text the page never described, never a thread the page called comments'
+  );
+});
+
+test('importance is the role, or length for text the page never described', () => {
+  assert.equal(targets.isImportant({ role: 'article', chars: 3 }), true);
+  assert.equal(targets.isImportant({ role: 'unknown', chars: targets.SUBSTANTIVE_CHARS }), true);
+  assert.equal(targets.isImportant({ role: 'unknown', chars: targets.SUBSTANTIVE_CHARS - 1 }), false);
+  assert.equal(targets.isImportant({ role: 'unknown' }), false, 'a caller that measured nothing keeps the old order');
+  assert.equal(targets.isImportant({ role: 'footer', chars: 900 }), false);
+});
+
 test('document order survives inside a group, and a limit caps the plan', () => {
   const candidates = [
     { id: 'b', role: 'article', priority: 'visible', order: 2 },
@@ -113,6 +152,15 @@ test('each region gets a line the prompt can use, and prose gets none', () => {
   assert.equal(targets.normalizeRole('comment'), 'comment');
   assert.equal(targets.normalizeRole('nope'), 'unknown');
   assert.equal(targets.normalizeRole(null), 'unknown');
+});
+
+test('the name a site gives its own text is read as the article', () => {
+  assert.equal(targets.roleOf(info({ markers: 'shreddit-post-title' })), 'article');
+  assert.equal(targets.roleOf(info({ markers: 'tweet-text' })), 'article');
+  assert.equal(targets.roleOf(info({ markers: 'markdown-body' })), 'article');
+  assert.equal(targets.roleOf(info({ markers: 'modal-body' })), 'unknown', 'body is what a modal calls its middle');
+  assert.equal(targets.roleOf(info({ markers: 'cookie-banner-content' })), 'unknown');
+  assert.equal(targets.roleOf(info({ inNav: true, markers: 'nav-post-links' })), 'navigation', 'the region still wins');
 });
 
 test('sentences end at sentence punctuation', () => {

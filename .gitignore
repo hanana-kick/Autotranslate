@@ -11,3 +11,10 @@ weight/
 *.task
 # Agent runtime state, not part of the project
 .omp/
+.codegraph/
+# Scratch for scripts/plamo-gguf.ts: the safetensors, the converter venv and the
+# BF16 GGUF it builds. Several gigabytes, rebuilt by the next run.
+.cache/
+
+# Generated ONNX runtime vendor files (npm run onnx:vendor)
+vendor-src/

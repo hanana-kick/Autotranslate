@@ -27,21 +27,16 @@
       <section class="card">
         <h2 data-i18n="welcome_model"></h2>
         <p class="hint" data-i18n="welcome_modelHint"></p>
+        <p class="hint" data-i18n="welcome_modelLicence"></p>
         <p class="hint" id="support" hidden></p>
         <p class="hint" id="installed" hidden></p>
 
         <div class="row wrap">
           <button id="download" type="button" data-i18n="options_download"></button>
           <button id="cancel" type="button" class="secondary" data-i18n="options_cancel" hidden></button>
-          <input type="file" id="modelFile" accept=".task,application/octet-stream" hidden />
+          <input type="file" id="modelFile" accept=".gguf,application/octet-stream" hidden />
           <button id="pick" type="button" class="secondary" data-i18n="welcome_haveFile"></button>
         </div>
-
-        <div class="field">
-          <label for="modelToken" data-i18n="options_modelToken"></label>
-          <input type="password" id="modelToken" spellcheck="false" autocomplete="off" />
-        </div>
-        <p class="hint" data-i18n="options_modelTokenHint"></p>
 
         <progress id="progress" max="100" value="0" hidden></progress>
         <p class="status" id="status" role="status"></p>
@@ -57,6 +52,7 @@
     <script src="lib/constants.js"></script>
     <script src="lib/browser.js"></script>
     <script src="lib/rules.js"></script>
+    <script src="lib/plamo3.js"></script>
     <script src="lib/local.js"></script>
     <script src="lib/modelstore.js"></script>
     <script src="lib/modelflow.js"></script>

@@ -380,7 +380,7 @@ function environment(options: Options = {}) {
     if (fail && index >= (fail.after ?? 0)) {
       return { ok: false, error: fail.error, code: fail.code ?? null };
     }
-    return { ok: true, translations: (options.translate ?? wrap)(texts), detected: 'en', engine: 'libre' };
+    return { ok: true, translations: (options.translate ?? wrap)(texts), detected: 'en' };
   };
 
   const events: { messages: MessageListener[] } = { messages: [] };
@@ -858,13 +858,13 @@ test('the card is reused, and its close button removes that card', async () => {
 
 test('the card is laid out for the target language and is never translated', async () => {
   const env = environment({ texts: ['Hello there'], messages: { content_noSelection: 'Nothing selected' } });
-  const settings = snapshot({ targetLang: 'ar' });
+  const settings = snapshot({ targetLang: 'ja' });
   await env.send({ type: 'at/content-translate-selection', text: 'Some selected words', settings });
 
   const [card] = env.page.cards();
   assert.ok(card);
   assert.equal(card.attrs['data-no-translate'], '', 'the card marks itself untranslatable');
-  assert.equal(card.attrs.dir, 'rtl', 'an RTL target lays the card out right to left');
+  assert.equal(card.attrs.dir, 'ltr', 'every language the extension translates into reads left to right');
   assert.match(card.attrs.style ?? '', /position:fixed/, 'the card is positioned through the style attribute');
 
   // A full page pass must leave the card alone: its text is the user's own.
@@ -876,14 +876,17 @@ test('the card is laid out for the target language and is never translated', asy
   );
   assert.equal(cardBody(card).textContent, '»Some selected words«', 'the card keeps its translation');
 
-  // RTL_LANGS is a plain table: an inherited key must not read as RTL.
-  const inherited = environment({ texts: ['Hello there'] });
-  await inherited.send({
-    type: 'at/content-translate-selection',
-    text: 'Some selected words',
-    settings: snapshot({ targetLang: 'constructor' })
-  });
-  assert.equal(inherited.page.cards()[0]?.attrs.dir, 'ltr');
+  // The direction is a fact about the offered targets, not a lookup a stored
+  // page can still hit: no code, valid or junk, puts the card right to left.
+  for (const targetLang of ['ko', 'ar', 'constructor']) {
+    const other = environment({ texts: ['Hello there'] });
+    await other.send({
+      type: 'at/content-translate-selection',
+      text: 'Some selected words',
+      settings: snapshot({ targetLang })
+    });
+    assert.equal(other.page.cards()[0]?.attrs.dir, 'ltr', `${targetLang} lays the card out left to right`);
+  }
 });
 
 // --- the mutation observer ---------------------------------------------------

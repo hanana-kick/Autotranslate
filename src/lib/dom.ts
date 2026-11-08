@@ -346,15 +346,12 @@ namespace AT.dom {
       // the write would leave it in the source language for good.
       const pending: typeof jobs = [];
       for (const job of jobs) pending.push(job);
-      /**
-       * One request per paragraph's sentences, and several one-sentence nodes
-       * packed together: the fixed cost of a request is paid once either way,
-       * and a packed request still writes its nodes as soon as it answers.
-       */
       // One request per job: a paragraph's sentences travel together (the other
-      // segments are the context), and a one-sentence node travels alone.
-      // Measured: packing several nodes into one request saved nothing, because
-      // a generation costs ~40 ms per output token and only ~0.15 s per request.
+      // segments are the context), and a one-sentence node travels alone. Packing
+      // unrelated nodes is not cheaper on this runtime — measured, four unrelated
+      // sentences took 2.08 s as four requests and 2.67 s as one numbered batch —
+      // and a batch holds every node behind the slowest answer, so the split stays
+      // where the meaning splits.
       const seen = new Set<string>();
       const unique: string[] = [];
       const work = jobs

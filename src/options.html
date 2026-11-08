@@ -46,19 +46,15 @@
             <label for="modelUrl" data-i18n="options_modelUrl"></label>
             <input type="url" id="modelUrl" spellcheck="false" autocomplete="off" />
           </div>
-          <div class="field">
-            <label for="modelToken" data-i18n="options_modelToken"></label>
-            <input type="password" id="modelToken" spellcheck="false" autocomplete="off" />
-          </div>
-          <p class="hint" data-i18n="options_modelTokenHint"></p>
           <div class="row wrap">
             <button id="downloadModel" type="button" data-i18n="options_download"></button>
             <button id="cancelDownload" type="button" class="secondary" data-i18n="options_cancel" hidden></button>
-            <input type="file" id="modelFile" accept=".task,application/octet-stream" hidden />
+            <input type="file" id="modelFile" accept=".gguf,application/octet-stream" hidden />
             <button id="pickModel" type="button" class="secondary" data-i18n="options_pickFile"></button>
             <button id="prepareModel" type="button" class="secondary" data-i18n="options_prepare"></button>
             <button id="testEngine" type="button" class="secondary" data-i18n="options_test"></button>
           </div>
+          <p class="hint" data-i18n="options_modelLicence"></p>
           <p class="status" id="testStatus" role="status"></p>
           <progress id="modelProgress" max="100" value="0" hidden></progress>
           <p class="status" id="modelStatus" role="status"></p>
@@ -119,6 +115,7 @@
     <script src="lib/constants.js"></script>
     <script src="lib/browser.js"></script>
     <script src="lib/rules.js"></script>
+    <script src="lib/plamo3.js"></script>
     <script src="lib/local.js"></script>
     <script src="lib/modelstore.js"></script>
     <script src="lib/modelflow.js"></script>

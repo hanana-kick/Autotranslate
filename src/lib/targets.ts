@@ -72,6 +72,22 @@ namespace AT.targets {
     return CONTENT[role] === true;
   }
 
+  /** How much text makes a node worth reading. A post body or an article
+   *  paragraph on a site built out of `div`s has no semantics to read, and
+   *  `roleOf` had nothing to say about it, so it was planned as chrome: on
+   *  reddit and X the menus and footers came back in Korean while the post
+   *  itself was still in the source language. Length is the signal those pages
+   *  do carry - a label is short and prose is not. */
+  export const SUBSTANTIVE_CHARS = 40;
+
+  /** Whether this candidate is worth translating before the page's chrome.
+   *  Only `unknown` is promoted: a comment thread, a form, a menu, a sidebar
+   *  and a footer are deliberately chrome however long they are. */
+  export function isImportant(candidate: { role: TextRole; chars?: number }): boolean {
+    if (isContent(candidate.role)) return true;
+    return candidate.role === 'unknown' && (Number(candidate.chars) || 0) >= SUBSTANTIVE_CHARS;
+  }
+
   /** Ties inside one priority: the part a reader is most likely to be reading. */
   const ROLE_RANK: Record<TextRole, number> = {
     heading: 0,
@@ -89,6 +105,11 @@ namespace AT.targets {
   /** Comment containers, as sites actually mark them. */
   const COMMENT_MARKERS = /(^|[\s_-])(comments?|replies|responses|discussion|thread)([\s_-]|$)/;
 
+  /** The names sites give their own text, when the elements are anonymous.
+   *  Deliberately narrow: `body` and `content` are left out because
+   *  `modal-body` and `cookie-banner-content` carry them too. */
+  const CONTENT_MARKERS = /(^|[\s_-])(post|article|prose|markdown|entry|story|tweet|caption|description)([\s_-]|$)/;
+
   /**
    * The region a text belongs to. Order is the rule: a comment inside an
    * article is a comment, a list inside an article is article text, and a
@@ -105,6 +126,7 @@ namespace AT.targets {
     if (info.inHeading || info.tag === 'h1' || /^h[1-6]$/.test(info.tag) || role === 'heading') return 'heading';
     if (info.inArticle || role === 'article' || role === 'main') return 'article';
     if (info.inList || role === 'list' || role === 'listitem' || info.tag === 'li') return 'list';
+    if (CONTENT_MARKERS.test(info.markers ?? '')) return 'article';
     if (info.tag === 'time' || info.tag === 'address' || /(^|[\s_-])(meta|byline|dateline)([\s_-]|$)/.test(info.markers ?? '')) {
       return 'metadata';
     }
@@ -137,17 +159,24 @@ namespace AT.targets {
     order: number;
     /** Vertical position in viewport coordinates (negative is above the fold). */
     top?: number;
+    /** Characters of text, when the caller knows them: what lets a long
+     *  unstructured paragraph count as content. Omit it and the plan falls back
+     *  to the role alone. */
+    chars?: number;
   };
 
   export type Group = { role: TextRole; priority: Priority; ids: string[] };
 
   /**
-   * The translation plan, in the order a reader moves: the band at the top of
-   * the viewport first, then one screen at a time downwards, and the text above
-   * the fold last. Within a band the plan is grouped by region, so a batch never
-   * mixes a menu label with a comment, and inside a group it stays in document
-   * order. That is what makes progress legible: everything above the cursor is
-   * done before anything below it starts.
+   * The translation plan, in the order a reader moves: the page's own content
+   * first and its chrome afterwards; inside each of those, the band at the top
+   * of the viewport first, then one screen at a time downwards, and the text
+   * above the fold last. The split between the two halves is `isImportant`,
+   * which counts a long stretch of unstructured text as content even when the
+   * page gave it no semantics. Within a band the plan is grouped by region, so
+   * a batch never mixes a menu label with a comment, and inside a group it stays
+   * in document order. That is what makes progress legible: everything above the
+   * cursor is done before anything below it starts.
    */
   export function plan(candidates: Candidate[], options?: { limit?: number; band?: number }): Group[] {
     const limit = Number(options?.limit);
@@ -163,13 +192,16 @@ namespace AT.targets {
     };
     // Bands at or below the viewport in reading order, then the ones above it.
     const bandKey = (index: number): number => (index >= 0 ? index : 1000 + -index);
-    const buckets = new Map<string, Group & { key: number; first: number }>();
+    const buckets = new Map<string, Group & { key: number; first: number; content: boolean }>();
     for (const candidate of usable) {
       const key = bandKey(bandOf(candidate));
-      const bucket = `${key}/${candidate.role}`;
+      const important = isImportant(candidate);
+      const bucket = `${key}/${candidate.role}/${important ? 'content' : 'chrome'}`;
       const top = Number(candidate.top);
       const first = Number.isFinite(top) ? top : Number.MAX_SAFE_INTEGER;
-      const group = buckets.get(bucket) ?? { role: candidate.role, priority: candidate.priority, ids: [], key, first };
+      const group =
+        buckets.get(bucket) ??
+        { role: candidate.role, priority: candidate.priority, ids: [], key, first, content: important };
       // Where the group starts on the page decides its place inside the band, so
       // the menu at 120px is still translated before the paragraph at 300px.
       group.first = Math.min(group.first, first);
@@ -183,7 +215,7 @@ namespace AT.targets {
     }
     groups.sort(
       (left, right) =>
-        Number(!isContent(left.role)) - Number(!isContent(right.role)) ||
+        Number(!left.content) - Number(!right.content) ||
         left.key - right.key ||
         left.first - right.first ||
         ROLE_RANK[left.role] - ROLE_RANK[right.role]
@@ -250,12 +282,13 @@ namespace AT.targets {
   }
 
   /**
-   * The share of the prompt that page and region lines may take, in characters
-   * (~40 tokens, 8% of the input available at `localMaxTokens: 1024`). Above
-   * that the policy is to drop lines, not to grow the context: measured, a
-   * full metadata block (glossary, sections, entities) costs up to 382 tokens
-   * on a docs page — 75% of that input budget — so it stays out of the prompt
-   * and is kept for consistency work instead.
+   * The share of the prompt that page and region lines may take, in characters.
+   * 240 is just over 60 tokens at the Latin prior and around 170 at the CJK one
+   * (`AT.local` carries both), a small part of the budget the settings page
+   * offers. Above the cap the policy is to drop lines, not to grow the context:
+   * a full metadata block (glossary, sections, entities) is several times that,
+   * and the text on the page is what has to be answered, so the block stays out
+   * of the prompt and is kept for consistency work instead.
    */
   export const CONTEXT_MAX_CHARS = 240;
 

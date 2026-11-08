@@ -27,7 +27,6 @@ namespace AT {
     LOCAL_TRANSLATE: string;
     LOCAL_LOAD: string;
     LOCAL_UNLOAD: string;
-    LOCAL_COUNT: string;
     LOCAL_QUERY: string;
     // host -> background
     LOCAL_STATUS: string;
@@ -52,7 +51,6 @@ namespace AT {
     LANG_CODES: Set<string>;
     isSupportedLang: (code: string | null | undefined) => boolean;
     sameLanguage: (a: string | null | undefined, b: string | null | undefined) => boolean;
-    RTL_LANGS: Record<string, true | undefined>;
     SITE_RULE_ACTIONS: readonly SiteRuleAction[];
   };
 
@@ -112,7 +110,6 @@ namespace AT {
       LOCAL_TRANSLATE: 'at/local-translate',
       LOCAL_LOAD: 'at/local-load',
       LOCAL_UNLOAD: 'at/local-unload',
-      LOCAL_COUNT: 'at/local-count',
       // background -> host: "what is your state?" (`LOCAL_STATUS` travels the
       // other way; sharing one type let the background answer its own question).
       LOCAL_QUERY: 'at/local-query',
@@ -123,36 +120,19 @@ namespace AT {
       LOCAL_RELEASE: 'at/local-release',
       LOCAL_GET_STATUS: 'at/local-get-status'
     },
+    // The languages the offered model was released with. PLaMo 3 Translate
+    // publishes a benchmark table for en/ja/ko and ships a `target_lang`
+    // vocabulary of 53, but nothing outside this three has been measured here,
+    // and an answer nobody measured is not a reason to put a dead end in a
+    // picker.
     LANGS: [
       { code: 'en', native: 'English' },
       { code: 'ko', native: '한국어' },
-      { code: 'ja', native: '日本語' },
-      { code: 'zh-CN', native: '简体中文' },
-      { code: 'zh-TW', native: '繁體中文' },
-      { code: 'ar', native: 'العربية' },
-      { code: 'bn', native: 'বাংলা' },
-      { code: 'de', native: 'Deutsch' },
-      { code: 'es', native: 'Español' },
-      { code: 'fa', native: 'فارسی' },
-      { code: 'fr', native: 'Français' },
-      { code: 'he', native: 'עברית' },
-      { code: 'hi', native: 'हिन्दी' },
-      { code: 'id', native: 'Bahasa Indonesia' },
-      { code: 'it', native: 'Italiano' },
-      { code: 'nl', native: 'Nederlands' },
-      { code: 'pl', native: 'Polski' },
-      { code: 'pt', native: 'Português' },
-      { code: 'ru', native: 'Русский' },
-      { code: 'th', native: 'ไทย' },
-      { code: 'tr', native: 'Türkçe' },
-      { code: 'uk', native: 'Українська' },
-      { code: 'vi', native: 'Tiếng Việt' }
+      { code: 'ja', native: '日本語' }
     ],
     LANG_CODES: new Set<string>(),
     isSupportedLang,
     sameLanguage,
-    // Used only to pick a text direction for the selection card.
-    RTL_LANGS: { ar: true, fa: true, he: true, ur: true },
     SITE_RULE_ACTIONS: ['always', 'never']
   };
 
@@ -162,7 +142,7 @@ namespace AT {
     return typeof code === 'string' && C.LANG_CODES.has(code);
   }
 
-  // 'en-US' matches 'en'; regional variants stay distinct ('zh-CN' vs 'zh-TW').
+  // 'en-US' matches 'en'; a variant never matches a different base code.
   function sameLanguage(a: string | null | undefined, b: string | null | undefined): boolean {
     if (typeof a !== 'string' || typeof b !== 'string') return false;
     const left = a.trim().toLowerCase();

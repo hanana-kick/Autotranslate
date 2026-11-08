@@ -8,12 +8,7 @@ import { ROOT, resetGlobals, type ATNamespace } from './helpers.ts';
 // an engine: a piece it does not know is handed back untouched and remembered
 // in a module-level set that unknownCount() exposes.
 
-/** Run markers as AT.dom.wrapRuns emits them; they are not part of AT.C. */
-const OPEN = '\uE000';
-const CLOSE = '\uE001';
-const run = (index: number): string => `${OPEN}${String(index)}${CLOSE}`;
-
-type TranslateOptions = { lossy?: boolean; latencyMs?: number };
+type TranslateOptions = { latencyMs?: number };
 
 type Demo = {
   translate(texts: readonly string[], options?: TranslateOptions): Promise<string[]>;
@@ -118,48 +113,6 @@ test('phrase keys carry their punctuation', async () => {
   const withBang = glossary();
   assert.deepEqual(await translate(withBang, ['free shipping!']), ['free shipping!']);
   assert.equal(withBang.unknownCount(), 1, '"!" is not part of the phrase key, so the phrase lookup misses');
-});
-
-test('marked runs are translated piece by piece and keep their markers', async () => {
-  const demo = glossary();
-  const marked = `free shipping${run(1)}and${run(2)}plan`;
-  const out = await translate(demo, [marked]);
-  assert.equal(out[0], `무료 배송${run(1)}그리고${run(2)}요금제`);
-  assert.equal(demo.unknownCount(), 0, 'each piece between markers is a dictionary entry');
-});
-
-test('lossy drops the markers and joins the pieces with nothing between them', async () => {
-  const demo = glossary();
-  const marked = `free shipping${run(1)}and${run(2)}plan`;
-  const kept = await translate(demo, [marked]);
-  const lossy = await translate(demo, [marked], { lossy: true });
-  assert.ok(kept[0]!.includes(run(1)) && kept[0]!.includes(run(2)), 'the default path keeps both run boundaries');
-  assert.ok(!lossy[0]!.includes(OPEN) && !lossy[0]!.includes(CLOSE), 'lossy leaves no marker characters behind');
-  assert.equal(lossy[0], '무료 배송그리고요금제', 'no separator is inserted where a marker was');
-});
-
-test('a marker splitting a word defeats both dictionary tables', async () => {
-  const demo = glossary();
-  // 'style-safe' is a WORDS key; the markers break the token so neither half maps.
-  const out = await translate(demo, [`style${run(1)}safe`]);
-  assert.equal(out[0], `style${run(1)}safe`, 'both halves and the marker survive');
-  assert.equal(demo.unknownCount(), 2, 'each half is recorded as its own unknown piece');
-});
-
-test('a marker that is not a run marker stays put and counts as unknown', async () => {
-  const demo = glossary();
-  const out = await translate(demo, [`a${OPEN}b${CLOSE}`]);
-  assert.equal(out[0], `a${OPEN}b${CLOSE}`, 'the scanner needs digits between the markers');
-  assert.equal(demo.unknownCount(), 1, 'the private-use characters make the piece unmappable');
-});
-
-test('every text in a batch is scanned for markers from the start', async () => {
-  const demo = glossary();
-  // The marker regex is module-level and global; a leaked lastIndex would make
-  // the second text miss its leading marker.
-  const out = await translate(demo, [`${run(1)}plan`, `${run(2)}free`, `${run(3)}plan`]);
-  assert.deepEqual(out, [`${run(1)}요금제`, `${run(2)}무료`, `${run(3)}요금제`]);
-  assert.equal(demo.unknownCount(), 0);
 });
 
 test('an empty batch resolves to an empty array', async () => {

@@ -9,7 +9,6 @@ namespace AT.content {
     ok: boolean;
     translations: string[];
     detected?: string | null;
-    engine?: string;
     error?: string;
     code?: AT.engines.EngineErrorCode | null;
   };
@@ -140,17 +139,16 @@ declare var __autotranslate: AT.content.Boot | undefined;
     if (!state.pipeline) {
       state.pipeline = AT.pipeline.create({
         doc: document,
-        // A paragraph's sentences share one request, and one-sentence nodes are
-        // packed up to four. Measured on a ten-paragraph page: packing four
-        // nodes per request cut the page from 16 s to under 9 s, because the
-        // fixed cost of a request is paid once instead of ten times.
+        // A paragraph's sentences share one request, the other segments riding
+        // along as the hint; one-sentence nodes are not packed together, because
+        // the packed form measured slower on this runtime (`lib/dom.ts`).
         settings: () => ({ maxNodes: (state.settings ?? settings).maxNodes }),
         // Read settings from state so a later target-language change applies
         // without re-injecting the script.
         translate: (batch) => requestBatch(batch, state.settings ?? settings),
-        // A long paragraph is several sentences; sending it whole either
-        // overflows the model's context or gets cut mid-clause by the char
-        // chunker. Split first, rejoin in place.
+        // A long paragraph is several sentences; sent whole it would overflow the
+        // context or be halved mid-clause by `AT.local.chunkByTokens`, so split
+        // first and rejoin in place.
         // Every multi-sentence paragraph is translated sentence by sentence:
         // each answer is written as it lands, and the paragraph rides along as
         // the hint so the sentences read as one text.
@@ -474,16 +472,13 @@ declare var __autotranslate: AT.content.Boot | undefined;
     }
   }
 
-  function showCard(text: string, settings?: AT.settings.ContentSnapshot): void {
+  function showCard(text: string): void {
     closeCard();
     const card = document.createElement('div');
     card.setAttribute('data-no-translate', '');
-    card.setAttribute(
-      'dir',
-      // Indexed, not `.has()`: RTL_LANGS is a plain table, so an inherited key
-      // must not read as RTL.
-      C.RTL_LANGS[settings?.targetLang ?? ''] === true ? 'rtl' : 'ltr'
-    );
+    // Always left-to-right: the card holds the answer, and every language the
+    // picker offers writes left to right.
+    card.setAttribute('dir', 'ltr');
     card.setAttribute(
       'style',
       [
@@ -531,7 +526,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.settings = settings;
     const selected = String(message.text ?? globalThis.getSelection?.()?.toString() ?? '').trim();
     if (selected.length < 2) {
-      showCard(AT.i18n.msg('content_noSelection'), settings);
+      showCard(AT.i18n.msg('content_noSelection'));
       return { status: 'empty' };
     }
     // A Ctrl+A selection is a whole page in one prompt: split it like a long
@@ -540,7 +535,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     const gap = /\s/.test(selected) ? ' ' : '';
     const texts = parts.length > 1 ? parts : [selected.slice(0, C.SENTENCE_MAX_CHARS)];
     const translated = await requestBatch({ texts, role: 'unknown', context: null }, settings);
-    showCard(translated.filter((text) => text).join(gap) || selected, settings);
+    showCard(translated.filter((text) => text).join(gap) || selected);
     return { status: 'selection' };
   }
 

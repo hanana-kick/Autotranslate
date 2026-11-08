@@ -15,7 +15,6 @@ namespace AT.welcome {
     cancel: HTMLButtonElement;
     pick: HTMLButtonElement;
     modelFile: HTMLInputElement;
-    modelToken: HTMLInputElement;
     progress: HTMLProgressElement;
     status: HTMLParagraphElement;
     start: HTMLButtonElement;
@@ -97,17 +96,15 @@ namespace AT.welcome {
       const text =
         outcome.error === 'cancelled'
           ? AT.i18n.msg('options_cancelled')
-          : outcome.error === 'needs-token'
-            ? AT.i18n.msg('options_needsToken')
-            : outcome.error === 'no-space'
-              ? AT.i18n.msg('options_noSpace', AT.local.formatBytes(AT.modelflow.SOURCE.size))
-              : outcome.stored
-                // The file is in storage; only loading it failed. Saying the
-                // import failed would send the user to repeat a 3.9 GiB copy.
-                ? AT.i18n.msg('welcome_modelStored', outcome.error ?? 'model-load-failed')
-                : source === 'file'
-                  ? AT.i18n.msg('welcome_importFailed', outcome.error ?? 'unknown')
-                  : `${AT.i18n.msg('options_downloadFailed')}: ${outcome.error ?? 'unknown'}`;
+          : outcome.error === 'no-space'
+            ? AT.i18n.msg('options_noSpace', AT.local.formatBytes(AT.modelflow.SOURCE.size))
+            : outcome.stored
+              // The file is in storage; only loading it failed. Saying the
+              // import failed would send the user to repeat a gigabyte copy.
+              ? AT.i18n.msg('welcome_modelStored', outcome.error ?? 'model-load-failed')
+              : source === 'file'
+                ? AT.i18n.msg('welcome_importFailed', outcome.error ?? 'unknown')
+                : `${AT.i18n.msg('options_downloadFailed')}: ${outcome.error ?? 'unknown'}`;
       readyModel = null;
       renderInstalled();
       setStatus(text, 'error');
@@ -135,15 +132,9 @@ namespace AT.welcome {
     inflight = controller;
     setBusy(true);
     setStatus(AT.i18n.msg('welcome_starting'), 'info');
-    const token = el('modelToken').value.trim();
-    await AT.modelstore.setToken(token).catch((error: unknown) => AT.warn('storing the token failed', reason(error)));
     try {
       await settle(
-        await AT.modelflow.installFromUrl({
-          token,
-          signal: controller.signal,
-          onProgress: showProgress
-        })
+        await AT.modelflow.installFromUrl({ signal: controller.signal, onProgress: showProgress })
       );
     } catch (error: unknown) {
       inflight = null;
@@ -217,7 +208,6 @@ namespace AT.welcome {
       })
     );
     el('targetLang').value = settings.targetLang;
-    el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     wire();
     await showSupport();
     // A profile that already has the file (a reinstall, a second browser) skips

@@ -27,16 +27,20 @@
       "vendor/browser-polyfill.js",
       "lib/constants.js",
       "lib/browser.js",
-      "lib/gemma.js",
+      "lib/plamo3.js",
       "lib/pagecontext.js",
       "lib/targets.js",
       "lib/rules.js",
+      "vendor/onnxruntime/ort-common.all.js",
+      "vendor/onnxruntime/ort-webgpu.all.js",
+      "vendor/onnxruntime/transformers.web.js",
       "lib/local.js",
       "lib/modelstore.js",
       "lib/ui.js",
       "lib/settings.js",
       "lib/engines.js",
       "lib/localhost.js",
+      "lib/onnxhost.js",
       "background.js"
     ]
   },
@@ -44,9 +48,19 @@
     "page": "options.html",
     "open_in_tab": true
   },
-  "permissions": ["storage", "scripting", "contextMenus", "offscreen", "sidePanel"],
-  "side_panel": { "default_path": "welcome.html" },
-  "host_permissions": ["<all_urls>"],
+  "permissions": [
+    "storage",
+    "scripting",
+    "contextMenus",
+    "offscreen",
+    "sidePanel"
+  ],
+  "side_panel": {
+    "default_path": "welcome.html"
+  },
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   }

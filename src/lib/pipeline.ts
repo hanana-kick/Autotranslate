@@ -216,6 +216,9 @@ namespace AT.pipeline {
           role: AT.targets.roleOf(describe(node)),
           priority: AT.targets.priorityOf(rect, viewport),
           order: index,
+          // How much text the node carries: what lets a `div`-built post body
+          // count as the page's own content instead of its chrome.
+          chars: (node.nodeValue ?? '').trim().length,
           // Banded by one screen of the reader's own viewport.
           top: rect.top
         };

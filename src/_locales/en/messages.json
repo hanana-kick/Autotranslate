@@ -1,67 +1,166 @@
 {
-  "extensionName": { "message": "Autotranslate" },
-  "shortName": { "message": "Autotranslate" },
-  "description": {
-    "message": "Translates web pages with Google, a LibreTranslate instance, or a model that runs on this computer."
+  "extensionName": {
+    "message": "Autotranslate"
   },
-  "actionTitle": { "message": "Autotranslate this page" },
-  "menuTranslatePage": { "message": "Translate this page" },
-  "menuRestorePage": { "message": "Restore original text" },
-  "menuTranslateSelection": { "message": "Translate selection" },
-  "menuNeverSite": { "message": "Never translate this site" },
-  "menuAlwaysSite": { "message": "Always translate this site" },
-  "content_close": { "message": "Close" },
-  "content_noSelection": { "message": "Nothing selected to translate." },
-  "popup_enabled": { "message": "Auto-translate" },
-  "popup_enabledTitle": { "message": "Translate pages automatically" },
-  "popup_targetLanguage": { "message": "Translate to" },
-  "popup_options": { "message": "Options" },
-  "popup_idle": { "message": "Not translated yet." },
-  "popup_localUnverified": { "message": "This language pair has not been checked with the on-device model." },
-  "popup_localNoModel": { "message": "No model yet — install it in Settings" },
+  "shortName": {
+    "message": "Autotranslate"
+  },
+  "description": {
+    "message": "Translates web pages with a model that runs on this computer."
+  },
+  "actionTitle": {
+    "message": "Autotranslate this page"
+  },
+  "menuTranslatePage": {
+    "message": "Translate this page"
+  },
+  "menuRestorePage": {
+    "message": "Restore original text"
+  },
+  "menuTranslateSelection": {
+    "message": "Translate selection"
+  },
+  "menuNeverSite": {
+    "message": "Never translate this site"
+  },
+  "menuAlwaysSite": {
+    "message": "Always translate this site"
+  },
+  "content_close": {
+    "message": "Close"
+  },
+  "content_noSelection": {
+    "message": "Nothing selected to translate."
+  },
+  "popup_enabled": {
+    "message": "Auto-translate"
+  },
+  "popup_enabledTitle": {
+    "message": "Translate pages automatically"
+  },
+  "popup_targetLanguage": {
+    "message": "Translate to"
+  },
+  "popup_options": {
+    "message": "Options"
+  },
+  "popup_idle": {
+    "message": "Not translated yet."
+  },
+  "popup_localUnverified": {
+    "message": "This language pair has not been checked with the on-device model."
+  },
+  "popup_localNoModel": {
+    "message": "No model yet — install it in Settings"
+  },
   "popup_translated": {
     "message": "Translated $1$ text segments.",
-    "placeholders": { "1": { "content": "$1" } }
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
   },
-  "popup_unavailable": { "message": "This page cannot be translated." },
-  "popup_disabled": { "message": "Autotranslate is turned off." },
-  "options_title": { "message": "Autotranslate options" },
-  "options_behavior": { "message": "Behavior" },
-  "options_enabled": { "message": "Enable translation" },
-  "options_showBadge": { "message": "Show badge on translated pages" },
-  "options_debug": { "message": "Verbose logging" },
-  "options_test": { "message": "Test provider" },
-  "options_testing": { "message": "Testing…" },
+  "popup_unavailable": {
+    "message": "This page cannot be translated."
+  },
+  "popup_disabled": {
+    "message": "Autotranslate is turned off."
+  },
+  "options_title": {
+    "message": "Autotranslate options"
+  },
+  "options_behavior": {
+    "message": "Behavior"
+  },
+  "options_enabled": {
+    "message": "Enable translation"
+  },
+  "options_showBadge": {
+    "message": "Show badge on translated pages"
+  },
+  "options_debug": {
+    "message": "Verbose logging"
+  },
+  "options_test": {
+    "message": "Test the model"
+  },
+  "options_testing": {
+    "message": "Testing…"
+  },
   "options_testOk": {
     "message": "$1$ ($2$ ms)",
     "placeholders": {
-      "1": { "content": "$1" },
-      "2": { "content": "$2" }
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
     }
   },
-  "options_languages": { "message": "Languages" },
-  "options_targetLang": { "message": "Translate to" },
-  "options_sourceLang": { "message": "Source language" },
-  "options_sourceAuto": { "message": "Detect automatically" },
-  "options_limits": { "message": "Limits" },
-  "options_maxNodes": { "message": "Maximum text nodes per page" },
-  "options_rules": { "message": "Site rules" },
-  "options_rulePlaceholder": { "message": "example.com or example.com/news/*" },
-  "options_addRule": { "message": "Add rule" },
-  "options_ruleAlways": { "message": "Always" },
-  "options_ruleNever": { "message": "Never" },
-  "options_remove": { "message": "Remove" },
-  "options_save": { "message": "Save" },
-  "options_reset": { "message": "Reset to defaults" },
-  "options_saved": { "message": "Saved." },
-  "options_resetDone": { "message": "Defaults restored." },
-  "options_noRules": { "message": "No site rules yet." },
-  "options_badRule": { "message": "Enter a valid host or URL pattern." },
+  "options_testEmpty": {
+    "message": "The model answered with nothing. The page will ask it again."
+  },
+  "options_languages": {
+    "message": "Languages"
+  },
+  "options_targetLang": {
+    "message": "Translate to"
+  },
+  "options_sourceLang": {
+    "message": "Source language"
+  },
+  "options_sourceAuto": {
+    "message": "Detect automatically"
+  },
+  "options_limits": {
+    "message": "Limits"
+  },
+  "options_maxNodes": {
+    "message": "Maximum text nodes per page"
+  },
+  "options_rules": {
+    "message": "Site rules"
+  },
+  "options_rulePlaceholder": {
+    "message": "example.com or example.com/news/*"
+  },
+  "options_addRule": {
+    "message": "Add rule"
+  },
+  "options_ruleAlways": {
+    "message": "Always"
+  },
+  "options_ruleNever": {
+    "message": "Never"
+  },
+  "options_remove": {
+    "message": "Remove"
+  },
+  "options_save": {
+    "message": "Save"
+  },
+  "options_reset": {
+    "message": "Reset to defaults"
+  },
+  "options_saved": {
+    "message": "Saved."
+  },
+  "options_resetDone": {
+    "message": "Defaults restored."
+  },
+  "options_noRules": {
+    "message": "No site rules yet."
+  },
+  "options_badRule": {
+    "message": "Enter a valid host or URL pattern."
+  },
   "options_local": {
     "message": "On-device translation"
   },
   "options_localHint": {
-    "message": "With the on-device engine selected, page text is translated by a model running in this browser: nothing is uploaded."
+    "message": "Translation runs in this browser: page text is handed to a model loaded here, so nothing is uploaded."
   },
   "options_localModel": {
     "message": "Model"
@@ -74,12 +173,6 @@
   },
   "options_modelUrl": {
     "message": "Model URL"
-  },
-  "options_modelToken": {
-    "message": "Hugging Face token (optional)"
-  },
-  "options_modelTokenHint": {
-    "message": "TranslateGemma is published in a gated repository: sign in at huggingface.co, accept the terms and paste a read token, or download the .task file yourself and use the file picker."
   },
   "options_download": {
     "message": "Download model"
@@ -113,7 +206,9 @@
       }
     }
   },
-  "options_notPersisted": { "message": "storage is not pinned, so the browser may evict the model" },
+  "options_notPersisted": {
+    "message": "storage is not pinned, so the browser may evict the model"
+  },
   "options_deleted": {
     "message": "Deleted $1$",
     "placeholders": {
@@ -146,9 +241,6 @@
   },
   "options_cancelled": {
     "message": "Download cancelled"
-  },
-  "options_needsToken": {
-    "message": "The server refused the request: this repository is gated, so a valid token is required."
   },
   "options_downloadFailed": {
     "message": "Download failed"
@@ -208,21 +300,75 @@
   "options_stateError": {
     "message": "On-device engine failed"
   },
-  "welcome_intro": { "message": "Install the model once. After that, every page you open is translated into your language, in this browser." },
-  "welcome_language": { "message": "Your language" },
-  "welcome_model": { "message": "Model" },
-  "welcome_modelHint": { "message": "Download the model once, or pick a model file you already have. It is stored on this device; pages never leave the browser." },
-  "welcome_haveFile": { "message": "Choose a file I already have" },
+  "welcome_intro": {
+    "message": "Install the model once. After that, every page you open is translated into your language, in this browser."
+  },
+  "welcome_language": {
+    "message": "Your language"
+  },
+  "welcome_model": {
+    "message": "Model"
+  },
+  "welcome_modelHint": {
+    "message": "Download the model once, or pick a model file you already have. It is stored on this device; pages never leave the browser."
+  },
+  "welcome_modelLicence": {
+    "message": "The download is the ONNX fp16 export of the model, 1.7 GiB - the released BF16 weights in fp16, not a quantization (the 673 MiB q4f16 file is the smaller option). Both are under the PLaMo Community License."
+  },
+  "welcome_haveFile": {
+    "message": "Choose a file I already have"
+  },
   "welcome_modelReady": {
     "message": "Ready: $1$ ($2$)",
-    "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } }
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      },
+      "2": {
+        "content": "$2"
+      }
+    }
   },
-  "welcome_importFailed": { "message": "That file cannot be used: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "welcome_needModel": { "message": "No model yet. Download it or pick a file to continue." },
-  "welcome_readyExisting": { "message": "The model is already installed. Press Start to turn translation on." },
-  "welcome_start": { "message": "Start translating" },
-  "welcome_starting": { "message": "Starting the download…" },
-  "welcome_done": { "message": "Done. Pages are translated automatically from now on." },
-  "options_modelStored": { "message": "Model stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "welcome_modelStored": { "message": "The file is stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } }
+  "welcome_importFailed": {
+    "message": "That file cannot be used: $1$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "welcome_needModel": {
+    "message": "No model yet. Download it or pick a file to continue."
+  },
+  "welcome_readyExisting": {
+    "message": "The model is already installed. Press Start to turn translation on."
+  },
+  "welcome_start": {
+    "message": "Start translating"
+  },
+  "welcome_starting": {
+    "message": "Starting the download…"
+  },
+  "welcome_done": {
+    "message": "Done. Pages are translated automatically from now on."
+  },
+  "options_modelStored": {
+    "message": "Model stored, but it did not load: $1$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  },
+  "options_modelLicence": {
+    "message": "What the download button fetches is the ONNX fp16 export, 1.7 GiB - the released BF16 weights in fp16, not a quantization (the 673 MiB q4f16 file is the smaller option). Both are under the PLaMo Community License."
+  },
+  "welcome_modelStored": {
+    "message": "The file is stored, but it did not load: $1$",
+    "placeholders": {
+      "1": {
+        "content": "$1"
+      }
+    }
+  }
 }

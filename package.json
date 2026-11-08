@@ -10,6 +10,7 @@
     "build:firefox": "node scripts/build.ts --target=firefox",
     "watch": "node scripts/build.ts --watch",
     "icons": "node scripts/make-icons.ts",
+    "plamo:gguf": "node scripts/plamo-gguf.ts",
     "predemo": "tsc -p tsconfig.json",
     "demo": "node scripts/serve-demo.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tools.json",
@@ -17,15 +18,19 @@
     "verify": "node scripts/verify-package.ts",
     "pretest": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts",
-    "ci": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify"
+    "ci": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify",
+    "onnx:vendor": "node scripts/onnx-vendor.ts"
   },
   "devDependencies": {
-    "@mediapipe/tasks-genai": "0.10.30",
     "@types/node": "^26.6.5",
+    "@wllama/wllama": "^3.8.1",
     "typescript": "^5.9.3",
     "webextension-polyfill": "0.12.0"
   },
   "engines": {
     "node": ">=24"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.3.2"
   }
 }

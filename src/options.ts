@@ -21,7 +21,6 @@ namespace AT.options {
     localUsage: HTMLParagraphElement;
     modelList: HTMLUListElement;
     modelUrl: HTMLInputElement;
-    modelToken: HTMLInputElement;
     downloadModel: HTMLButtonElement;
     cancelDownload: HTMLButtonElement;
     modelFile: HTMLInputElement;
@@ -226,6 +225,10 @@ namespace AT.options {
 
   async function refreshModels(): Promise<void> {
     try {
+      // Bytes no record claims are invisible here and undeletable from here;
+      // sweeping first makes the list and the usage line say the same thing.
+      const swept = await AT.modelstore.sweep();
+      if (swept.removed.length > 0) AT.log('dropped unclaimed model files', swept.removed.join(', '));
       models = await AT.modelstore.list();
       const usage = await AT.modelstore.usage();
       const said = AT.i18n.msg('options_usage', [
@@ -293,19 +296,17 @@ namespace AT.options {
     el('modelProgress').hidden = true;
     setBusy(false);
     if (!outcome.ok) {
-      const detail = outcome.error === 'needs-token' ? '' : `: ${outcome.error ?? 'unknown'}`;
+      const detail = `: ${outcome.error ?? 'unknown'}`;
       // Two different things happened: the bytes are stored but the model does
       // not load, or nothing arrived at all. Saying "download failed" for the
-      // first one sends the user to re-download 3.9 GiB they already have.
+      // first one sends the user to re-download the gigabyte they already have.
       setStatus(
         el('modelStatus'),
         outcome.error === 'cancelled'
           ? AT.i18n.msg('options_cancelled')
-          : outcome.error === 'needs-token'
-            ? AT.i18n.msg('options_needsToken')
-            : outcome.stored
-              ? AT.i18n.msg('options_modelStored', outcome.error ?? 'model-load-failed')
-              : AT.i18n.msg('options_downloadFailed') + detail,
+          : outcome.stored
+            ? AT.i18n.msg('options_modelStored', outcome.error ?? 'model-load-failed')
+            : AT.i18n.msg('options_downloadFailed') + detail,
         'error'
       );
       if (outcome.stored && outcome.modelId) {
@@ -341,19 +342,17 @@ namespace AT.options {
       setStatus(el('modelStatus'), AT.i18n.msg('options_badUrl'), 'error');
       return;
     }
-    // Claim the transfer before the first await: a second click during the
-    // token write used to start a second download of the same 3.9 GiB.
+    // Claim the transfer before the first await: a second click used to start a
+    // second download of the same gigabyte.
     if (inflight) return;
-    const token = el('modelToken').value.trim();
-    const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
+    const expected = AT.local.sourceFor(url)?.size;
     const controller = new AbortController();
     inflight = controller;
     setBusy(true);
     showProgress(0, expected ?? null);
-    await AT.modelstore.setToken(token).catch((error: unknown) => setStatus(el('modelStatus'), reason(error), 'error'));
     try {
       await settle(
-        await AT.modelflow.installFromUrl({ url, token, signal: controller.signal, onProgress: showProgress })
+        await AT.modelflow.installFromUrl({ url, signal: controller.signal, onProgress: showProgress })
       );
     } finally {
       if (inflight === controller) inflight = null;
@@ -417,11 +416,18 @@ namespace AT.options {
         setStatus(el('testStatus'), `${response?.code ? `[${response.code}] ` : ''}${response?.error}`, 'error');
         return;
       }
+      const output = (response.result.output ?? '').trim();
+      if (!output) {
+        // The model said nothing. That is not a working translation, and the
+        // page will have to ask that text again later.
+        setStatus(el('testStatus'), AT.i18n.msg('options_testEmpty'), 'warn');
+        return;
+      }
       setStatus(
         el('testStatus'),
         // Both placeholders of "$1$ ($2$ ms)" need a value: msg() takes a single
         // substitutions argument, so a third positional argument is dropped.
-        AT.i18n.msg('options_testOk', [response.result.output ?? '', String(response.result.ms)]),
+        AT.i18n.msg('options_testOk', [output, String(response.result.ms)]),
         'ok'
       );
     });
@@ -436,9 +442,6 @@ namespace AT.options {
     });
     el('prepareModel').addEventListener('click', () => {
       void prepareLocal();
-    });
-    el('modelToken').addEventListener('change', () => {
-      void AT.modelstore.setToken(el('modelToken').value.trim());
     });
   }
 
@@ -461,8 +464,9 @@ namespace AT.options {
     AT.i18n.apply(document);
     buildSelects();
     settings = await AT.settings.load();
-    el('modelUrl').value = AT.local.MODEL_SOURCES[0]?.url ?? '';
-    el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
+    // The card the extension can actually fetch today, so the field is never
+    // prefilled with a url nobody hosts.
+    el('modelUrl').value = AT.local.defaultSource().url;
     // Ask first, then report: the usage line is only meaningful once the
     // browser has answered whether it will keep the bytes.
     await AT.modelflow.keepStorage();

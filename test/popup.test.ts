@@ -296,13 +296,13 @@ test('boot asks the background once for state and renders a translated tab', asy
 });
 
 test('an idle tab renders the idle status with the switch on and the language select live', async () => {
-  const h = environment({ stored: { enabled: true, targetLang: 'de' } });
+  const h = environment({ stored: { enabled: true, targetLang: 'ja' } });
   await h.boot();
 
   assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
   assert.equal(h.fields.enabled.checked, true);
   assert.equal(h.fields.targetLang.disabled, false);
-  assert.equal(h.fields.targetLang.value, 'de');
+  assert.equal(h.fields.targetLang.value, 'ja', 'the stored choice is the one the select shows');
 });
 
 test('a tab the background cannot inject into disables the language select but not the switch', async () => {
@@ -372,17 +372,19 @@ test('a refused get-state leaves the fields untouched and names the error', asyn
 
 test('the on-device line names the resident model when one is selected', async () => {
   const h = environment({
-    stored: { enabled: true, targetLang: 'ko', localModelId: 'gemma-task' },
+    stored: { enabled: true, targetLang: 'ko', localModelId: 'plamo-3-translate-0.8b-q4_k_m' },
     state: stateOf({
-      local: { supported: true, status: { state: 'ready', modelName: 'TranslateGemma 4B', loadedBytes: 4096, loadMs: 1200 } }
+      local: { supported: true, status: { state: 'ready', modelName: 'PLaMo 3 Translate 0.8B (Q4_K_M)', loadedBytes: 1133080448, loadMs: 1200 } }
     })
   });
   await h.boot();
 
-  // describeStatus() owns the wording: the ready label, the model name, then the load time.
+  // describeStatus() owns the wording: the ready label, the model name, then the
+  // load time. Nothing has been checked against this model, so the line carries
+  // that admission and reads as a warning rather than a claim.
   assert.deepEqual(h.localStatus(), {
-    text: 'options_stateReady · TranslateGemma 4B (1200 ms)',
-    kind: 'info',
+    text: 'options_stateReady · PLaMo 3 Translate 0.8B (Q4_K_M) (1200 ms) · popup_localUnverified',
+    kind: 'warn',
     hidden: false
   });
   // The regular status line keeps reporting the tab, not the model.
@@ -411,22 +413,68 @@ test('a browser that cannot run the model still shows the line, as a warning', a
   assert.deepEqual(h.localStatus(), { text: 'options_localUnsupported', kind: 'warn', hidden: false });
 });
 
-test('an unchecked language pair says so instead of looking fine', async () => {
-  const h = environment({
-    stored: { enabled: true, sourceLang: 'de', targetLang: 'ko', localModelId: 'gemma-task' },
-    state: stateOf({
-      local: { supported: true, status: { state: 'ready', modelName: 'TranslateGemma 4B', loadedBytes: 4096, loadMs: 1200 } }
-    })
-  });
-  await h.boot();
+test('every language pair is marked unverified while nothing has been checked', async () => {
+  const MODEL = 'PLaMo 3 Translate 0.8B (Q4_K_M)';
+  const pairs: [string, string][] = [
+    ['auto', 'ko'],
+    ['en', 'ko'],
+    ['ko', 'en'],
+    ['ja', 'en']
+  ];
+  for (const [sourceLang, targetLang] of pairs) {
+    const h = environment({
+      stored: { enabled: true, sourceLang, targetLang, localModelId: 'plamo-3-translate-0.8b-q4_k_m' },
+      state: stateOf({
+        local: { supported: true, status: { state: 'ready', modelName: MODEL, loadedBytes: 1133080448, loadMs: 1200 } }
+      })
+    });
+    // The marker has one source: the shipped table has nothing checked.
+    assert.deepEqual(Object.keys(h.AT.local.VERIFIED_LANGS), [], 'the shipped table verifies no language');
+    await h.boot();
 
-  // The same model, the same ready state: only the pair is unknown, and the
-  // line has to carry that instead of implying a checked claim.
-  assert.deepEqual(h.localStatus(), {
-    text: 'options_stateReady · TranslateGemma 4B (1200 ms) · popup_localUnverified',
+    // Same model, same ready state: only the pair changes, and every pair —
+    // including two codes the model was released with — has to carry the
+    // admission instead of implying a checked claim.
+    assert.deepEqual(h.localStatus(), {
+      text: `options_stateReady · ${MODEL} (1200 ms) · popup_localUnverified`,
+      kind: 'warn',
+      hidden: false
+    }, `${sourceLang} -> ${targetLang} must say it was never checked`);
+  }
+});
+
+test('a checked pair is stated plainly and a half-checked one is not', async () => {
+  const MODEL = 'PLaMo 3 Translate 0.8B (Q4_K_M)';
+  const resident = () =>
+    stateOf({
+      local: { supported: true, status: { state: 'ready', modelName: MODEL, loadedBytes: 1133080448, loadMs: 1200 } }
+    });
+
+  // The warn branch above is the only one reachable today; these two drive the
+  // rest of the contract: the table decides, the pair name does not.
+  const checked = environment({
+    stored: { enabled: true, sourceLang: 'auto', targetLang: 'ko', localModelId: 'plamo-3-translate-0.8b-q4_k_m' },
+    state: resident()
+  });
+  checked.AT.local.VERIFIED_LANGS.ko = true;
+  await checked.boot();
+  assert.deepEqual(checked.localStatus(), {
+    text: `options_stateReady · ${MODEL} (1200 ms)`,
+    kind: 'info',
+    hidden: false
+  }, 'a pair the table has checked needs no warning');
+
+  const halfChecked = environment({
+    stored: { enabled: true, sourceLang: 'ja', targetLang: 'ko', localModelId: 'plamo-3-translate-0.8b-q4_k_m' },
+    state: resident()
+  });
+  halfChecked.AT.local.VERIFIED_LANGS.ko = true;
+  await halfChecked.boot();
+  assert.deepEqual(halfChecked.localStatus(), {
+    text: `options_stateReady · ${MODEL} (1200 ms) · popup_localUnverified`,
     kind: 'warn',
     hidden: false
-  });
+  }, 'a stated source the table has never seen is not a checked pair');
 });
 
 test('an unsupported browser gets one problem, not two', async () => {
@@ -571,11 +619,11 @@ test('the target language patch re-triggers translation on a translated tab', as
 test('the target language patch leaves an untranslated tab alone', async () => {
   const h = environment({ stored: { enabled: true, targetLang: 'en' } });
   await h.boot();
-  await h.choose('targetLang', 'fr');
+  await h.choose('targetLang', 'ko');
 
   assert.deepEqual(h.types(), ['at/get-state', 'at/set-settings', 'at/get-state']);
   assert.ok(!h.types().includes('at/translate-tab'));
-  assert.equal(h.stored?.targetLang, 'fr');
+  assert.equal(h.stored?.targetLang, 'ko');
   assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
 });
 
@@ -589,7 +637,7 @@ test('a tab reported translated with nothing translated is still re-translated',
   await h.boot();
   assert.deepEqual(h.status(), { text: 'popup_idle', kind: 'info' });
 
-  await h.choose('targetLang', 'de');
+  await h.choose('targetLang', 'ja');
 
   assert.ok(h.types().includes('at/translate-tab'));
 });

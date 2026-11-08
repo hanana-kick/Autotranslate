@@ -113,7 +113,6 @@ const FIELDS: readonly (readonly [string, string])[] = [
   ['cancel', 'button'],
   ['pick', 'button'],
   ['modelFile', 'input'],
-  ['modelToken', 'input'],
   ['progress', 'progress'],
   ['status', 'p'],
   ['start', 'button'],
@@ -171,7 +170,11 @@ const click = (node: Stub): Promise<void> => fire(node, 'click');
 // --- model stand-ins --------------------------------------------------------
 
 /** The record the page names in `welcome_modelReady` and saves as `localModelId`. */
-const MODEL = { id: 'translategemma-4b-it-int8-web-a1b2c3', name: 'translategemma.task', size: 2048 };
+const MODEL = {
+  id: 'plamo-3-translate-0.8b-q4_k_m-a1b2c3',
+  name: 'plamo-3-translate-0.8b-Q4_K_M.gguf',
+  size: 2048
+};
 
 /** A transfer result, as `AT.modelflow.Outcome` shapes it. */
 const outcome = (over: ATNamespace = {}): ATNamespace => ({
@@ -189,8 +192,6 @@ const outcome = (over: ATNamespace = {}): ATNamespace => ({
 type BootOptions = {
   /** The settings blob the page loads. */
   settings?: ATNamespace;
-  /** The Hugging Face token the fake blob store holds. */
-  token?: string;
   /** What `at/local-get-status` answers. */
   supported?: boolean;
   /** The model `AT.modelflow.installed()` reports, if any. */
@@ -224,7 +225,6 @@ async function boot(options: BootOptions = {}) {
 
   const calls = {
     messages: [] as ATNamespace[],
-    tokens: [] as string[],
     prepare: [] as string[],
     saves: [] as ATNamespace[],
     installs: [] as ATNamespace[],
@@ -247,15 +247,11 @@ async function boot(options: BootOptions = {}) {
 
   AT.modelstore = {
     get: async (id: string) => records.get(String(id)) ?? null,
-    fits: async () => true,
-    getToken: async () => options.token ?? '',
-    setToken: async (token: string) => {
-      calls.tokens.push(token);
-    }
+    fits: async () => true
   };
 
   AT.modelflow = {
-    SOURCE: { url: 'https://models.example.test/translategemma.task', size: MODEL.size },
+    SOURCE: AT.local.MODEL_SOURCES[0]!,
     installed: async () => options.installed ?? null,
     prepare: async (id: string) => {
       calls.prepare.push(id);
@@ -329,7 +325,7 @@ async function boot(options: BootOptions = {}) {
 }
 
 test('boot offers both install routes and asks for a model', async () => {
-  const env = await boot({ token: 'hf-token' });
+  const env = await boot();
   const { field, calls } = env;
 
   assert.equal(field('status').textContent, msg('welcome_needModel'));
@@ -346,7 +342,6 @@ test('boot offers both install routes and asks for a model', async () => {
   assert.equal(field('targetLang').children.length, env.AT.C.LANGS.length);
   assert.equal(field('targetLang').children[0]!.value, env.AT.C.LANGS[0].code);
   assert.equal(field('targetLang').value, 'en');
-  assert.equal(field('modelToken').value, 'hf-token');
 
   // The page asked the host whether the model can run here, and looked for an
   // installed model without preparing one.
@@ -360,7 +355,6 @@ test('boot offers both install routes and asks for a model', async () => {
 test('a successful download paints progress, arms start and saves the model', async () => {
   const env = await boot({
     settings: { targetLang: 'de' },
-    token: 'hf-token',
     progress: [
       [512, 1024],
       [1024, 1024]
@@ -385,10 +379,7 @@ test('a successful download paints progress, arms start and saves the model', as
     status: msg('options_downloading', ['1.0 KiB', '1.0 KiB'])
   });
 
-  // The token was stored and handed to the transfer.
-  assert.deepEqual(calls.tokens, ['hf-token']);
-  assert.equal(calls.installs.length, 1);
-  assert.equal(calls.installs[0]!.token, 'hf-token');
+  assert.equal(calls.installs.length, 1, 'one click is one transfer');
 
   assert.equal(field('progress').hidden, true);
   assert.equal(field('cancel').hidden, true);
@@ -415,24 +406,6 @@ test('a successful download paints progress, arms start and saves the model', as
   assert.equal(field('pick').disabled, true);
   assert.equal(field('status').textContent, msg('welcome_done'));
   assert.equal(calls.closed, 1);
-});
-
-test('a gated download reports the missing token and leaves start disabled', async () => {
-  const env = await boot({
-    urlOutcome: outcome({ ok: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'needs-token' })
-  });
-  const { field } = env;
-
-  await click(field('download'));
-
-  assert.equal(field('status').textContent, msg('options_needsToken'));
-  assert.equal(field('status').dataset.kind, 'error');
-  assert.equal(field('start').disabled, true);
-  assert.equal(field('installed').hidden, true);
-  assert.equal(field('installed').textContent, '');
-  assert.equal(field('progress').hidden, true);
-  assert.equal(field('cancel').hidden, true);
-  assert.deepEqual(env.calls.saves, []);
 });
 
 test('cancel aborts the signal the transfer was given', async () => {
@@ -469,7 +442,7 @@ test('cancel aborts the signal the transfer was given', async () => {
 test('picking a model file imports exactly the chosen file and arms start', async () => {
   const env = await boot();
   const { field, calls } = env;
-  const file: StubFile = { name: 'translategemma-local.task', size: 4096 };
+  const file: StubFile = { name: 'plamo-3-translate-0.8b-local.gguf', size: 4096 };
 
   await click(field('pick'));
   assert.equal(field('modelFile').clicks, 1);

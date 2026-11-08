@@ -9,7 +9,6 @@ namespace AT.modelflow {
 
   export type Install = {
     url?: string;
-    token?: string;
     signal?: AbortSignal;
     onProgress?: Progress;
   };
@@ -23,16 +22,18 @@ namespace AT.modelflow {
     name: string;
     bytes: number;
     seconds: number;
-    /** `cancelled`, `needs-token`, `bad-url`, the store's own code, or a load failure. */
+    /** `cancelled`, `bad-url`, the store's own code, or a load failure. */
     error: string | null;
     /** Ids of earlier copies this transfer replaced. */
     retired: string[];
   };
 
-  /** The source the extension offers by default; the user may still pick a file. */
-  export const SOURCE = AT.local.MODEL_SOURCES[0]!;
+  /** The card the extension offers by default: the best file that can actually be
+   *  fetched. The user may still name another url or pick a file. */
+  export const SOURCE = AT.local.defaultSource();
 
-  /** Eviction would cost the user a 3.6 GiB download, so ask for an exemption. */
+  /** Eviction would cost the user a re-download of the card's whole file, so ask
+   *  for an exemption from the start. */
   export async function keepStorage(): Promise<void> {
     try {
       await AT.modelstore.requestPersistence();
@@ -79,18 +80,29 @@ namespace AT.modelflow {
     const started = Date.now();
     const url = AT.local.normalizeDownloadUrl(install.url ?? SOURCE.url);
     if (!url) return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'bad-url', retired: [] };
-    const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
+    const card = AT.local.sourceFor(url) ?? (url === SOURCE.url ? SOURCE : null);
+    const expected = card?.size;
     if (expected && !(await AT.modelstore.fits(expected))) {
       return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'no-space', retired: [] };
     }
     await keepStorage();
-    const result = await AT.modelstore.download({
-      url,
-      token: install.token ?? '',
-      expectedSize: expected,
-      signal: install.signal,
-      onProgress: install.onProgress
-    });
+    // An ONNX card is a set of files, not one graph: fetch the parts beside it.
+    const result =
+      card?.kind === 'onnx'
+        ? await AT.modelstore.ingestOnnx({
+            graphUrl: url,
+            name: card.dtype === 'fp16' ? 'model_fp16.onnx' : undefined,
+            expectedSize: expected,
+            signal: install.signal,
+            onProgress: install.onProgress,
+            parts: card.parts ?? []
+          })
+        : await AT.modelstore.download({
+            url,
+            expectedSize: expected,
+            signal: install.signal,
+            onProgress: install.onProgress
+          });
     return settle(result, started);
   }
 
