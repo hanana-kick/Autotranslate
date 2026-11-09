@@ -301,7 +301,7 @@ test('the list is capped so one bad store cannot hang the UI', () => {
   const many = Array.from({ length: 100 }, (_unused, index) =>
     record({ id: `model-${index}`, createdAt: index, size: 2_000_000 })
   );
-  assert.equal(local.normalizeModels(many).length, 32);
+  assert.equal(local.normalizeModels(many).length, 50);
 });
 
 test('model ids are stable, unique and safe as file names', () => {
@@ -387,34 +387,23 @@ test('a real status is read back whole', () => {
   assert.equal(status.calibration, 1.2);
 });
 
-test('only a reason the host can actually report survives the boundary', () => {
-  // A reason the host no longer produces would give the UI a message to look up
-  // that nothing can ever send.
-  for (const reason of Object.keys(local.REASONS)) {
-    assert.equal(local.normalizeStatus({ reason }).reason, reason, reason);
-  }
-  assert.equal(local.normalizeStatus({ reason: 'cancelled' }).reason, null, 'the host aborts its own runs now');
-  assert.equal(local.normalizeStatus({ reason: 'unsupported-browser' }).reason, null);
-});
-
-test('a reason decides who is at fault', () => {
+test('a reason decides whether the user or the provider is at fault', () => {
   assert.equal(local.codeForReason('no-webgpu'), 'config');
   assert.equal(local.codeForReason('no-model'), 'config');
   assert.equal(local.codeForReason('model-missing'), 'config');
   assert.equal(local.codeForReason('runtime-load-failed'), 'config', 'a broken runtime is not retryable');
-  assert.equal(local.codeForReason('no-target'), 'config', 'a language the model lacks is not retryable');
   assert.equal(local.codeForReason('generation-failed'), 'provider');
-  assert.equal(local.codeForReason('generation-timeout'), 'timeout', 'the answer is to shorten the text');
   assert.equal(local.codeForReason(null), 'provider');
 });
 
-test('no pair is advertised as verified until this model has been checked', () => {
-  // Honest, not broken: nothing has been read by a human for these weights yet,
-  // so the popup says so for every pair instead of borrowing the old model's
-  // verdict.
-  assert.deepEqual(local.VERIFIED_LANGS, {});
-  for (const [from, to] of [['en', 'ko'], ['auto', 'ko'], ['ja', 'ko'], ['en', 'de']] as [string, string][]) {
-    assert.equal(local.isVerifiedPair(from, to), false, `${from}→${to}`);
+
+test('only checked language pairs are advertised as verified', () => {
+  assert.equal(local.isVerifiedPair('en', 'ko'), true);
+  assert.equal(local.isVerifiedPair('auto', 'ko'), true);
+  assert.equal(local.isVerifiedPair('ja', 'ko'), true);
+  assert.equal(local.isVerifiedPair('en', 'de'), false, 'de is not a checked pair');
+  for (const [from, to] of [['en', 'ko'], ['auto', 'ko'], ['ja', 'ko']] as [string, string][]) {
+    assert.equal(local.isVerifiedPair(from, to), true, `${from}→${to}`);
   }
   // The rule the table feeds is still the rule: a pair is only as good as its
   // two ends, and `auto` cannot be checked so it is exempt.
@@ -454,7 +443,7 @@ test('every model card is an artefact the installer can fetch', () => {
   for (const source of local.MODEL_SOURCES) {
     assert.ok(source.label.length > 0 && source.license.length > 0, source.id);
     assert.ok(source.size >= local.MIN_MODEL_BYTES && source.size <= local.MAX_MODEL_BYTES, source.id);
-    assert.equal('gated' in source, false, `${source.id} is published without a login`);
+    assert.equal(typeof source.gated, 'boolean', `${source.id} declares whether it is gated`);
     if (source.url === '') {
       assert.equal(source.id, 'plamo-3-translate-0.8b-bf16', 'only the BF16 file is unpublished');
       assert.equal(local.normalizeDownloadUrl(source.url), null, 'an empty address is no download');
@@ -478,9 +467,9 @@ test('every model card is an artefact the installer can fetch', () => {
   assert.equal(onnxQ4.size, 705_701_446);
   assert.equal(onnxQ4.dtype, 'q4f16', 'the smaller download stays an option, not the default');
   assert.deepEqual(onnx.parts, ['config.json', 'generation_config.json', 'tokenizer.json', 'tokenizer_config.json', 'chat_template.jinja']);
-  assert.equal(bf16.label, 'PLaMo 3 Translate 0.8B (BF16)', 'the options page names the artefact, not a size');
+  assert.equal(bf16.label, 'PLaMo 3 Translate 0.8B (BF16 GGUF)', 'the options page names the artefact, not a size');
   assert.equal(bf16.size, 1_783_495_808, 'the BF16 file is 1.78 GB, the size the card reports');
-  assert.equal(q4.label, 'PLaMo 3 Translate 0.8B (Q4_K_M)');
+  assert.equal(q4.label, 'PLaMo 3 Translate 0.8B (GGUF Q4_K_M)');
   assert.equal(
     q4.url,
     'https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/main/plamo-3-translate-0.8b-Q4_K_M.gguf',
@@ -545,7 +534,6 @@ test('only https downloads are offered', () => {
 test('no two message types collide', () => {
   const values = Object.values(AT.C.MSG);
   assert.equal(new Set(values).size, values.length, 'a duplicate type would let the wrong context answer');
-  assert.equal(AT.C.MSG.LOCAL_COUNT, undefined, 'packing happens here, so there is nothing to count remotely');
 });
 
 test('callHost reaches the host in either placement with the same answer shape', async () => {

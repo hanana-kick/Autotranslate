@@ -117,7 +117,9 @@ const FIELDS: readonly (readonly [string, string])[] = [
   ['status', 'p'],
   ['start', 'button'],
   ['options', 'button'],
-  ['serverOptions', 'button']
+  ['serverOptions', 'button'],
+  ['modelUrl', 'input'],
+  ['modelToken', 'input']
 ];
 
 /** welcome.html ships these with the `hidden` attribute. */
@@ -248,7 +250,9 @@ async function boot(options: BootOptions = {}) {
 
   AT.modelstore = {
     get: async (id: string) => records.get(String(id)) ?? null,
-    fits: async () => true
+    fits: async () => true,
+    getToken: async () => '',
+    setToken: async () => undefined
   };
 
   AT.modelflow = {

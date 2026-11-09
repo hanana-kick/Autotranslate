@@ -34,6 +34,7 @@ const MSG_NAMES = [
   'LOCAL_TRANSLATE',
   'LOCAL_LOAD',
   'LOCAL_UNLOAD',
+  'LOCAL_COUNT',
   'LOCAL_QUERY',
   'LOCAL_STATUS',
   'LOCAL_PREPARE',
@@ -74,11 +75,10 @@ test('isSupportedLang accepts catalogue codes only', () => {
     assert.equal(C.isSupportedLang(junk), false, `${JSON.stringify(junk)} is not a target`);
   }
 
-  // A code no offered model was measured with is refused here, before a prompt
-  // is built for a language nobody checked.
-  for (const outside of ['pt', 'de', 'fr', 'ar', 'zh-CN', 'zh-TW']) {
-    assert.equal(C.isSupportedLang(outside), false, `${outside} is no longer a target anyone can pick`);
-  }
+  // Regional variants stay distinct rather than collapsing to a base.
+  assert.equal(C.isSupportedLang('zh-CN'), true);
+  assert.equal(C.isSupportedLang('zh-TW'), true);
+  assert.equal(C.isSupportedLang('pt'), true);
 });
 
 test('sameLanguage folds a region onto the base code in one direction only', () => {
@@ -92,6 +92,32 @@ test('sameLanguage folds a region onto the base code in one direction only', () 
   assert.equal(C.sameLanguage('   ', 'en'), false);
   assert.equal(C.sameLanguage(null, 'en'), false);
   assert.equal(C.sameLanguage('en', undefined), false);
+});
+
+test('RTL_LANGS is only safe when read with === true', () => {
+  const C = constants().C;
+  const table = C.RTL_LANGS as Record<string, unknown>;
+
+  for (const code of ['ar', 'fa', 'he', 'ur']) {
+    assert.equal(table[code], true, `${code} must read as RTL under the === true contract`);
+    assert.equal(C.RTL_LANGS[code], true);
+  }
+  assert.equal(C.RTL_LANGS['en'], undefined, 'an LTR language has no entry at all');
+  assert.equal(C.RTL_LANGS['en'] === true, false);
+  assert.equal(C.RTL_LANGS['xx'] === true, false);
+
+  // The table is a plain object, so inherited members are truthy: only the
+  // strict comparison keeps content.ts from marking unknown codes rtl.
+  assert.equal(typeof table['toString'], 'function');
+  assert.notEqual(table['toString'], true);
+  assert.equal(C.RTL_LANGS['constructor'] === true, false);
+
+  assert.deepEqual(Object.keys(C.RTL_LANGS).sort(), ['ar', 'fa', 'he', 'ur']);
+  for (const value of Object.values(C.RTL_LANGS)) assert.equal(value, true, 'the table only ever holds true');
+
+  // Reality check: 'ur' has a direction entry but no picker entry, so it is
+  // unreachable through C.LANGS.
+  assert.equal(C.isSupportedLang('ur'), false);
 });
 
 test('numeric defaults sit inside the ceilings they feed', () => {
@@ -113,12 +139,9 @@ test('numeric defaults sit inside the ceilings they feed', () => {
 
 test('the picker language list is complete enough to render', () => {
   const C = constants().C;
+  assert.ok(C.LANGS.length > 0);
+
   const codes = C.LANGS.map((lang: ATNamespace) => lang.code);
-  assert.deepEqual(
-    [...codes].sort(),
-    ['en', 'ja', 'ko'],
-    'the pickers offer the languages the offered model was measured on'
-  );
   assert.equal(new Set(codes).size, codes.length, 'duplicate codes would render two identical options');
 
   for (const lang of C.LANGS) {

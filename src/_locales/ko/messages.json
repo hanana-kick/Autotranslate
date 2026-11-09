@@ -1,166 +1,67 @@
 {
-  "extensionName": {
-    "message": "Autotranslate 자동 번역"
-  },
-  "shortName": {
-    "message": "Autotranslate"
-  },
+  "extensionName": { "message": "Autotranslate 자동 번역" },
+  "shortName": { "message": "Autotranslate" },
   "description": {
-    "message": "이 컴퓨터에서 실행되는 모델로 웹 페이지를 번역합니다."
+    "message": "선택한 탭을 기기 내 모델 또는 OpenAI 호환 서버로 번역합니다."
   },
-  "actionTitle": {
-    "message": "이 페이지 자동 번역"
-  },
-  "menuTranslatePage": {
-    "message": "이 페이지 번역"
-  },
-  "menuRestorePage": {
-    "message": "원문으로 되돌리기"
-  },
-  "menuTranslateSelection": {
-    "message": "선택 영역 번역"
-  },
-  "menuNeverSite": {
-    "message": "이 사이트 번역 안 함"
-  },
-  "menuAlwaysSite": {
-    "message": "이 사이트 항상 번역"
-  },
-  "content_close": {
-    "message": "닫기"
-  },
-  "content_noSelection": {
-    "message": "번역할 선택 영역이 없습니다."
-  },
-  "popup_enabled": {
-    "message": "자동 번역"
-  },
-  "popup_enabledTitle": {
-    "message": "페이지를 자동으로 번역합니다"
-  },
-  "popup_targetLanguage": {
-    "message": "번역 언어"
-  },
-  "popup_options": {
-    "message": "설정"
-  },
-  "popup_idle": {
-    "message": "아직 번역되지 않았습니다."
-  },
-  "popup_localUnverified": {
-    "message": "이 언어 쌍은 온디바이스 모델로 검증하지 않았습니다."
-  },
-  "popup_localNoModel": {
-    "message": "모델이 없습니다 — 설정에서 설치하세요"
-  },
+  "actionTitle": { "message": "이 페이지 자동 번역" },
+  "menuTranslatePage": { "message": "이 탭 번역 켜기" },
+  "menuRestorePage": { "message": "이 탭 번역 끄고 원문 복원" },
+  "menuTranslateSelection": { "message": "선택 영역 번역" },
+  "menuNeverSite": { "message": "이 사이트 번역 안 함" },
+  "menuAlwaysSite": { "message": "이 사이트를 선택한 탭에서 허용" },
+  "content_close": { "message": "닫기" },
+  "content_noSelection": { "message": "번역할 선택 영역이 없습니다." },
+  "popup_enabled": { "message": "이 탭 번역" },
+  "popup_enabledTitle": { "message": "이 탭만 번역 대상으로 선택하거나 해제합니다." },
+  "popup_targetLanguage": { "message": "번역 언어" },
+  "popup_options": { "message": "설정" },
+  "popup_idle": { "message": "아직 번역되지 않았습니다." },
+  "popup_localUnverified": { "message": "이 언어 쌍은 온디바이스 모델로 검증하지 않았습니다." },
+  "popup_localNoModel": { "message": "모델이 없습니다 — 설정에서 설치하세요" },
   "popup_translated": {
     "message": "$1$개 구간을 번역했습니다.",
-    "placeholders": {
-      "1": {
-        "content": "$1"
-      }
-    }
+    "placeholders": { "1": { "content": "$1" } }
   },
-  "popup_unavailable": {
-    "message": "이 페이지는 번역할 수 없습니다."
-  },
-  "popup_disabled": {
-    "message": "자동 번역이 꺼져 있습니다."
-  },
-  "options_title": {
-    "message": "Autotranslate 설정"
-  },
-  "options_behavior": {
-    "message": "동작"
-  },
-  "options_enabled": {
-    "message": "번역 사용"
-  },
-  "options_showBadge": {
-    "message": "번역된 페이지에 배지 표시"
-  },
-  "options_debug": {
-    "message": "상세 로그"
-  },
-  "options_test": {
-    "message": "모델 테스트"
-  },
-  "options_testing": {
-    "message": "테스트 중…"
-  },
+  "popup_unavailable": { "message": "이 페이지는 번역할 수 없습니다." },
+  "popup_disabled": { "message": "이 탭은 번역 대상이 아닙니다. 스위치를 켜면 번역합니다." },
+  "options_title": { "message": "Autotranslate 설정" },
+  "options_behavior": { "message": "이 탭 번역" },
+  "options_enabled": { "message": "이 탭을 번역 대상으로 선택" },
+  "options_showBadge": { "message": "번역된 페이지에 배지 표시" },
+  "options_debug": { "message": "상세 로그" },
+  "options_test": { "message": "서비스 테스트" },
+  "options_testing": { "message": "테스트 중…" },
   "options_testOk": {
     "message": "$1$ ($2$ ms)",
     "placeholders": {
-      "1": {
-        "content": "$1"
-      },
-      "2": {
-        "content": "$2"
-      }
+      "1": { "content": "$1" },
+      "2": { "content": "$2" }
     }
   },
-  "options_testEmpty": {
-    "message": "모델이 아무것도 대답하지 않았습니다. 페이지에서 다시 묻습니다."
-  },
-  "options_languages": {
-    "message": "언어"
-  },
-  "options_targetLang": {
-    "message": "번역 언어"
-  },
-  "options_sourceLang": {
-    "message": "원문 언어"
-  },
-  "options_sourceAuto": {
-    "message": "자동 감지"
-  },
-  "options_limits": {
-    "message": "제한"
-  },
-  "options_maxNodes": {
-    "message": "페이지당 최대 텍스트 노드"
-  },
-  "options_rules": {
-    "message": "사이트 규칙"
-  },
-  "options_rulePlaceholder": {
-    "message": "example.com 또는 example.com/news/*"
-  },
-  "options_addRule": {
-    "message": "규칙 추가"
-  },
-  "options_ruleAlways": {
-    "message": "항상"
-  },
-  "options_ruleNever": {
-    "message": "안 함"
-  },
-  "options_remove": {
-    "message": "삭제"
-  },
-  "options_save": {
-    "message": "저장"
-  },
-  "options_reset": {
-    "message": "기본값으로 초기화"
-  },
-  "options_saved": {
-    "message": "저장했습니다."
-  },
-  "options_resetDone": {
-    "message": "기본값을 복원했습니다."
-  },
-  "options_noRules": {
-    "message": "사이트 규칙이 없습니다."
-  },
-  "options_badRule": {
-    "message": "올바른 호스트 또는 URL 패턴을 입력하세요."
-  },
+  "options_languages": { "message": "언어" },
+  "options_targetLang": { "message": "번역 언어" },
+  "options_sourceLang": { "message": "원문 언어" },
+  "options_sourceAuto": { "message": "자동 감지" },
+  "options_limits": { "message": "제한" },
+  "options_maxNodes": { "message": "페이지당 최대 텍스트 노드" },
+  "options_rules": { "message": "사이트 규칙" },
+  "options_rulePlaceholder": { "message": "example.com 또는 example.com/news/*" },
+  "options_addRule": { "message": "규칙 추가" },
+  "options_ruleAlways": { "message": "선택한 탭에서 번역 허용" },
+  "options_ruleNever": { "message": "안 함" },
+  "options_remove": { "message": "삭제" },
+  "options_save": { "message": "저장" },
+  "options_reset": { "message": "기본값으로 초기화" },
+  "options_saved": { "message": "저장했습니다." },
+  "options_resetDone": { "message": "기본값을 복원했습니다." },
+  "options_noRules": { "message": "사이트 규칙이 없습니다." },
+  "options_badRule": { "message": "올바른 호스트 또는 URL 패턴을 입력하세요." },
   "options_local": {
     "message": "온디바이스 번역"
   },
   "options_localHint": {
-    "message": "번역은 이 브라우저에서 돌아갑니다. 페이지 텍스트를 이 브라우저에 불러온 모델에 넘기므로 외부로 전송되지 않습니다."
+    "message": "온디바이스 엔진을 선택하면 페이지 텍스트를 이 브라우저에서 모델을 돌려 번역합니다. 외부로 전송되지 않습니다."
   },
   "options_localModel": {
     "message": "모델"
@@ -173,6 +74,12 @@
   },
   "options_modelUrl": {
     "message": "모델 URL"
+  },
+  "options_modelToken": {
+    "message": "Hugging Face 토큰 (선택)"
+  },
+  "options_modelTokenHint": {
+    "message": "TranslateGemma는 접근 제한 저장소에 있습니다. huggingface.co에 로그인해 약관에 동의하고 읽기 토큰을 붙여넣거나, .task 파일을 직접 내려받아 아래 파일 선택기로 지정하세요."
   },
   "options_download": {
     "message": "모델 다운로드"
@@ -206,9 +113,7 @@
       }
     }
   },
-  "options_notPersisted": {
-    "message": "저장소가 고정되지 않아 브라우저가 모델을 지울 수 있습니다"
-  },
+  "options_notPersisted": { "message": "저장소가 고정되지 않아 브라우저가 모델을 지울 수 있습니다" },
   "options_deleted": {
     "message": "$1$ 삭제 완료",
     "placeholders": {
@@ -241,6 +146,9 @@
   },
   "options_cancelled": {
     "message": "다운로드를 취소했습니다"
+  },
+  "options_needsToken": {
+    "message": "서버가 요청을 거부했습니다. 접근 제한 저장소는 유효한 토큰이 필요합니다."
   },
   "options_downloadFailed": {
     "message": "다운로드 실패"
@@ -300,75 +208,43 @@
   "options_stateError": {
     "message": "온디바이스 엔진 오류"
   },
-  "welcome_intro": {
-    "message": "모델을 한 번만 설치하면, 그 뒤로 열리는 페이지가 이 브라우저 안에서 목표 언어로 번역됩니다."
-  },
-  "welcome_language": {
-    "message": "번역할 언어"
-  },
-  "welcome_model": {
-    "message": "모델"
-  },
-  "welcome_modelHint": {
-    "message": "모델을 내려받거나, 이미 가지고 있는 모델 파일을 고르세요. 파일은 이 기기에 저장되고 페이지는 브라우저 밖으로 나가지 않습니다."
-  },
-  "welcome_modelLicence": {
-    "message": "내려받는 파일은 모델의 ONNX fp16 내보내기 파일로 1.7 GiB입니다.評価된 BF16 가중치를 fp16으로 옮긴 것으로 양자화가 아닙니다(더 작은 673 MiB q4f16 파일이 선택지). 두 파일 모두 PLaMo 커뮤니티 라이선스를 따릅니다."
-  },
-  "welcome_haveFile": {
-    "message": "가지고 있는 파일 선택"
-  },
+  "welcome_intro": { "message": "기기 내 모델 또는 호환 서버를 설정하십시오. 각 탭은 직접 켤 때까지 OFF로 유지됩니다." },
+  "welcome_language": { "message": "번역할 언어" },
+  "welcome_model": { "message": "모델" },
+  "welcome_modelHint": { "message": "모델을 내려받거나, 이미 가지고 있는 모델 파일을 고르세요. 파일은 이 기기에 저장되고 페이지는 브라우저 밖으로 나가지 않습니다." },
+  "welcome_haveFile": { "message": "가지고 있는 파일 선택" },
   "welcome_modelReady": {
     "message": "준비됨: $1$ ($2$)",
-    "placeholders": {
-      "1": {
-        "content": "$1"
-      },
-      "2": {
-        "content": "$2"
-      }
-    }
+    "placeholders": { "1": { "content": "$1" }, "2": { "content": "$2" } }
   },
-  "welcome_importFailed": {
-    "message": "파일을 사용할 수 없습니다: $1$",
-    "placeholders": {
-      "1": {
-        "content": "$1"
-      }
-    }
-  },
-  "welcome_needModel": {
-    "message": "모델이 없습니다. 내려받거나 파일을 골라야 시작할 수 있습니다."
-  },
-  "welcome_readyExisting": {
-    "message": "모델이 이미 설치되어 있습니다. 시작을 누르면 번역이 켜집니다."
-  },
-  "welcome_start": {
-    "message": "번역 시작"
-  },
-  "welcome_starting": {
-    "message": "내려받기를 시작합니다…"
-  },
-  "welcome_done": {
-    "message": "완료되었습니다. 이제 페이지가 자동으로 번역됩니다."
-  },
-  "options_modelStored": {
-    "message": "모델은 저장했지만 불러오지 못했습니다: $1$",
-    "placeholders": {
-      "1": {
-        "content": "$1"
-      }
-    }
-  },
-  "options_modelLicence": {
-    "message": "다운로드 단추가 가져오는 파일은 ONNX fp16 내보내기 파일로 1.7 GiB입니다. BF16 가중치를 그대로 fp16으로 옮긴 것이라 양자화가 아닙니다(673 MiB q4f16 파일이 더 작은 선택지). 두 파일 모두 PLaMo 커뮤니티 라이선스를 따릅니다."
-  },
-  "welcome_modelStored": {
-    "message": "파일은 저장했지만 불러오지 못했습니다: $1$",
-    "placeholders": {
-      "1": {
-        "content": "$1"
-      }
-    }
-  }
+  "welcome_importFailed": { "message": "파일을 사용할 수 없습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
+  "welcome_needModel": { "message": "모델이 없습니다. 내려받거나 파일을 골라야 시작할 수 있습니다." },
+  "welcome_readyExisting": { "message": "모델이 설치되어 있습니다. 설정을 마친 뒤 번역할 탭에서 직접 스위치를 켜십시오." },
+  "welcome_start": { "message": "설정 완료" },
+  "welcome_starting": { "message": "내려받기를 시작합니다…" },
+  "welcome_done": { "message": "모델 준비 완료. 번역할 탭에서 스위치를 켜십시오." },
+  "options_modelStored": { "message": "모델은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
+  "welcome_modelStored": { "message": "파일은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
+  "tab_noTarget": { "message": "번역할 페이지의 확장 아이콘에서 옵션을 여십시오." },
+  "tab_unavailable": { "message": "대상 탭이 닫혔거나 번역할 수 없는 페이지입니다." },
+  "tab_enabledHint": { "message": "이 탭만 번역합니다. 새로 삽입되는 내용도 처리합니다." },
+  "tab_disabledHint": { "message": "이 탭에서는 번역하지 않습니다. 다른 탭의 선택은 바뀌지 않습니다." },
+  "server_engine": {"message":"번역 엔진"},
+  "server_local": {"message":"기기 내 TranslateGemma"},
+  "server_openai": {"message":"OpenAI 호환 서버"},
+  "server_privacy": {"message":"명시적으로 켠 탭의 텍스트만 이 서버로 전송합니다. API 키는 이 브라우저에 저장하며 페이지 스크립트에 전달하지 않습니다. HTTP는 암호화되지 않으므로 신뢰할 수 있는 네트워크 외에서는 HTTPS를 사용하십시오."},
+  "server_baseUrl": {"message":"서버 Base URL"},
+  "server_apiKey": {"message":"API 키 (선택 사항)"},
+  "server_model": {"message":"모델 ID (직접 입력 또는 목록 불러오기)"},
+  "server_timeout": {"message":"요청 제한시간 (밀리초)"},
+  "server_loadModels": {"message":"모델 목록 불러오기"},
+  "server_modelsLoaded": {"message":"모델 $1$개를 불러왔습니다. 모델 ID를 선택하거나 입력하십시오.","placeholders":{"1":{"content":"$1"}}},
+  "server_loadingModels": {"message":"모델 목록을 불러오는 중…"},
+  "server_modelsUnavailable": {"message":"목록을 불러올 수 없습니다. 모델 ID를 직접 입력할 수 있습니다."},
+  "server_badConfig": {"message":"서버 주소가 올바르지 않습니다. 인증정보·쿼리·해시 없는 HTTP(S) Base URL을 입력하십시오."},
+  "server_testHint": {"message":"테스트는 현재 입력값을 사용합니다. 선택한 탭에 적용하려면 저장하십시오. 서버 테스트는 페이지 내용 대신 샘플 문장을 전송합니다."},
+  "server_popup": {"message":"서버 번역: $1$","placeholders":{"1":{"content":"$1"}}},
+  "server_needConfig": {"message":"옵션에서 서버 주소와 모델을 설정하십시오. 로컬 모델·WebGPU는 필요하지 않습니다."},
+  "server_onboarding": {"message":"로컬 모델 다운로드·WebGPU 없이 기존 호환 서버를 사용합니다. 각 탭은 명시적으로 켤 때까지 OFF로 유지됩니다."},
+  "server_setup": {"message":"호환 서버 설정"}
 }

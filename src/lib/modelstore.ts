@@ -5,6 +5,12 @@
 // covered without a browser.
 // Load after lib/constants.js, lib/local.js.
 namespace AT.modelstore {
+  /** Swap-file suffix `createWritable()` writes through before the name appears. */
+  const TMP_SUFFIX = '.tmp';
+  /** Longer than any transfer this extension makes: below it a file is a download
+   *  in progress, not debris. */
+  const RECENT_WRITE_MS = 60 * 60 * 1000;
+
   const L = AT.local;
   const S = L.STORE;
 
@@ -18,6 +24,12 @@ namespace AT.modelstore {
     all(store: string): Promise<unknown[]>;
   };
 
+  /** One byte file as the file system reports it: a sweep needs the name and the
+   *  age, nothing else. */
+  export type StoredFile = { name: string; lastModified: number };
+
+  type Listing = { values(): AsyncIterable<FileSystemHandle> };
+
   /** Byte storage, replaced by the tests. */
   export type Files = {
     /** Writes the whole stream; returns the number of bytes stored. */
@@ -28,6 +40,8 @@ namespace AT.modelstore {
     /** Reads one named part of a multi-file model. */
     readPart(id: string, name: string): Promise<Blob | null>;
     remove(id: string): Promise<void>;
+    /** Every file under the model directory, including a half-written one. */
+    list(): Promise<StoredFile[]>;
     estimate(): Promise<{ usage: number; quota: number; persisted: boolean }>;
     persist(): Promise<boolean>;
   };
@@ -264,13 +278,25 @@ namespace AT.modelstore {
 
   // ------------------------------------------------------------------ records
 
+  // The engine's `callHost` picks the host module by the installed model's
+  // kind without awaiting, so the store hands it a synchronous view of the
+  // records it holds; `list()` and `get()` refresh that view.
+  let known: ModelRecord[] = [];
+  L.bindRecordLookup((modelId: string) => known.find((record) => record.id === modelId) ?? null);
+
   export async function list(): Promise<ModelRecord[]> {
     const raw = await driver().all(S.metaStore);
-    return L.normalizeModels(raw);
+    known = L.normalizeModels(raw);
+    return known;
   }
 
   export async function get(id: string): Promise<ModelRecord | null> {
     const record = L.normalizeModel(await driver().get(S.metaStore, id));
+    if (record) {
+      const existing = known.findIndex((entry) => entry.id === record.id);
+      if (existing >= 0) known[existing] = record;
+      else known.push(record);
+    }
     return record;
   }
 
@@ -296,6 +322,19 @@ namespace AT.modelstore {
     await files().remove(id);
     await driver().remove(S.metaStore, id);
     return existing !== null;
+  }
+
+  export async function sweep(): Promise<{ removed: string[] }> {
+    const known = new Set((await list()).map((record) => record.id));
+    const now = deps.now();
+    const removed: string[] = [];
+    for (const entry of await files().list()) {
+      if (now - entry.lastModified < RECENT_WRITE_MS) continue;
+      if (!entry.name.endsWith(TMP_SUFFIX) && known.has(entry.name)) continue;
+      await files().remove(entry.name);
+      removed.push(entry.name);
+    }
+    return { removed };
   }
 
   export type IngestRequest = {
@@ -345,6 +384,47 @@ namespace AT.modelstore {
    * Streams a model into storage. Only a complete file is registered, so an
    * aborted or failed transfer never leaves a half model behind.
    */
+  /** Rewrites `tokenizer.ggml.model` from `plamo3` to `plamo2` in place: the
+   *  runtime registers no `plamo2`... it registers `plamo2` and not `plamo3`, so a
+   *  PLaMo GGUF needs the tag the loader knows. Same length, no copy. */
+  function tokenizerPatch(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+    let buffer = new Uint8Array(0);
+    let patched = false;
+    const reader = source.getReader();
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          if (buffer.length) controller.enqueue(buffer);
+          controller.close();
+          return;
+        }
+        const value = chunk.value as Uint8Array;
+        if (!patched && buffer.length + value.byteLength >= 4096) {
+          const head = new Uint8Array(buffer.length + value.byteLength);
+          head.set(buffer, 0);
+          head.set(value, buffer.length);
+          const { bytes, patched: did } = AT.plamo3.patchTokenizerTag(head);
+          patched = did;
+          controller.enqueue(bytes);
+          buffer = new Uint8Array(0);
+          return;
+        }
+        const merged = new Uint8Array(buffer.length + value.byteLength);
+        merged.set(buffer, 0);
+        merged.set(value, buffer.length);
+        buffer = merged;
+        if (buffer.length >= 4096) {
+          controller.enqueue(buffer);
+          buffer = new Uint8Array(0);
+        }
+      },
+      cancel(reason: unknown) {
+        return reader.cancel(reason);
+      }
+    });
+  }
+
   export async function ingest(request: IngestRequest): Promise<IngestResult> {
     const url = L.normalizeDownloadUrl(request.sourceUrl) ?? '';
     const name = typeof request.name === 'string' ? request.name.trim().slice(0, 120) : '';
@@ -352,12 +432,24 @@ namespace AT.modelstore {
     if (!name) return { ok: false, record: null, error: 'no-name', bytes: 0 };
 
     const id = L.makeModelId(name, url, deps.now());
+    // The tokenizer rewrite is the one thing that may change the bytes on their
+    // way to storage, and it happens only to the file that needs it.
+    const stream = L.isPlamo3File({ name, sourceUrl: url })
+      ? tokenizerPatch(request.stream)
+      : request.stream;
     let bytes = 0;
     try {
-      bytes = await files().write(id, request.stream);
+      bytes = await files().write(id, stream);
     } catch (error: unknown) {
       await files().remove(id);
       const rejection = error as { name?: string; message?: string };
+      // Nothing will read this stream now. Cancelling is what stops the rest of
+      // the file arriving over the network into a stream nobody wants.
+      try {
+        await request.stream?.cancel('the file was not stored');
+      } catch {
+        // A stream that died with the write has nothing left to cancel.
+      }
       return {
         ok: false,
         record: null,
@@ -442,7 +534,7 @@ namespace AT.modelstore {
     const fetchStream = async (url: string, expected: number | null): Promise<ReadableStream<Uint8Array> | null> => {
       let response: StreamResponse;
       try {
-        response = await doFetch(url, { headers: { Accept: 'application/octet-stream' }, signal: request.signal });
+        response = await doFetch(url, { headers: { Accept: 'application/octet-stream' }, signal: request.signal ?? null });
       } catch (error: unknown) {
         const rejection = error as { name?: string };
         throw new Error(rejection?.name === 'AbortError' ? 'cancelled' : 'network');
@@ -529,6 +621,18 @@ namespace AT.modelstore {
     return files().readPart(id, name);
   }
 
+  /** Deletes previous copies of the same file; answers the ids it retired. */
+  async function replaceExisting(record: ModelRecord): Promise<string[]> {
+    const records = await list();
+    const retired: string[] = [];
+    for (const existing of records) {
+      if (existing.name === record.name && existing.id !== record.id && (await remove(existing.id))) {
+        retired.push(existing.id);
+      }
+    }
+    return retired;
+  }
+
   export type DownloadRequest = {
     url: string;
     name?: string | undefined;
@@ -566,7 +670,7 @@ namespace AT.modelstore {
       };
     }
     if (!response.ok) {
-      const reason = response.status === 401 || response.status === 403 ? 'needs-token' : `http-${response.status}`;
+      const reason = `http-${response.status}`;
       return { ok: false, record: null, error: reason, bytes: 0 };
     }
     if (!response.body) return { ok: false, record: null, error: 'no-body', bytes: 0 };

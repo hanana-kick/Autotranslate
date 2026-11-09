@@ -1,7 +1,6 @@
-// The on-device host: every part that touches the inference runtime, written
-// without any assumption about where it runs. One instance, one queue, because
-// llama.cpp allows a single generation at a time and the model holds
-// gigabytes.
+// The on-device host: every part that touches MediaPipe, written without any
+// assumption about where it runs. One instance, one queue, because MediaPipe
+// allows a single generation at a time and the model holds gigabytes.
 //
 // Chrome's service worker cannot hold WebAssembly plus WebGPU, so the
 // background puts this module in an offscreen document and talks to it over
@@ -10,46 +9,40 @@
 // placements install a reporter for the status, so the rest of the extension
 // sees one shape.
 //
-// The runtime is @wllama/wllama: llama.cpp compiled to WASM, with the WebGPU
-// backend for the tensors. The model is a GGUF file read straight out of OPFS.
+// In a document, handle() supervises a dedicated worker. The worker loads the
+// SAME host, bundled runtime and OPFS model. Synchronous WASM never runs in the
+// extension UI renderer; deadlines and unload remain responsive outside it.
 // Load after lib/constants.js, lib/browser.js, lib/local.js and
-// lib/modelstore.js; the runtime module itself arrives at runtime.
+// lib/modelstore.js; the MediaPipe module itself arrives at runtime.
 namespace AT.localhost {
   const C = AT.C;
   const L = AT.local;
 
-  /** The members of @wllama/wllama this file touches. */
-  type WllamaInstance = {
-    loadModel(blobs: Blob[], params?: Record<string, unknown>): Promise<void>;
-    createChatCompletion(options: Record<string, unknown>): Promise<ChatResult>;
-    createCompletion(options: Record<string, unknown>): Promise<ChatResult>;
-    isModelLoaded(): boolean;
-    isSupportWebGPU(): boolean;
-    getChatTemplate(): string | null;
-    getLoadedContextInfo(): LoadedContext | undefined;
-    exit(): Promise<void>;
+  /** The members of @mediapipe/tasks-genai this file touches. */
+  type WasmFileset = { wasmLoaderPath: string; wasmBinaryPath: string };
+
+  type GenaiModule = {
+    FilesetResolver: { forGenAiTasks: (path: string) => Promise<WasmFileset> };
+    LlmInference: {
+      createFromOptions: (fileset: WasmFileset, options: Record<string, unknown>) => Promise<LlmInstance>;
+    };
   };
 
-  type WllamaModule = {
-    Wllama: new (paths: Record<string, string>, config?: Record<string, unknown>) => WllamaInstance;
-    LoggerWithoutDebug?: Record<string, unknown>;
-  };
-
-  type LoadedContext = { n_ctx?: number; n_ctx_train?: number };
-
-  /** What the completion API answers with. */
-  type ChatResult = {
-    choices?: {
-      text?: string | null;
-      finish_reason?: string | null;
-    }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  type LlmInstance = {
+    generateResponse: (prompt: string, listener?: (partial: string, done: boolean) => void) => Promise<string>;
+    /** The model's own tokenizer; the ground truth the chunker only estimates. */
+    sizeInTokens?: (query: string) => number | undefined;
+    cancelProcessing?: () => void;
+    /** The runtime's only disposer (`TaskRunner.close`); nothing else exists. */
+    close?: () => void;
+    isIdle?: boolean;
   };
 
   /** at/local-translate as the background sends it. */
   export type TranslateRequest = {
     modelId?: unknown;
     texts?: unknown;
+    source?: unknown;
     target?: unknown;
     maxTokens?: unknown;
     /** One line of page context, already rendered and bounded by the engine. */
@@ -57,29 +50,47 @@ namespace AT.localhost {
   };
 
   /** at/local-load and at/local-unload. */
-  type LoadRequest = { modelId?: unknown; target?: unknown; maxTokens?: unknown };
+  type LoadRequest = { modelId?: unknown; maxTokens?: unknown };
+
+  /** at/local-count: how many tokens the model's own tokenizer sees. */
+  type CountRequest = {
+    modelId?: unknown;
+    maxTokens?: unknown;
+    texts?: unknown;
+    source?: unknown;
+    target?: unknown;
+    context?: unknown;
+  };
+
+  /** The answer at/local-count gives: per-text counts and the instruction. */
+  export type TokenCounts = { counts: number[]; overhead: number };
 
   /** What one host call answers with; `callHost` adds `ok` around it. */
   export type HostReply = {
     status?: AT.local.LocalStatus;
     translations?: string[];
+    engine?: string;
+    counts?: number[];
+    overhead?: number;
   };
 
   /** Where the host is running, for the status the UI reads. */
   export type Placement = 'offscreen' | 'background';
 
-  /** The seam a test replaces: where the runtime's ES module comes from.
-   *  Production leaves it undefined and gets the vendored build; a suite hands
-   *  in an object shaped like it, whose `Wllama` never touches WASM. */
-  type Seams = {
-    loadModule?: (url: string) => Promise<unknown>;
+  let module: GenaiModule | null = null;
+  let fileset: WasmFileset | null = null;
+  let llm: LlmInstance | null = null;
+  type GpuDevice = { destroy: () => void };
+  type GpuAdapter = {
+    isFallbackAdapter?: boolean;
+    info?: { architecture?: string; description?: string };
+    features: { has: (feature: string) => boolean };
+    limits: { maxBufferSize: number; maxStorageBufferBindingSize: number; maxStorageBuffersPerShaderStage: number };
+    requestDevice: (options: Record<string, unknown>) => Promise<GpuDevice>;
   };
-
-  let seams: Seams = {};
-  let module: WllamaModule | null = null;
-  let llm: WllamaInstance | null = null;
+  let ownedDevice: GpuDevice | null = null;
   let loadedId: string | null = null;
-  let loadedContext = 0;
+  let loadedMaxTokens = 0;
   let loadedBytes = 0;
   let loadMs: number | null = null;
   let generations = 0;
@@ -102,8 +113,147 @@ namespace AT.localhost {
     lastError: null
   };
 
-  export function configure(patch: Seams): void {
-    seams = { ...seams, ...patch };
+  // The worker is a production isolation boundary, not a second inference engine.
+  // Unit tests of the native host execute without a document, just as the worker.
+  const documentHost = typeof document !== 'undefined';
+  let compute: Worker | null = null;
+  let workerEpoch = 0;
+  let nextRequestId = 0;
+  type Pending = {
+    id: number;
+    resolve: (reply: HostReply) => void;
+    reject: (error: Error) => void;
+    timer: ReturnType<typeof setTimeout> | null;
+    deadlinePhase?: string;
+    firstOutputTimer?: ReturnType<typeof setTimeout> | null;
+  };
+  let pending: Pending | null = null;
+
+  function workerError(reason: string, message: string): Error & { reason: string; code: string } {
+    return Object.assign(new Error(message), { reason, code: L.codeForReason(reason) });
+  }
+
+  function stopCompute(error = workerError('generation-failed', 'model operation cancelled'), invalidate = true): void {
+    const previous = compute;
+    compute = null;
+    if (invalidate) workerEpoch++;
+    const active = pending;
+    pending = null;
+    if (active?.timer) clearTimeout(active.timer);
+    if (active?.firstOutputTimer) clearTimeout(active.firstOutputTimer);
+    // terminate() does not wait for a blocked native generateResponse()/close().
+    previous?.terminate();
+    active?.reject(error);
+  }
+
+  function computeFailed(reason: string, detail: string): void {
+    const phase = state.phase;
+    // A cold warmup failure may be retried once by the request supervisor.
+    // Explicit unload and all ordinary inference failures still invalidate work.
+    stopCompute(workerError(reason, detail), !['warmup-timeout', 'generation-stalled'].includes(reason));
+    teardown('worker-failed');
+    state.state = 'error';
+    state.reason = reason;
+    state.lastError = detail.slice(0, 300);
+    state.phase = phase ?? null;
+    publish();
+  }
+
+  function armDeadline(): void {
+    if (!pending) return;
+    const phase = state.phase;
+    const key = `${phase ?? 'worker-start'}:${state.softwareRendering === true}`;
+    // A ready hardware graph must produce a first token within a bounded
+    // interval. Observe outside the worker: a blocked native call cannot run
+    // its own timer. Duplicate status messages must not extend this interval.
+    if (phase !== 'generate' || state.softwareRendering || (state.outputChars ?? 0) > 0) {
+      if (pending.firstOutputTimer) clearTimeout(pending.firstOutputTimer);
+      pending.firstOutputTimer = null;
+    } else if (!pending.firstOutputTimer) {
+      pending.firstOutputTimer = setTimeout(() => computeFailed('generation-stalled',
+        'native generation produced no output within ' + L.FIRST_OUTPUT_TIMEOUT_MS + ' ms; inference worker terminated'), L.FIRST_OUTPUT_TIMEOUT_MS);
+    }
+    // Progress/status updates must not renew the absolute deadline of a phase.
+    if (pending.deadlinePhase === key) return;
+    pending.deadlinePhase = key;
+    if (pending.timer) clearTimeout(pending.timer);
+    const generation = phase === 'generate' || phase === 'warmup';
+    const ms = generation ? generationTimeout() : L.MODEL_LOAD_TIMEOUT_MS;
+    pending.timer = setTimeout(() => computeFailed(
+      phase === 'warmup' ? 'warmup-timeout' : generation ? 'generation-timeout' : 'model-load-failed',
+      "native " + (phase ?? "worker-start") + " timed out after " + ms + " ms; inference worker terminated"
+    ), ms);
+  }
+
+  function workerCall(message: AT.Message): Promise<HostReply> {
+    if (!compute) {
+      if (typeof Worker === 'undefined') fail('runtime-load-failed', 'dedicated workers are unavailable');
+      const generationBase = generations;
+      const worker = new Worker(AT.getURL('inference-worker.js'), { name: 'autotranslate-inference' });
+      compute = worker;
+      worker.onmessage = (event: MessageEvent) => {
+        if (compute !== worker) return; // a terminated session cannot publish late replies
+        const data = event.data as { kind?: string; status?: AT.local.LocalStatus; id?: number;
+          reply?: HostReply; error?: { message?: string; reason?: string } };
+        if (data.kind === 'status' && data.status) {
+          const reported = L.normalizeStatus(data.status);
+          Object.assign(state, reported, { generations: generationBase + reported.generations });
+          loadedBytes = state.loadedBytes;
+          loadMs = state.loadMs;
+          generations = state.generations;
+          publish();
+          // Invalid streamed output can be reported while the native graph is
+          // still running. Its owner can terminate it without entering close().
+          if (state.reason === 'invalid-output' || state.reason === 'warmup-timeout') {
+            stopCompute(workerError(state.reason, state.lastError ?? 'invalid native session'), false);
+            return;
+          }
+          // Only the worker's real stage transitions renew the deadline. UI
+          // status polling never sends work to the compute queue.
+          armDeadline();
+          return;
+        }
+        if (data.kind !== 'reply' || !pending || data.id !== pending.id) return;
+        const active = pending;
+        pending = null;
+        if (active.timer) clearTimeout(active.timer);
+        if (active.firstOutputTimer) clearTimeout(active.firstOutputTimer);
+        if (data.error) active.reject(workerError(data.error.reason ?? 'generation-failed', data.error.message ?? 'worker failed'));
+        else active.resolve(data.reply ?? {});
+      };
+      worker.onerror = (event: ErrorEvent) => {
+        event.preventDefault();
+        if (compute === worker) computeFailed('runtime-load-failed', event.message || 'inference worker crashed');
+      };
+      worker.onmessageerror = () => {
+        if (compute === worker) computeFailed('runtime-load-failed', 'invalid inference worker response');
+      };
+    }
+    return new Promise<HostReply>((resolve, reject) => {
+      const id = ++nextRequestId;
+      pending = { id, resolve, reject, timer: null };
+      armDeadline();
+      try { compute!.postMessage({ id, placement: state.target, message }); }
+      catch (error) { computeFailed('runtime-load-failed', String((error as Error)?.message ?? error)); }
+    });
+  }
+
+  function generationTimeout(): number {
+    if (state.softwareRendering) return L.SOFTWARE_GENERATION_TIMEOUT_MS;
+    // The first generation also compiles/tunes kernels; it is startup work,
+    // not the steady-state inference deadline. Both remain strictly bounded.
+    return state.phase === 'warmup'
+      ? Math.max(L.MODEL_LOAD_TIMEOUT_MS, L.GENERATION_TIMEOUT_MS)
+      : L.GENERATION_TIMEOUT_MS;
+  }
+
+  function setPhase(phase: AT.local.ModelPhase | null): void {
+    if (phase === 'generate' || phase === 'warmup') {
+      state.outputChars = 0;
+      state.lastProgressAt = 0;
+    }
+    state.phase = phase;
+    publish();
   }
 
   /** The one thing a placement supplies: where a status change goes. */
@@ -146,33 +296,39 @@ namespace AT.localhost {
     if (!llm) return;
     idleTimer = setTimeout(() => {
       idleTimer = null;
-      void teardown('idle');
+      teardown('idle');
     }, L.IDLE_UNLOAD_MS);
   }
 
-  async function teardown(cause: string): Promise<void> {
+  function teardown(cause: string): void {
     if (idleTimer) {
       clearTimeout(idleTimer);
       idleTimer = null;
     }
-    const instance = llm;
-    llm = null;
-    loadedId = null;
-    loadedContext = 0;
-    loadedBytes = 0;
-    loadMs = null;
-    loading = null;
-    if (instance) {
+    if (llm) {
       try {
-        // `exit()` frees the WASM graph and the GPU buffers; without it the
-        // weights stay allocated and the next load stacks a second model on
-        // top of the first.
-        await instance.exit();
+        llm.cancelProcessing?.();
+      } catch {
+        // A dead runtime cannot cancel; nothing to recover.
+      }
+      try {
+        // `close()` frees the wasm graph; without it the weights stay allocated
+        // and the next load stacks a second model on top of the first.
+        llm.close?.();
       } catch {
         // A dead runtime has nothing left to free.
       }
     }
+    llm = null;
+    ownedDevice?.destroy();
+    ownedDevice = null;
+    loadedId = null;
+    loadedMaxTokens = 0;
+    loadedBytes = 0;
+    loadMs = null;
+    loading = null;
     state.state = 'unloaded';
+    state.phase = null;
     state.modelId = null;
     state.modelName = null;
     // A reason belongs to a state, not to the host: the next load starts with
@@ -182,14 +338,29 @@ namespace AT.localhost {
     publish();
   }
 
-  /** WebGPU is required: a gigabyte-class model decoding on CPU is not a usable
-   *  experience, and the user should learn that before downloading a model. */
+  /** WebGPU is required: a 4B int8 model on CPU is not a usable experience. */
   async function checkSupport(): Promise<void> {
     if (state.supported) return;
     const gpu = (globalThis.navigator as { gpu?: { requestAdapter?: () => Promise<unknown> } } | undefined)?.gpu;
     if (!gpu?.requestAdapter) fail('no-webgpu', 'WebGPU is not available');
-    const adapter = await gpu.requestAdapter();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let adapter: unknown;
+    try {
+      adapter = await Promise.race([
+        gpu.requestAdapter(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error('WebGPU adapter probe timed out')), L.GPU_PROBE_TIMEOUT_MS);
+        })
+      ]);
+    } catch (error: unknown) {
+      fail('no-webgpu', error);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (!adapter) fail('no-webgpu', 'no WebGPU adapter was found');
+    const actual = adapter as { isFallbackAdapter?: boolean; info?: { architecture?: string; description?: string } };
+    state.softwareRendering = actual.isFallbackAdapter === true ||
+      /swiftshader|llvmpipe|lavapipe/i.test(`${actual.info?.architecture ?? ''} ${actual.info?.description ?? ''}`);
     state.supported = true;
     state.reason = null;
     // A probe that failed once must not keep the host reporting an error for the
@@ -201,122 +372,110 @@ namespace AT.localhost {
     }
   }
 
-  async function loadRuntime(): Promise<WllamaModule> {
-    if (module) return module;
+  async function loadRuntime(): Promise<GenaiModule> {
+    if (module && fileset) return module;
     await checkSupport();
     let imported: unknown;
-    const url = AT.getURL(L.VENDOR.module);
     try {
+      const url = AT.getURL(L.VENDOR.bundle);
       // A static import cannot work here: the project compiles to classic
-      // scripts (`module: none`), while the vendored runtime is an ES module
-      // whose specifier is only known through runtime.getURL().
-      imported = seams.loadModule ? await seams.loadModule(url) : await import(url);
+      // scripts (`module: none`), while the vendored MediaPipe build is an ES
+      // module whose specifier is only known through runtime.getURL().
+      imported = await import(url);
     } catch (error: unknown) {
       fail('runtime-load-failed', error);
     }
-    const shape = imported as Partial<WllamaModule> | undefined;
-    if (typeof shape?.Wllama !== 'function') {
-      fail('runtime-load-failed', 'the bundled on-device runtime is incomplete');
+    const candidate = imported as Partial<GenaiModule> | undefined;
+    if (!candidate?.FilesetResolver?.forGenAiTasks || !candidate.LlmInference) {
+      fail('runtime-load-failed', 'the bundled MediaPipe module is incomplete');
     }
-    // The check above proves the one member this file constructs. The rest of
-    // the surface is declared structurally here because a classic script
-    // cannot import the package's own types.
-    module = shape as WllamaModule;
+    module = candidate as GenaiModule;
+    try {
+      fileset = await module.FilesetResolver.forGenAiTasks(AT.getURL(L.VENDOR.wasmDir));
+    } catch (error: unknown) {
+      module = null;
+      fail('runtime-load-failed', error);
+    }
     return module;
   }
 
-  function createInstance(): WllamaInstance {
-    const active = module as WllamaModule;
-    const paths = { default: AT.getURL(L.VENDOR.wasm) };
-    const config: Record<string, unknown> = { suppressNativeLog: true };
-    if (active.LoggerWithoutDebug) config.logger = active.LoggerWithoutDebug;
-    return new active.Wllama(paths, config);
+  /** First generation on a freshly loaded model is ~8x slower; pay it here. */
+  async function warmup(instance: LlmInstance): Promise<void> {
+    const answer = await boundedResponse(instance, L.wrapChatPrompt('Translate to Korean: Good morning.'), 'Good morning.');
+    if (!answer.trim()) throw new Error('model warmup returned an empty answer');
   }
 
-  /** First generation on a freshly loaded model is several times slower; pay
-   *  it here, in the language the page is about to be translated into. */
-  async function warmup(instance: WllamaInstance, target: string): Promise<void> {
-    const prompt = L.buildEnginePrompt(target, 'Good morning.');
-    try {
-      await generate(instance, prompt, L.SAMPLING, L.MIN_OUTPUT_TOKENS);
-    } catch (error: unknown) {
-      AT.warn('on-device warmup failed', error);
-    }
-  }
-
-  async function instantiate(record: AT.modelstore.ModelRecord, maxTokens: number): Promise<WllamaInstance> {
-    const instance = createInstance();
-    try {
-      const blob = await AT.modelstore.read(record.id);
-      if (!blob) fail('model-missing', `no stored file for model ${record.id}`);
-      const nCtx = L.contextTokens(maxTokens);
-      // The stored file is handed over as a Blob: a gigabyte of weights must not
-      // be copied into the JS heap, and reading it by URL would fetch it again.
-      // The chat template is pinned rather than taken from the converted file:
-      // the PFML3 prompt `AT.plamo3` builds is the prompt, byte for byte,
-      // because the jinja the file carries cannot be compiled by the runtime's
-      // template engine at all (`Unable to generate parser for this template`),
-      // and a template that cannot render must not stand between the model and
-      // the text it was asked about.
-      await instance.loadModel([blob as Blob], {
-        n_ctx: nCtx,
-        n_batch: Math.min(512, nCtx),
-        n_ubatch: Math.min(512, nCtx),
-        n_gpu_layers: -1,
-        // A browser extension page is not cross-origin isolated, so the
-        // multi-threaded build has no SharedArrayBuffer to work with.
-        n_threads: 1,
-        flash_attn: true,
-        chat_template: AT.plamo3.PASS_THROUGH_TEMPLATE
-      });
-      if (!instance.isModelLoaded()) fail('model-load-failed', `the runtime did not load ${record.name}`);
-      if (instance.isSupportWebGPU && !instance.isSupportWebGPU()) {
-        fail('no-webgpu', 'the runtime could not open a WebGPU device');
+  /** Software WebGPU uses portable kernels rather than GPU subgroup kernels.
+   * The SDK and model are unchanged; this is its public gpuOptions.device API. */
+  async function softwareGpuOptions(): Promise<Record<string, unknown>> {
+    if (!state.softwareRendering) return {};
+    const gpu = (globalThis.navigator as unknown as {
+      gpu: { requestAdapter: (options: Record<string, unknown>) => Promise<GpuAdapter | null> }
+    }).gpu;
+    const adapter = await gpu.requestAdapter({ powerPreference: 'high-performance' });
+    if (!adapter) fail('no-webgpu', 'the inference adapter is no longer available');
+    const software = adapter.isFallbackAdapter === true ||
+      /swiftshader|llvmpipe|lavapipe/i.test(
+        String(adapter.info?.architecture ?? '') + ' ' + String(adapter.info?.description ?? ''));
+    state.softwareRendering = software;
+    if (!software) return {}; // Keep the original SDK's hardware selection.
+    const requiredFeatures = adapter.features.has('shader-f16') ? ['shader-f16'] : [];
+    ownedDevice = await adapter.requestDevice({
+      requiredFeatures,
+      requiredLimits: {
+        maxBufferSize: adapter.limits.maxBufferSize,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+        maxStorageBuffersPerShaderStage: adapter.limits.maxStorageBuffersPerShaderStage
       }
-      const context = instance.getLoadedContextInfo?.();
-      loadedContext = Number(context?.n_ctx) > 0 ? Number(context?.n_ctx) : nCtx;
-      return instance;
-    } catch (error: unknown) {
-      // A runtime that failed halfway still holds its WASM heap and whatever the
-      // GPU backend mapped, and this is the only place holding the handle.
-      try {
-        await instance.exit();
-      } catch {
-        // A runtime that died during load has nothing left to free.
-      }
-      throw error;
-    }
+    });
+    AT.log('software WebGPU device enabled features', requiredFeatures);
+    return { gpuOptions: { device: ownedDevice, adapterInfo: adapter.info } };
   }
 
-  async function ensureLoaded(
-    modelId: string,
-    maxTokens: number,
-    target: string
-  ): Promise<WllamaInstance> {
-    if (llm && loadedId === modelId) {
-      // The same file is still in memory, and the language still has to be one
-      // it was released with, warm or not: a prompt would name a language it
-      // never learned.
-      requireTarget(target);
+  async function instantiate(record: AT.modelstore.ModelRecord, maxTokens: number): Promise<LlmInstance> {
+    const active = module as GenaiModule;
+    const assets = fileset as WasmFileset;
+    setPhase('model-read');
+    const blob = await AT.modelstore.read(record.id);
+    if (!blob) fail('model-missing', `no stored file for model ${record.id}`);
+    const options = (baseOptions: Record<string, unknown>): Record<string, unknown> => ({
+      baseOptions,
+      // maxTokens covers input plus output, so the chunker budgets both.
+      maxTokens: Math.max(L.MIN_MAX_TOKENS, Math.min(maxTokens, L.MAX_MAX_TOKENS)),
+      topK: 1,
+      // topK=1 already selects the single highest-ranked token. Keep the
+      // logit scaling finite instead of relying on a native zero-temperature
+      // special case; the locked SDK and greedy selection remain unchanged.
+      temperature: 1,
+      randomSeed: 42,
+      numResponses: 1
+    });
+    // The stored file is streamed into the runtime: a 3.6 GiB model must not
+    // be copied into the JS heap, and reading it by URL would fetch it again.
+    setPhase('model-create');
+    return await active.LlmInference.createFromOptions(
+      assets,
+      options({ modelAssetBuffer: blob.stream().getReader(), ...await softwareGpuOptions() })
+    );
+  }
+
+  async function ensureLoaded(modelId: string, maxTokens: number): Promise<void> {
+    const budget = Number.isFinite(maxTokens)
+      ? Math.max(L.MIN_MAX_TOKENS, Math.min(Math.round(maxTokens), L.MAX_MAX_TOKENS))
+      : L.DEFAULT_MAX_TOKENS;
+    if (llm && loadedId === modelId && loadedMaxTokens === budget) {
       touchIdleTimer();
-      return llm;
+      return;
     }
     if (loading) {
       await loading;
-      if (llm && loadedId === modelId) {
-        requireTarget(target);
-        return llm;
-      }
+      if (llm && loadedId === modelId && loadedMaxTokens === budget) return;
     }
     // Whether this browser can run a model at all is the more fundamental
     // answer, and reading the store first would mask it behind a store error.
     await checkSupport();
     const record = await AT.modelstore.get(modelId);
     if (!record) fail('model-missing', `model ${modelId} is not stored`);
-    // A target the installed model was not released with is a configuration
-    // problem, not a generation that might answer on a retry: the prompt would
-    // name a language the weights never learned.
-    requireTarget(target);
     state.state = 'loading';
     state.modelId = record.id;
     state.modelName = record.name;
@@ -324,12 +483,18 @@ namespace AT.localhost {
     publish();
     const started = Date.now();
     loading = (async () => {
+      setPhase('runtime');
       await loadRuntime();
-      if (llm) await teardown('switch');
-      const instance = await instantiate(record, maxTokens);
-      await warmup(instance, target);
+      if (llm) teardown('switch');
+      const instance = await instantiate(record as AT.modelstore.ModelRecord, budget);
+      // Own the instance before warming it, so a failed verification also frees
+      // its allocated weights. Readiness means inference succeeded, not just load.
       llm = instance;
+      setPhase('warmup');
+      await warmup(instance);
+      setPhase(null);
       loadedId = record.id;
+      loadedMaxTokens = budget;
       loadedBytes = record.size;
       loadMs = Date.now() - started;
       state.state = 'ready';
@@ -344,211 +509,139 @@ namespace AT.localhost {
       // Keep the specific reason the loader failed with: `model-load-failed`
       // would hide whether WebGPU, the runtime or the file was at fault.
       const reason = (error as { reason?: string })?.reason ?? 'model-load-failed';
-      await teardown('load-failed');
+      if (reason === 'invalid-output') fail(reason, error);
+      teardown('load-failed');
       fail(reason, error);
     } finally {
       loading = null;
     }
-    const ready = llm;
-    if (!ready) fail('model-load-failed', 'the runtime did not keep the model loaded');
     touchIdleTimer();
     publish();
-    return ready;
   }
 
-  /**
-   * One generation, bounded and cancellable: the abort signal reaches the
-   * runtime's own decode loop, so a timed-out generation is really over rather
-   * than left running while the next one queues behind it.
-   *
-   * PLaMo is asked as a raw completion: its PFML3 prompt is made of
-   * special-token elements that are the prompt itself, so anything that renders
-   * it - a chat template, a role - would corrupt it, and its two end tokens are
-   * special ids the sampler never emits on its own, which is why they go to the
-   * runtime as stop sequences.
-   */
-  async function generate(
-    instance: WllamaInstance,
-    prompt: string,
-    sampling: Record<string, unknown>,
-    maxTokens: number
-  ): Promise<string> {
-    const controller = new AbortController();
-    const { promise, resolve, reject } = Promise.withResolvers<ChatResult>();
-    const options: Record<string, unknown> = {
-      stream: false,
-      max_tokens: maxTokens,
-      cache_prompt: true,
-      abortSignal: controller.signal,
-      temp: sampling.temp,
-      top_p: sampling.topP,
-      top_k: sampling.topK,
-      penalty_repeat: sampling.repeatPenalty,
-      seed: sampling.seed
-    };
-    options.prompt = prompt;
-    options.stop = [...AT.plamo3.STOP_TOKENS];
-    const timer = setTimeout(() => {
-      // Aborting is what actually stops the decode loop; the timer only
-      // decides when a generation that stopped answering counts as lost.
-      controller.abort();
-      reject(new Error('generation timeout'));
-    }, L.GENERATION_TIMEOUT_MS);
-    const ask = instance.createCompletion(options);
-    ask.then(resolve, reject);
+  /** Tokens as the model's tokenizer counts them; the estimate only stands in
+   *  when the runtime exposes no tokenizer. */
+  function tokenCount(text: string): number {
+    const counted = llm?.sizeInTokens?.(text);
+    return typeof counted === 'number' && Number.isFinite(counted) && counted >= 0
+      ? Math.round(counted)
+      : L.estimateTokens(text);
+  }
+
+  /** Includes warmup: no generation may hold the queue without a deadline. */
+  function boundedResponse(instance: LlmInstance, prompt: string, source: string): Promise<string> {
+    // Idle eviction measures quiet time, never the duration of active native work.
+    if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return new Promise<string>((resolve, reject) => {
+      timer = setTimeout(() => reject(workerError(
+        state.phase === 'warmup' ? 'warmup-timeout' : 'generation-timeout',
+        state.phase === 'warmup' ? 'model warmup timeout' : 'generation timeout'
+      )), generationTimeout());
+      let lastPublished = 0, streamed = '';
+      instance.generateResponse(prompt, (partial, done) => {
+        // Only counts/timestamps cross the worker boundary, never page content.
+        if (partial) {
+          streamed += partial;
+          const issue = AT.outputIssue(source, streamed, true);
+          if (issue) {
+            const controls = [...new Set(streamed.match(/<(?:pad|bos|eos|start_of_turn|end_of_turn)>|<\|(?:endoftext|im_start|im_end)\|>/g) ?? [])];
+            const error = workerError('invalid-output', 'invalid model output: ' + issue +
+              (controls.length ? ' [' + controls.join(',') + ']' : ''));
+            state.state = 'error'; state.reason = 'invalid-output'; state.lastError = error.message;
+            publish(); reject(error); return;
+          }
+          state.outputChars = Math.min((state.outputChars ?? 0) + partial.length, 1_000_000);
+          state.lastProgressAt = Date.now();
+        }
+        if (done || Date.now() - lastPublished >= 1000) {
+          lastPublished = Date.now();
+          publish();
+        }
+      }).then((answer) => {
+        const issue = AT.outputIssue(source, answer);
+        if (issue) reject(workerError('invalid-output', 'invalid model output: ' + issue));
+        else resolve(answer);
+      }, reject);
+    }).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
+  }
+
+  /** A timed-out promise does not mean the native runtime has stopped. */
+  async function generate(prompt: string, source: string): Promise<string> {
+    const instance = llm;
+    if (!instance) fail('no-model', 'no model is loaded');
     try {
-      const result = await promise;
-      const choice = result?.choices?.[0];
-      const raw = choice?.text;
-      const reply = typeof raw === 'string' ? raw : '';
-      // The runtime counted the prompt with the model's own tokenizer; fold the
-      // measured/estimated ratio into the packer so the next chunk is planned
-      // against what this model really costs, not against the published prior.
-      const measured = Number(result?.usage?.prompt_tokens);
-      const estimated = L.rawEstimateTokens(prompt);
-      if (Number.isFinite(measured) && measured > 0 && estimated > 0) {
-        const ratio = measured / estimated;
-        L.setCalibration(state.calibration ? (state.calibration + ratio) / 2 : ratio);
-        state.calibration = L.calibrationValue();
-      }
+      setPhase('generate');
+      const reply = await boundedResponse(instance, prompt, source);
+      setPhase(null);
       generations += 1;
       touchIdleTimer();
       return reply;
     } catch (error: unknown) {
+      try {
+        instance.cancelProcessing?.();
+      } catch {
+        // cancellation is best-effort
+      }
       const message = String((error as { message?: unknown })?.message ?? error);
-      fail(message.toLowerCase().includes('timeout') ? 'generation-timeout' : 'generation-failed', error);
-    } finally {
-      clearTimeout(timer);
+      if ((error as { reason?: string }).reason === 'invalid-output') fail('invalid-output', error);
+      // Never reuse the possibly still-busy graph after rejection or timeout.
+      // The next queued request has to create a fresh, verified instance.
+      teardown('generation-failed');
+      fail(message.includes('timeout') ? 'generation-timeout' : 'generation-failed', error);
     }
-  }
-
-  /** Refuse a language the installed model has no code for. The settings page
-   *  offers en, ko and ja, every one of which PLaMo was released with, so this
-   *  is the last gate before a prompt names a language the weights never
-   *  learned; it answers as a configuration failure, not a generation to retry. */
-  function requireTarget(target: string): void {
-    if (AT.plamo3.langFor(target) === null) {
-      fail('no-target', `the installed model has no language for ${target || 'that target'}`);
-    }
-  }
-
-  /**
-   * Does this prompt fit the context the model was loaded with? The packer
-   * only estimates — one ratio cannot cover every script — so the finished
-   * prompt is measured against the same budget, leaving room for the answer.
-   */
-  function fits(prompt: string, texts: string[]): boolean {
-    const budget = loadedContext > 0 ? loadedContext : L.contextTokens(L.DEFAULT_MAX_TOKENS);
-    const used =
-      L.estimateTokens(prompt) + texts.reduce((sum, text) => sum + L.estimateTokens(text), 0);
-    return used <= budget;
-  }
-
-  /** The budget the loaded model was asked to hold, kept for the answer's own
-   *  share of that context. */
-  let lastMaxTokens = L.DEFAULT_MAX_TOKENS;
-
-  /**
-   * Text this long carries its own situation, so the card's background block
-   * buys nothing for it - and costs a whole second generation every time the
-   * model answers the framed ask by echoing that block back. A measured pass
-   * over a sixteen-node feed asked thirty generations for seventeen keys, which
-   * is the retry rather than the translation. So prose is asked plainly first
-   * and keeps the page line as the fallback; a short label, where `Save changes`
-   * and `Save` are the same two words without a page to sit on, keeps the frame
-   * first.
-   */
-  const SELF_SUFFICIENT_CHARS = 40;
-
-  /** Is this a usable answer to this text? Length and glyph runs catch the
-   *  collapse measured on the artifact - one generation in 800 came back as 972
-   *  characters of one syllable. `checkScript` catches the failure a length test
-   *  cannot see: handing the source back in its own script, a Japanese target
-   *  answered in Hangul, which is exactly as long as a real answer would be. It
-   *  tolerates Latin always, so a URL, a version number or a product name never
-   *  fails; what it can catch is a proper noun kept in the source's script, and
-   *  the price of that false positive is one more ask and, if it repeats, the
-   *  page's own text left where the reader can see it. */
-  function usable(answer: string, text: string, target: string): boolean {
-    if (!answer || L.isRunaway(answer, text)) return false;
-    const lang = AT.plamo3.langFor(target);
-    return lang === null || AT.plamo3.checkScript(answer, lang);
-  }
-
-  /**
-   * One text in one generation. Two ways this goes wrong on the real model: the
-   *  page line can swallow the answer, so the reply is the context and nothing
-   *  else, and once in the 800 measured generations the answer collapsed into
-   *  972 characters of one syllable. Either earns exactly one more ask - the
-   *  other prompt shape, and with `RETRY_SAMPLING`, because the seeded decoding
-   *  answers a repeat of the same request identically. An answer still unusable
-   *  after that comes back empty, which is how the caller is told to leave the
-   *  page's own text alone. Neither ask may spend more of the window than
-   *  `L.answerTokens` allows, so a model that misses its end token costs seconds
-   *  instead of the whole context.
-   */
-  async function translateOne(
-    instance: WllamaInstance,
-    target: string,
-    text: string,
-    hint: string | null
-  ): Promise<string> {
-    const plain = L.buildEnginePrompt(target, text);
-    const framed = hint === null ? plain : L.buildEnginePrompt(target, text, hint);
-    const leadIsPlain = hint === null || text.length >= SELF_SUFFICIENT_CHARS;
-    const lead = leadIsPlain ? plain : framed;
-    const answer = (
-      await generate(instance, lead, L.SAMPLING, L.answerTokens(text, lastMaxTokens, lead))
-    ).trim();
-    if (usable(answer, text, target)) return answer;
-    AT.log(
-      answer
-        ? 'on-device answer was unusable, asking once more'
-        : leadIsPlain
-          ? 'on-device answer was empty, asking again with the page line'
-          : 'on-device answer was only the page line, retrying without it',
-      text.slice(0, 40)
-    );
-    const follow = leadIsPlain ? framed : plain;
-    const retry = (
-      await generate(instance, follow, L.RETRY_SAMPLING, L.answerTokens(text, lastMaxTokens, follow))
-    ).trim();
-    return usable(retry, text, target) ? retry : '';
   }
 
   /** One generation for a group of texts, retreating to one text per
    *  generation when the numbered reply cannot be split back reliably. */
+  /**
+   * Does this prompt fit the context the model was created with? The chunker
+   * only estimates — one number cannot cover every script — so the finished
+   * prompt is measured with the model's own tokenizer, leaving room for the
+   * answer. When no tokenizer is exposed, the estimate is all there is.
+   */
+  function fits(prompt: string, texts: string[]): boolean {
+    const count = tokenCount(prompt);
+    const answer = texts.reduce((sum, text) => sum + L.estimateTokens(text), 0);
+    return count + answer <= loadedMaxTokens;
+  }
+
   async function translateChunk(
-    instance: WllamaInstance,
-    target: string,
+    source: AT.gemma.GemmaLang | null,
+    target: AT.gemma.GemmaLang,
     texts: string[],
     hint: string | null
   ): Promise<string[]> {
-    // A batch keeps the page line whatever the lengths: a navigation row is
-    // exactly where `Save changes` and `Save` are untranslatable without
-    // knowing what page they sit on, the card's background block is the shape
-    // the model reads as context rather than as text to translate, and the one
-    // generation is shared, so the echo risk is priced once per group rather
-    // than once per text. Text asked alone is priced by `translateOne`.
-    if (texts.length === 1) return [await translateOne(instance, target, texts[0] ?? '', hint)];
-    const batch = L.buildEngineBatch(target, texts, hint);
+    // Context only travels in the numbered batch prompt: measured, the
+    // single-text shape answers with the context line translated instead of the
+    // text, and the auto shape has no room for metadata at all.
+    const batch = state.softwareRendering && texts.length === 1
+  ? L.wrapChatPrompt('Translate ' + (source ? AT.gemma.nameOf(source) + ' (' + source + ')' : 'the text') + ' to ' + AT.gemma.nameOf(target) + ' (' + target + '). Output only the translation.\n\n' + texts[0])
+  : L.buildBatchPrompt(source, target, texts, texts.length > 1 ? hint : null);
     if (!fits(batch, texts)) {
+      if (texts.length === 1) {
+        fail('context-overflow', 'a single translation segment exceeds the model context budget; split it or raise the token limit');
+      }
       // Halve the batch and pay for a second generation rather than let the
       // model silently drop the end of the prompt.
       const middle = Math.ceil(texts.length / 2);
       AT.log('on-device prompt over the context, splitting', texts.length, middle);
-      const head = await translateChunk(instance, target, texts.slice(0, middle), hint);
-      const tail = await translateChunk(instance, target, texts.slice(middle), hint);
+      const head = await translateChunk(source, target, texts.slice(0, middle), hint);
+      const tail = await translateChunk(source, target, texts.slice(middle), hint);
       return [...head, ...tail];
     }
-    const reply = (
-      await generate(instance, batch, L.BATCH_SAMPLING, L.answerTokens(texts, lastMaxTokens, batch))
-    ).trim();
+    const reply = await generate(batch, texts.join('\n'));
+    if (texts.length === 1) return [reply.trim()];
     const parsed = L.parseNumbered(reply, texts.length);
-    if (parsed) return parsed.map((answer) => answer.trim());
+    if (parsed) return parsed;
     AT.warn('on-device split mismatch, retrying per text', texts.length);
     const out: string[] = [];
-    for (const text of texts) out.push(await translateOne(instance, target, text, hint));
+    for (const text of texts) {
+      const single = await translateChunk(source, target, [text], null);
+      out.push(single[0] ?? '');
+    }
     return out;
   }
 
@@ -564,13 +657,14 @@ namespace AT.localhost {
     return state;
   }
 
-  export async function load(modelId: string, maxTokens: number, target: string): Promise<AT.local.LocalStatus> {
-    await ensureLoaded(modelId, maxTokens, target);
+  export async function load(modelId: string, maxTokens: number): Promise<AT.local.LocalStatus> {
+    await ensureLoaded(modelId, maxTokens);
     return state;
   }
 
-  export async function unload(cause = 'requested'): Promise<AT.local.LocalStatus> {
-    await teardown(cause);
+  export function unload(cause = 'requested'): AT.local.LocalStatus {
+    if (documentHost) stopCompute();
+    teardown(cause);
     return state;
   }
 
@@ -582,29 +676,31 @@ namespace AT.localhost {
     const texts = Array.isArray(request.texts)
       ? request.texts.filter((text): text is string => typeof text === 'string')
       : [];
+    const askedSource = typeof request.source === 'string' ? request.source : '';
     const askedTarget = typeof request.target === 'string' ? request.target : '';
     const maxTokens = Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS;
     const hint = typeof request.context === 'string' ? request.context.slice(0, 200) : null;
-    if (texts.length === 0) return { translations: [] };
-    // The message boundary is untrusted: only a language the model was released
-    // with may reach a prompt, and a target outside that list is a configuration
-    // problem no retry answers.
-    if (AT.plamo3.langFor(askedTarget) === null) {
-      fail('no-target', `no model translates into ${askedTarget || 'that language'}`);
-    }
+    if (texts.length === 0) return { translations: [], engine: 'local' };
+    // The message boundary is untrusted: only a code from the model's own table
+    // may reach a prompt, and only a known one may claim to be the source.
+    if (!AT.gemma.isLang(askedTarget)) fail('no-target', `the model has no code for ${askedTarget || 'that target'}`);
     const target = askedTarget;
+    const source = AT.gemma.isLang(askedSource) ? askedSource : null;
     const modelId = typeof request.modelId === 'string' && request.modelId ? request.modelId : '';
     if (!modelId) fail('no-model', 'no model is selected');
 
     state.state = 'busy';
     publish();
     try {
-      lastMaxTokens = maxTokens;
-      const instance = await ensureLoaded(modelId, maxTokens, target);
-      const translations = await translateChunk(instance, target, texts, hint);
-      state.state = 'ready';
+      await ensureLoaded(modelId, maxTokens);
+      state.state = 'busy';
       publish();
-      return { translations };
+      const translations = await translateChunk(source, target, texts, hint);
+      state.state = 'ready';
+      state.reason = null;
+      state.lastError = null;
+      publish();
+      return { translations, engine: 'local' };
     } catch (error: unknown) {
       const reason = (error as { reason?: string })?.reason ?? 'generation-failed';
       fail(reason, error);
@@ -614,6 +710,33 @@ namespace AT.localhost {
   /** One entry point for both placements: the offscreen document's message
    *  handlers and the background's direct calls dispatch through here. */
   export async function handle(message: AT.Message): Promise<HostReply> {
+    if (documentHost) {
+      if (message.type === C.MSG.LOCAL_QUERY || message.type === C.MSG.LOCAL_STATUS) return { status: await status() };
+      // Control-plane cancellation must never queue behind native computation.
+      if (message.type === C.MSG.LOCAL_UNLOAD) return { status: unload('requested') };
+      if (![C.MSG.LOCAL_TRANSLATE, C.MSG.LOCAL_LOAD, C.MSG.LOCAL_COUNT].includes(message.type)) return {};
+      const epoch = workerEpoch;
+      return enqueue(async () => {
+        if (epoch !== workerEpoch) throw workerError('generation-failed', 'obsolete worker session');
+        await checkSupport();
+        try {
+          return await workerCall(message);
+        } catch (error) {
+          const reason = (error as { reason?: string }).reason;
+          if (!['invalid-output', 'warmup-timeout', 'generation-stalled'].includes(reason ?? '') || epoch !== workerEpoch) throw error;
+          // Exactly one recovery per request, shared by corrupt output and cold
+          // warmup failure or missing first output. Ordinary total-generation
+          // timeouts are final; no request can recover more than once.
+          // The model, SDK, prompt and GPU policy remain unchanged.
+          stopCompute(workerError(reason!, 'discard failed native session'), false);
+          teardown('native-session-retry');
+          state.recoveries = (state.recoveries ?? 0) + 1;
+          publish();
+          AT.warn('native session failed; retrying once with a fresh inference worker', reason);
+          return await workerCall(message);
+        }
+      });
+    }
     switch (message?.type) {
       case C.MSG.LOCAL_TRANSLATE:
         return await translate(message as TranslateRequest);
@@ -621,25 +744,38 @@ namespace AT.localhost {
         const request = message as LoadRequest;
         const modelId = typeof request.modelId === 'string' ? request.modelId : '';
         if (!modelId) fail('no-model', 'no model is selected');
-        // Korean is the warmup language when the caller names none it can use.
-        const askedTarget =
-          typeof request.target === 'string' && AT.plamo3.langFor(request.target) !== null
-            ? request.target
-            : 'ko';
-        return {
-          status: await enqueue(() =>
-            load(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS, askedTarget)
-          )
-        };
+        return { status: await enqueue(() => load(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS)) };
       }
       case C.MSG.LOCAL_UNLOAD:
-        await enqueue(() => Promise.resolve());
-        return { status: await unload('requested') };
+        return await enqueue(async () => ({ status: unload('requested') }));
+      case C.MSG.LOCAL_COUNT: {
+        // Counting uses the same tokenizer as generation, so it queues like one.
+        const request = message as CountRequest;
+        return await enqueue(() => countNow(request));
+      }
       case C.MSG.LOCAL_QUERY:
       case C.MSG.LOCAL_STATUS:
         return { status: await status() };
       default:
         return {};
     }
+  }
+
+  async function countNow(request: CountRequest): Promise<HostReply> {
+    const modelId = typeof request.modelId === 'string' ? request.modelId : '';
+    if (!modelId) fail('no-model', 'no model is selected');
+    const texts = Array.isArray(request.texts)
+      ? request.texts.filter((text): text is string => typeof text === 'string').slice(0, 200)
+      : [];
+    // Counting needs the tokenizer, and the tokenizer arrives with the model.
+    await ensureLoaded(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS);
+    const target = AT.gemma.isLang(request.target) ? request.target : 'en';
+    const source = AT.gemma.isLang(request.source) ? request.source : null;
+    // The measured cost of the instruction without any text, for packing.
+    const empty = source ? L.buildTranslatePrompt(source, target, '') : L.buildAutoPrompt(target, '');
+    setPhase('count');
+    const result = { counts: texts.map((text) => tokenCount(text)), overhead: tokenCount(empty) };
+    setPhase(null);
+    return result;
   }
 }

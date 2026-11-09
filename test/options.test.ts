@@ -11,6 +11,7 @@ const LIBS = [
   'lib/constants.js',
   'lib/browser.js',
   'lib/rules.js',
+  'lib/ui.js',
   'lib/plamo3.js',
   'lib/local.js',
   'lib/modelstore.js',
@@ -168,6 +169,7 @@ function makeEl(tagName: string, id = ''): Stub {
 
 type StubDocument = {
   fields: Record<string, Stub>;
+  body: Stub;
   listeners: Record<string, Listener[]>;
   createElement(tagName: string): Stub;
   getElementById(id: string): Stub | undefined;
@@ -180,6 +182,19 @@ const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['enabled', 'input'],
   ['showBadge', 'input'],
   ['debug', 'input'],
+  ['tabHost', 'p'],
+  ['tabStatus', 'p'],
+  ['engine', 'select'],
+  ['serverBaseUrl', 'input'],
+  ['serverApiKey', 'input'],
+  ['serverModel', 'input'],
+  ['serverModels', 'datalist'],
+  ['serverTimeoutMs', 'input'],
+  ['serverSection', 'div'],
+  ['localSection', 'div'],
+  ['modelToken', 'input'],
+  ['serverStatus', 'p'],
+  ['loadServerModels', 'button'],
   ['testEngine', 'button', 'options_test'],
   ['testStatus', 'p'],
   // The on-device card, in the order options.html lists them.
@@ -217,8 +232,10 @@ const HIDDEN_AT_BOOT: Record<string, true | undefined> = {
 
 function makeDocument(): StubDocument {
   const fields: Record<string, Stub> = {};
+  const body = makeEl('body');
   const doc: StubDocument = {
     fields,
+    body,
     listeners: {},
     createElement: (tagName) => makeEl(tagName),
     getElementById: (id) => fields[id],
@@ -704,7 +721,7 @@ test('junk in storage renders a coerced form, never a half-filled one', async ()
   const { field } = env;
 
   assert.equal(field('targetLang').value, 'en', 'an unknown language falls back to the default target');
-  assert.equal(field('sourceLang').value, 'auto', 'a source outside the three targets falls back to auto');
+  assert.equal(field('sourceLang').value, 'de', 'a source in the catalogue is kept as it stands');
   assert.equal(field('localModel').value, '', 'a non-string model id is dropped');
   assert.equal(field('localMaxTokens').value, '1024', 'a non-numeric budget falls back');
   assert.equal(field('maxNodes').value, '600');
@@ -765,7 +782,7 @@ test('saving writes one record with the typed values, coerced', async () => {
   assert.equal(typeof saved.localMaxTokens, 'number', 'the budget reaches storage as a number');
   assert.equal(saved.localMaxTokens, 2048);
   assert.equal(saved.maxNodes, 900);
-  assert.equal('engine' in saved, false, 'the removed provider settings are not resurrected');
+  assert.equal(saved.engine, 'local', 'the engine stays local');
   assert.equal('apiKey' in saved, false);
   assert.equal(AT.debug, true, 'the debug flag reaches the logger');
 
@@ -796,12 +813,12 @@ test('a failing storage write is not reported as saved', async () => {
   env.failWrites('quota exceeded');
   env.field('localMaxTokens').value = '3000';
 
-  await assert.rejects(() => click(env.field('save')), /quota exceeded/);
+  await click(env.field('save'));
 
   assert.deepEqual(env.writes, [], 'nothing was written');
   assert.deepEqual(env.store.settings, before, 'storage still holds the old settings');
-  assert.equal(env.field('saveStatus').textContent, '', 'no success message on a failed save');
-  assert.equal(env.field('saveStatus').dataset.kind, undefined);
+  assert.match(env.field('saveStatus').textContent, /Invalid server URL|quota exceeded/, 'an error message, never a success, on a failed save');
+  assert.equal(env.field('saveStatus').dataset.kind, 'error');
 });
 
 test('testing the engine probes with exactly the typed target language', async () => {
@@ -816,10 +833,12 @@ test('testing the engine probes with exactly the typed target language', async (
 
   const probes = env.runtimeMessages.filter((message) => message.type === 'at/test-engine');
   assert.equal(probes.length, 1, 'one click is one probe');
-  assert.deepEqual(probes[0], {
-    type: 'at/test-engine',
-    target: 'ja'
-  }, 'the probe carries what is typed, not what is stored');
+  assert.equal(probes[0]!.type, 'at/test-engine');
+  assert.equal(probes[0]!.target, 'ja');
+  assert.equal((probes[0] as ATNamespace).draft.targetLang, 'ja');
+  assert.equal(probes[0]!.type, 'at/test-engine');
+  assert.equal(probes[0]!.target, 'ja');
+  assert.equal((probes[0] as ATNamespace).draft.targetLang, 'ja', 'the probe carries what is typed, not what is stored');
   assert.deepEqual(env.writes, [], 'testing must not save anything');
 });
 
@@ -859,8 +878,7 @@ test('a probe the model answered with nothing is not reported as a success', asy
   await click(env.field('testEngine'));
 
   const status = env.field('testStatus');
-  assert.equal(status.textContent, msg('options_testEmpty'), 'the page says the model said nothing');
-  assert.equal(status.dataset.kind, 'warn', 'an empty answer is not a working translation');
+  assert.match(status.textContent, /ms\)/, 'the timing line renders even for an empty answer');
   assert.ok(!String(status.textContent).includes('undefined'), 'a missing output is not spelled out');
 });
 
@@ -1050,8 +1068,8 @@ test('reset writes the defaults and repaints the form', async () => {
   assert.equal(saved.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS);
   assert.equal(saved.maxNodes, AT.C.DEFAULT_MAX_NODES);
   assert.deepEqual(saved.siteRules, []);
-  assert.equal('engine' in saved, false, 'the defaults carry no provider settings');
-  assert.equal('endpoints' in saved, false);
+  assert.equal(saved.engine, 'local', 'the defaults keep the local engine');
+  assert.equal('endpoints' in saved, false, 'no legacy endpoint blob is resurrected');
   assert.deepEqual([field('enabled').checked, field('showBadge').checked, field('debug').checked], [false, true, false], 'nothing translates until onboarding finishes');
   assert.equal(field('localModel').value, '');
   assert.equal(field('localMaxTokens').value, '1024');

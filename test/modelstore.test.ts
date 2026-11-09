@@ -259,8 +259,11 @@ test('re-downloading the same file name replaces the older copy', async () => {
   active.clock.now += 1000;
   const second = await modelstore.ingest({ name: 'same.task', sourceUrl: 'https://b.test/same.task', stream: streamOf(...big()) });
   assert.notEqual(first.record.id, second.record.id);
-  const list = await modelstore.list();
-  assert.deepEqual(list.map((model: { id: string }) => model.id), [second.record.id]);
+  const staged = await modelstore.list();
+  assert.equal(staged.length, 2, 'file validation is not inference verification');
+  assert.equal(active.stored.has(first.record.id), true);
+  assert.deepEqual(await modelstore.retireReplaced(second.record.id, first.record.id), [first.record.id]);
+  assert.deepEqual((await modelstore.list()).map((model: { id: string }) => model.id), [second.record.id]);
   assert.equal(active.stored.has(first.record.id), false);
 });
 

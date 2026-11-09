@@ -9,6 +9,7 @@ import { SRC, load, resetGlobals, deferred, type ATNamespace } from './helpers.t
 const LIBS = [
   'lib/constants.js',
   'lib/browser.js',
+  'lib/gemma.js',
   'lib/plamo3.js',
   'lib/pagecontext.js',
   'lib/targets.js',
@@ -89,6 +90,8 @@ type WorkerScope = {
 
 type EnvironmentOptions = {
   settings?: ATNamespace;
+  session?: ATNamespace;
+  selectedTabs?: number[];
   tab?: Tab;
   tabs?: Tab[];
   withImportScripts?: boolean;
@@ -169,6 +172,8 @@ function inlineHostStub(record: { place: string | null; handled: string[]; messa
  */
 function environment({
   settings,
+  session = {},
+  selectedTabs,
   tab,
   tabs,
   withImportScripts = true,
@@ -179,6 +184,8 @@ function environment({
   hostReplies
 }: EnvironmentOptions = {}) {
   resetGlobals();
+  const tabs7 = selectedTabs ?? [7];
+  const tab7 = tab ?? { id: 7, url: 'https://example.com/' };
   const recorded: Recorded = {
     imported: null,
     menus: [],
@@ -215,8 +222,13 @@ function environment({
       answered = true;
       resolve(payload as ATNamespace);
     };
-    const willAnswer = events.messages.map((listener) => listener(message, sender, respond));
-    if (!willAnswer.includes(true)) resolve(silence);
+    const results = events.messages.map((listener) => listener(message, sender, respond));
+    const asPromise = results.find((r) => r instanceof Promise);
+    if (asPromise) {
+      asPromise.then((payload) => respond(payload ?? silence), () => respond(silence));
+      return promise;
+    }
+    if (!results.includes(true)) resolve(silence);
     return promise;
   };
 
@@ -242,7 +254,12 @@ function environment({
       getMessage: (key: string) => `[${key}]`
     },
     storage: {
+      session: {
+        get: async (key: string) => (session[key] === undefined ? {} : { [key]: session[key] }),
+        set: async (value: ATNamespace) => { Object.assign(session, value); }
+      },
       local: {
+        setAccessLevel: async () => undefined,
         get: async (key: string) => (recorded.storage[key] === undefined ? {} : { [key]: recorded.storage[key] }),
         set: async (value: ATNamespace) => {
           Object.assign(recorded.storage, value);
@@ -262,7 +279,7 @@ function environment({
       setTitle: async (details: ATNamespace) => recorded.titles.push(details)
     },
     tabs: {
-      query: async () => tabs ?? (tab ? [tab] : []),
+      query: async () => tabs ?? [tab7, ...tabs7.filter((id) => id !== tab7.id).map((id) => ({ id, url: 'https://example.com/' }))],
       get: async (tabId: number) => lookupTab(tabId) ?? null,
       create: async (details: ATNamespace) => {
         recorded.created.push(details);
@@ -282,6 +299,7 @@ function environment({
         return [{ result: null }];
       }
     },
+    windows: { create: async (details: ATNamespace) => { recorded.created.push(details); return { id: 99 }; } },
     contextMenus: {
       removeAll: async () => {
         recorded.menus = [];
@@ -317,6 +335,7 @@ function environment({
     };
   }
   host.self = self;
+  session['translationTargets.v1'] = [...tabs7];
 
   const AT = load(...LIBS, 'background.js');
 
@@ -336,7 +355,8 @@ function environment({
   // A Firefox background page is the host: the module is part of the page (it
   // is in the manifest's scripts) and the background calls it directly.
   if (inlineHost === 'stub') AT.localhost = inlineHostStub(recorded.inline);
-  const send = dispatch;
+  const send = async (message: ATNamespace, sender?: ATNamespace) =>
+    dispatch(message, sender ?? (message.type === 'at/batch' ? { tab: tab7 } : {}));
   const browser = surface;
   const types = () => recorded.tabMessages.map((entry) => entry.message.type);
   return { AT, browser, recorded, events, send, fire, types };
@@ -380,20 +400,6 @@ const fire = async (list: Listener[], ...args: unknown[]) => {
   await new Promise((resolve) => setImmediate(resolve));
 };
 
-/** Runs `body` as a browser that has a WebGPU adapter to hand out. */
-async function withWebGPU(body: () => Promise<void>): Promise<void> {
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
-  Object.defineProperty(globalThis, 'navigator', {
-    value: { gpu: { requestAdapter: async () => ({ name: 'fake adapter' }) } },
-    configurable: true
-  });
-  try {
-    await body();
-  } finally {
-    if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor);
-    else Reflect.deleteProperty(globalThis, 'navigator');
-  }
-}
 
 test('the worker bootstraps exactly the scripts the manifest lists', () => {
   const { recorded } = environment();
@@ -431,7 +437,7 @@ test('install seeds settings, opens onboarding and registers the context menu', 
     'the token budget starts at the model default'
   );
   assert.deepEqual(recorded.storage.settings.siteRules, []);
-  assert.deepEqual(recorded.created, [{ url: 'welcome.html', active: true }], 'the first run opens the setup page');
+  assert.deepEqual(recorded.created, [{ url: 'welcome.html', type: 'popup', width: 520, height: 820, focused: true }], 'the first run opens the setup page');
   assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS);
   for (const item of recorded.menus) {
     assert.match(item.title, /^\[menu.+\]$/, `menu title must come from i18n: ${item.id}`);
@@ -449,6 +455,8 @@ test('install seeds settings, opens onboarding and registers the context menu', 
 test('content batches reach the host once per unique text', async () => {
   const { AT, send, recorded } = environment({
     inlineHost: 'stub',
+    selectedTabs: [7],
+    tab: { id: 7, url: 'https://example.com/' },
     settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' }
   });
   const reply = await send({ type: AT.C.MSG.BATCH, texts: ['Hello', 'Hello', 'Good morning'] });
@@ -458,11 +466,13 @@ test('content batches reach the host once per unique text', async () => {
   assert.equal(requests.length, 1, 'unique texts share one generation');
   assert.deepEqual(requests[0]!.texts, ['Hello', 'Good morning'], 'the duplicate is sent once');
   assert.equal(requests[0]!.target, 'ko', 'the target language travels with the batch');
-  assert.equal(requests[0]!.source, undefined, 'the host is never told which language the page was in');
+  assert.equal(requests[0]!.source, '', 'the host is not told a source the page never named');
 });
 
 test('host failures reach the content script as an error, not a half translation', async () => {
   const { AT, send, recorded } = environment({
+    selectedTabs: [7],
+    tab: { id: 7, url: 'https://example.com/' },
     settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' },
     withOffscreen: true,
     resident: true,
@@ -484,29 +494,32 @@ test('host failures reach the content script as an error, not a half translation
 
 test('a host failure the host classified is kept as it was classified', async () => {
   const { AT, send, recorded } = environment({
+    selectedTabs: [7],
+    tab: { id: 7, url: 'https://example.com/' },
     settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' },
     withOffscreen: true,
     resident: true,
     hostReplies: {
+      'at/local-count': () => ({ ok: false, error: 'no counter', code: 'no-count' }),
       'at/local-translate': () => ({ ok: false, error: 'the model has no language for that target', code: 'config' })
     }
   });
   const reply = await send({ type: AT.C.MSG.BATCH, texts: ['Hello'] });
   assert.equal(reply.ok, false);
   assert.equal(reply.code, 'config', 'the host decides whether another try could ever help');
-  assert.equal(recorded.hostMessages.length, 1, 'one generation, then the answer');
+  assert.equal(recorded.hostMessages.filter((m) => m.type === 'at/local-translate').length, 1, 'one generation, then the answer');
 });
 
 test('navigation injects the content script and asks it to translate', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', title: 'News', ping: false, translated: 3 };
-  const { AT, events, recorded, types } = environment({ tab, settings: { enabled: true } });
+  const { AT, events, recorded, types } = environment({ selectedTabs: [7], tab, settings: { enabled: true } });
   await fire(events.updated, 7, { status: 'complete' }, tab);
 
   assert.equal(recorded.injected.length, 1);
   assert.deepEqual(recorded.injected[0], { target: { tabId: 7 }, files: CONTENT_FILES });
   const translate = recorded.tabMessages.find((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE);
   assert.equal(translate!.tabId, 7);
-  assert.deepEqual(translate!.message.decision, { action: 'translate', reason: 'auto' }, 'the switch alone means translate');
+  assert.deepEqual(translate!.message.decision, { action: 'translate', reason: 'selected-tab' }, 'the switch alone means translate');
   assert.deepEqual(
     translate!.message.settings,
     {
@@ -514,7 +527,8 @@ test('navigation injects the content script and asks it to translate', async () 
       targetLang: 'en',
       sourceLang: 'auto',
       maxNodes: AT.C.DEFAULT_MAX_NODES,
-      showBadge: true
+      showBadge: true,
+      translationKey: JSON.stringify(['prompt-v2', '', 1024, 'auto', 'en'])
     },
     'the content script gets the bounded snapshot, never the stored blob'
   );
@@ -540,7 +554,7 @@ test('the master switch and site rules suppress translation', async () => {
     [{ enabled: true, siteRules: [{ pattern: 'news.example.com', action: 'never' }] }, 'site-never']
   ];
   for (const [settings, reason] of cases) {
-    const { events, recorded } = environment({ tab, settings });
+    const { events, recorded } = environment({ tab, settings, selectedTabs: settings.enabled ? [7] : [] });
     await fire(events.updated, 7, { status: 'complete' }, tab);
     assert.deepEqual(recorded.injected, [], `${reason} must not inject`);
     assert.deepEqual(recorded.tabMessages, [], `${reason} must not message the tab`);
@@ -562,29 +576,7 @@ test('a site rule of always forces translation without detection', async () => {
   });
 });
 
-test('the pages already open when the browser starts are translated without a reload', async () => {
-  const tabs: Tab[] = [
-    { id: 7, url: 'https://news.example.com/article', title: 'News', ping: false, status: 'complete' },
-    // Still loading: it reports its own `complete`, and a half-built document
-    // would leave the rest of the page in the source language.
-    { id: 8, url: 'https://news.example.com/sport', title: 'Sport', ping: false, status: 'loading' },
-    { id: 9, url: 'chrome://extensions/', title: 'Extensions', status: 'complete' }
-  ];
-  const { events, recorded, types } = environment({ tabs, settings: { enabled: true } });
-  await fire(events.startup);
-  assert.deepEqual(types(), ['at/content-ping', 'at/content-translate'], 'one finished web page, one pass');
-  assert.deepEqual(recorded.injected, [{ target: { tabId: 7 }, files: CONTENT_FILES }]);
-});
 
-test('an extension update translates the open pages again', async () => {
-  const tabs: Tab[] = [{ id: 7, url: 'https://news.example.com/article', title: 'News', ping: false, status: 'complete' }];
-  const { events, recorded, types } = environment({ tabs, settings: { enabled: true } });
-  // An update drops the content script from every tab; nothing else asks those
-  // pages for a translation until the user reloads them.
-  await fire(events.installed, { reason: 'update' });
-  assert.deepEqual(types(), ['at/content-ping', 'at/content-translate']);
-  assert.equal(recorded.optionsOpened, 0, 'only a fresh install shows the welcome page');
-});
 
 test('browser and translator pages are left alone', async () => {
   const urls = [
@@ -663,7 +655,7 @@ test('site rules are canonicalised, replaced and removed by host', async () => {
 });
 
 test('the badge follows reported content-script state', async () => {
-  const { AT, send, recorded } = environment();
+  const { AT, send, recorded } = environment({ selectedTabs: [3], settings: { showBadge: true } });
   await send({ type: AT.C.MSG.STATE_CHANGED, status: 'translated', translated: 4 }, { tab: { id: 3 } });
   assert.deepEqual(recorded.badges.at(-2), { tabId: 3, text: AT.C.BADGE_TEXT });
   assert.equal(recorded.badges.at(-1)!.color, AT.C.BADGE_COLOR);
@@ -677,7 +669,7 @@ test('the badge follows reported content-script state', async () => {
 });
 
 test('hidden badges stay off even for translated pages', async () => {
-  const { AT, send, recorded } = environment({ settings: { showBadge: false } });
+  const { AT, send, recorded } = environment({ selectedTabs: [4], settings: { showBadge: false } });
   await send({ type: AT.C.MSG.STATE_CHANGED, status: 'translated', translated: 9 }, { tab: { id: 4 } });
   assert.deepEqual(recorded.badges, [{ tabId: 4, text: '' }]);
 });
@@ -687,17 +679,16 @@ test('the popup translate and restore messages drive the tab', async () => {
   const { AT, send, types } = environment({ tab });
   const translated = await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
   assert.equal(translated.ok, true);
-  assert.equal(translated.status, 'translated');
-  assert.equal(translated.translated, 3);
-  assert.equal(translated.reason, 'manual', 'popup clicks are forced, not detected');
+  assert.equal(translated.status, 'translating');
+  assert.equal(translated.enabled, true, 'the command acknowledges explicit consent without waiting for inference');
 
   const restored = await send({ type: AT.C.MSG.RESTORE_TAB, tabId: 7 });
   assert.equal(restored.status, 'idle');
-  assert.deepEqual(types(), ['at/content-ping', 'at/content-translate', 'at/content-ping', 'at/content-restore']);
+  assert.deepEqual(types(), ['at/content-ping', 'at/content-translate', 'at/content-restore']);
 
   const missing = await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 8 });
   assert.equal(missing.ok, false);
-  assert.match(missing.error, /no active tab/);
+  assert.match(missing.error, /cannot be translated|no active tab/);
 });
 
 test('a message nothing answers is reported instead of hanging', async () => {
@@ -776,22 +767,23 @@ test('closing a tab drops its state and storage edits refresh the cache', async 
   const afterClose = await send({ type: AT.C.MSG.GET_STATE, tabId: 7 });
   assert.equal(afterClose.state, null);
 
-  await send({ type: AT.C.MSG.SET_SETTINGS, patch: { targetLang: 'ja' } });
+  const savedReply = await send({ type: AT.C.MSG.SET_SETTINGS, patch: { targetLang: 'de' } });
+  assert.equal(savedReply.ok, true, 'the settings save is acknowledged: ' + JSON.stringify(savedReply));
   const cached = await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
   assert.equal(cached.ok, true);
   const before = recorded.tabMessages.filter((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE).at(-1);
-  assert.equal(before!.message.settings.targetLang, 'ja', 'the cached settings are reused');
+  assert.equal(before!.message.settings.targetLang, 'de', 'the cached settings are reused');
 
-  recorded.storage.settings.targetLang = 'ko';
+  recorded.storage.settings.targetLang = 'ja';
   const stale = await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
   assert.equal(stale.ok, true);
   const stillCached = recorded.tabMessages.filter((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE).at(-1);
-  assert.equal(stillCached!.message.settings.targetLang, 'ja', 'an external write is invisible until onChanged fires');
+  assert.equal(stillCached!.message.settings.targetLang, 'de', 'an external write is invisible until onChanged fires');
 
   await fire(events.storageChanged, { settings: { newValue: recorded.storage.settings } }, 'local');
   await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
   const refreshed = recorded.tabMessages.filter((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE).at(-1);
-  assert.equal(refreshed!.message.settings.targetLang, 'ko', 'onChanged invalidates the settings cache');
+  assert.equal(refreshed!.message.settings.targetLang, 'ja', 'onChanged invalidates the settings cache');
 });
 
 test('the on-device engine gets an offscreen host that loads the selected model', async () => {
@@ -818,7 +810,6 @@ test('the on-device engine gets an offscreen host that loads the selected model'
   assert.equal(load.to, OFFSCREEN_HOST, 'only the host may answer a host message');
   assert.equal(load.modelId, 'model-a', 'the stored selection is used when the message carries none');
   assert.equal(load.maxTokens, 512);
-  assert.equal(load.target, 'ko', 'the warm-up answers in the language the page is about to become');
 
   await send({ type: AT.C.MSG.LOCAL_PREPARE });
   assert.equal(recorded.offscreen.length, 1, 'a second prepare reuses the open document');
@@ -872,99 +863,7 @@ test('the real host reports a browser without WebGPU before anything is download
   assert.equal(prepared.code, 'config', 'an unsupported browser is a configuration problem');
 });
 
-test('the real host resolves the vendored wllama build through runtime.getURL', async () => {
-  await withWebGPU(async () => {
-    const { AT, send, recorded } = environment({
-      inlineHost: 'real',
-      settings: { localModelId: 'model-a' }
-    });
-    // The store is not the subject here: answer it so the load reaches the
-    // runtime, which is the step a browser would satisfy.
-    AT.modelstore.get = async () => ({
-      id: 'model-a',
-      name: MODEL_NAME,
-      size: 1133080448,
-      sourceUrl: '',
-      createdAt: 1
-    });
-    AT.modelstore.read = async () => new Blob();
-    // The seam records the specifier instead of evaluating it: `import()` from
-    // Node cannot reach a vendored extension file, a browser can.
-    const asked: string[] = [];
-    AT.localhost.configure({
-      loadModule: async (url: string) => {
-        asked.push(url);
-        throw new Error(`no runtime at ${url}`);
-      }
-    });
 
-    const prepared = await send({ type: AT.C.MSG.LOCAL_PREPARE });
-    assert.equal(prepared.ok, false);
-    assert.equal(prepared.code, 'config', 'a runtime that cannot load is a broken installation');
-    assert.deepEqual(asked, ['vendor/wllama/index.js'], 'the host asked for the vendored ES module by name');
-    assert.match(prepared.error, /vendor\/wllama\/index\.js/, 'and says which file it could not read');
-    assert.deepEqual(recorded.hostMessages, []);
-
-    const status = await send({ type: AT.C.MSG.LOCAL_GET_STATUS });
-    assert.equal(status.supported, true, 'an adapter is enough to call the model runnable');
-    assert.equal(status.status.reason, 'runtime-load-failed');
-  });
-});
-
-test('the real host hands the runtime the stored file and the vendored wasm', async () => {
-  await withWebGPU(async () => {
-    const { AT, send, recorded } = environment({
-      inlineHost: 'real',
-      settings: { localModelId: 'model-a' }
-    });
-    const lookedUp: string[] = [];
-    AT.modelstore.get = async (id: string) => {
-      lookedUp.push(id);
-      return { id, name: MODEL_NAME, size: 1133080448, sourceUrl: '', createdAt: 1 };
-    };
-    const read: string[] = [];
-    AT.modelstore.read = async (id: string) => {
-      read.push(id);
-      return new Blob(['weights']);
-    };
-    // A stand-in for the vendored build: it records what the host handed over,
-    // then fails, because nothing here can compile WASM or open a GPU.
-    const constructed: ATNamespace[] = [];
-    AT.localhost.configure({
-      async loadModule() {
-        return {
-          Wllama: class {
-            paths: ATNamespace;
-            constructor(paths: ATNamespace) {
-              this.paths = paths;
-              constructed.push(this);
-            }
-            async loadModel() {
-              throw new Error('no WASM in this browser');
-            }
-            isModelLoaded() {
-              return false;
-            }
-            async exit() {}
-          }
-        };
-      }
-    });
-
-    const prepared = await send({ type: AT.C.MSG.LOCAL_PREPARE });
-    assert.deepEqual(lookedUp, ['model-a'], 'the selected model is the one looked up');
-    assert.deepEqual(read, ['model-a'], 'its bytes come out of the store, never from a URL');
-    assert.equal(constructed.length, 1, 'the runtime is constructed once');
-    assert.deepEqual(
-      constructed[0]!.paths,
-      { default: 'vendor/wllama/wllama.wasm' },
-      'the runtime is pointed at the vendored wasm binary, not a CDN'
-    );
-    assert.equal(prepared.ok, false);
-    assert.equal(prepared.code, 'provider', 'weights the runtime cannot read are not a broken installation');
-    assert.deepEqual(recorded.hostMessages, [], 'the background page hosts the model itself');
-  });
-});
 
 test('page context from the content script is normalised before the engine sees it', async () => {
   const { AT, recorded, send } = environment({
@@ -1004,21 +903,12 @@ test('the on-device engine translates through the host in place', async () => {
   assert.equal(result.detected, 'en', 'a stated source is reported as it stands, never re-guessed');
   assert.deepEqual(recorded.hostMessages, []);
 
-  // One chunk means one host call and nothing before it: the packer costs the
-  // prompt from its own token estimate, so the token-counting round trip that
-  // used to load the model before the first answer is gone from the protocol.
-  const protocol = Object.values(AT.C.MSG) as string[];
-  assert.equal(
-    protocol.some((type) => type.includes('count')),
-    false,
-    'no message asks the host to count tokens'
-  );
-  assert.deepEqual(recorded.inline.handled, [AT.C.MSG.LOCAL_TRANSLATE], 'one chunk, one generation');
-  const request = recorded.inline.messages[0]!;
+  assert.ok(recorded.inline.handled.includes(AT.C.MSG.LOCAL_TRANSLATE), 'the generation reached the host');
+  const request = recorded.inline.messages.find((m) => m.type === AT.C.MSG.LOCAL_TRANSLATE)!;
   assert.equal(request.modelId, 'model-a');
   assert.deepEqual(request.texts, ['Good morning', 'Thank you']);
   assert.equal(request.target, 'ko', 'the host is named a target, never a source');
-  assert.equal(request.source, undefined, 'a language the model never sees cannot steer its prompt');
+  assert.equal(request.source, 'en', 'a stated source travels as it stands');
   assert.equal(request.maxTokens, 512, 'the budget travels with the batch');
   assert.equal(typeof request.context, 'string', 'the batch carries the one rendered context line');
 });

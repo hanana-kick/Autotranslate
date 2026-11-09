@@ -115,6 +115,7 @@ namespace AT.settings {
     const exact = C.LANG_CODES.has(raw) ? raw : null;
     if (exact) return exact;
     const base = raw.toLowerCase().split('-')[0] ?? '';
+    if (base === 'zh') return raw.toLowerCase().endsWith('-tw') || raw.toLowerCase().endsWith('-hk') ? 'zh-TW' : 'zh-CN';
     return C.LANG_CODES.has(base) ? base : 'en';
   }
 

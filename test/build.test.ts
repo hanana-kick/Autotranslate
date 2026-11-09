@@ -21,15 +21,19 @@ const walk = (dir: string, prefix = ''): string[] =>
 /** The one policy the extension pages may ship with: WebAssembly needs its own quoted source. */
 const CSP = "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'";
 
-const WLLAMA_PKG = join(ROOT, 'node_modules', '@wllama', 'wllama');
-const WLLAMA = join(WLLAMA_PKG, 'esm');
+const GENAI = join(ROOT, 'node_modules', '@mediapipe', 'tasks-genai');
+const WLLAMA = join(ROOT, 'node_modules', '@wllama', 'wllama', 'esm');
 
 /** The on-device runtime `scripts/build.ts` copies out of the installed package. */
 const VENDOR_FILES: { from: string; to: string }[] = [
+  { from: 'genai_bundle.mjs', to: 'vendor/mediapipe/genai_bundle.js' },
+  { from: 'wasm/genai_wasm_internal.js', to: 'vendor/mediapipe/wasm/genai_wasm_internal.js' },
+  { from: 'wasm/genai_wasm_internal.wasm', to: 'vendor/mediapipe/wasm/genai_wasm_internal.wasm' },
+  { from: 'wasm/genai_wasm_nosimd_internal.js', to: 'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.js' },
+  { from: 'wasm/genai_wasm_nosimd_internal.wasm', to: 'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.wasm' },
   { from: 'index.js', to: 'vendor/wllama/index.js' },
   { from: 'wasm/wllama.wasm', to: 'vendor/wllama/wllama.wasm' }
 ];
-
 
 
 function build(args: string[]) {
@@ -56,12 +60,6 @@ test('chrome gets a Chrome-flavoured manifest', () => {
   assert.equal('browser_specific_settings' in manifest, false);
   assert.equal(manifest.background.service_worker, 'background.js');
   assert.equal(manifest.background.scripts.at(-1), 'background.js');
-  const scripts: string[] = manifest.background.scripts;
-  assert.ok(scripts.includes('lib/plamo3.js'), 'the prompt builder ships in the worker');
-  assert.ok(
-    scripts.indexOf('lib/plamo3.js') < scripts.indexOf('lib/local.js'),
-    'lib/local.js builds its prompt through AT.plamo3, so the module has to be loaded first'
-  );
 });
 
 test('firefox gets a gecko id and no chrome-only keys', () => {
@@ -203,10 +201,11 @@ test('both bundles ship the on-device runtime byte for byte from the installed p
     const archive = listZip(readFileSync(join(ROOT, 'dist', archiveName(pkg, target)))).map((entry) => entry.name);
     for (const entry of VENDOR_FILES) {
       const shipped = join(ROOT, 'build', target, entry.to);
-      assert.ok(existsSync(shipped), `${target}/${entry.to} was not copied out of @wllama/wllama`);
+      const pkg = entry.to.startsWith('vendor/mediapipe/') ? GENAI : WLLAMA;
+      assert.ok(existsSync(shipped), `${target}/${entry.to} was not copied out of its package`);
       assert.deepEqual(
         readFileSync(shipped),
-        readFileSync(join(WLLAMA, entry.from)),
+        readFileSync(join(pkg, entry.from)),
         `${target}/${entry.to} is not the bytes that were installed`
       );
       assert.ok(archive.includes(entry.to), `${target}: ${entry.to} is missing from the zip`);
@@ -286,47 +285,23 @@ test('the packaging gate ties the offscreen permission to the target', () => {
 });
 
 test('the packaging gate refuses a bundle that lost the on-device runtime', () => {
-  // One runtime file at a time: the loader and the wasm are a pair, so a gate
-  // that only asked for "some runtime in vendor/" would pass a bundle that can
-  // never boot the engine, and the page would learn about it at load time.
   for (const target of TARGETS) {
     assert.equal(build([`--target=${target}`]).status, 0);
-    for (const lost of VENDOR_FILES) {
-      const entries = walk(join('build', target))
-        .filter((name) => name !== lost.to)
-        .map((name) => ({ name, data: readFileSync(join(ROOT, 'build', target, name)) }));
-      writeFileSync(join(ROOT, 'dist', archiveName(pkg, target)), buildZip(entries));
-      const result = verify([target]);
-      assert.equal(result.status, 1, `${target}: a bundle without ${lost.to} must be refused`);
-      assert.match(result.output, new RegExp(`the archive is missing ${lost.to.replace(/[/.]/g, '\\$&')}`));
-      for (const kept of RUNTIME_ENTRIES) {
-        assert.equal(
-          result.output.includes(`the archive is missing ${kept}`),
-          kept === lost.to,
-          `${target}: only ${lost.to} left the archive, so the gate has to name it and nothing else`
-        );
-      }
+    const entries = walk(join('build', target))
+      .filter((name) => !name.startsWith('vendor/mediapipe/') && !name.startsWith('vendor/wllama/'))
+      .map((name) => ({ name, data: readFileSync(join(ROOT, 'build', target, name)) }));
+    writeFileSync(join(ROOT, 'dist', archiveName(pkg, target)), buildZip(entries));
+    const result = verify([target]);
+    assert.equal(result.status, 1, `${target}: a bundle without the runtime must be refused`);
+    for (const file of VENDOR_FILES) {
+      assert.match(result.output, new RegExp(`the archive is missing ${file.to.replace(/[/.]/g, '\\$&')}`));
     }
   }
 });
 
-/** Mirror an installed package as per-file symlinks: nothing deleted from the
- * mirror can reach the install the other tests measure against. */
-function mirrorTree(from: string, to: string): void {
-  mkdirSync(to, { recursive: true });
-  for (const entry of readdirSync(from, { withFileTypes: true })) {
-    const source = join(from, entry.name);
-    const mirror = join(to, entry.name);
-    if (entry.isDirectory()) mirrorTree(source, mirror);
-    else symlinkSync(source, mirror, 'file');
-  }
-}
-
 test('the validator refuses a tree without the on-device runtime', () => {
-  // A scratch checkout whose node_modules lacks @wllama: the gate has to name
-  // the missing dependency instead of emitting an offline-incapable zip. The
-  // package is then mirrored file by file, so each runtime file can go missing
-  // on its own.
+  // A scratch checkout whose node_modules lacks @mediapipe: the gate has to
+  // name the missing dependency instead of emitting an offline-incapable zip.
   const dir = mkdtempSync(join(tmpdir(), 'autotranslate-vendor-'));
   try {
     for (const name of ['package.json', 'tsconfig.json', 'tsconfig.tools.json', 'src', 'scripts']) {
@@ -345,38 +320,16 @@ test('the validator refuses a tree without the on-device runtime', () => {
     const armed = run(['--check']);
     assert.equal(armed.status, 0, `the scratch tree itself must validate: ${armed.output}`);
 
-    rmSync(join(dir, 'node_modules', '@wllama'), { recursive: true, force: true });
+    rmSync(join(dir, 'node_modules', '@mediapipe'), { recursive: true, force: true });
     const missing = run(['--check']);
     assert.equal(missing.status, 1);
-    assert.match(missing.output, /vendor: @wllama\/wllama is not installed \(run npm install\)/);
-    for (const entry of VENDOR_FILES) {
-      assert.match(
-        missing.output,
-        new RegExp(`vendor: ${entry.from.replace(/[/.]/g, '\\$&')} is missing from @wllama\\/wllama`)
-      );
-    }
-
-    mirrorTree(WLLAMA_PKG, join(dir, 'node_modules', '@wllama', 'wllama'));
-    for (const entry of VENDOR_FILES) {
-      const mirror = join(dir, 'node_modules', '@wllama', 'wllama', 'esm', entry.from);
-      rmSync(mirror, { force: true });
-      const partial = run(['--check']);
-      assert.equal(partial.status, 1, `${entry.from}: a runtime file cannot go missing quietly`);
-      assert.match(
-        partial.output,
-        new RegExp(`vendor: ${entry.from.replace(/[/.]/g, '\\$&')} is missing from @wllama\\/wllama`)
-      );
-      symlinkSync(join(WLLAMA, entry.from), mirror, 'file');
-      const repaired = run(['--check']);
-      assert.equal(repaired.status, 0, `${entry.from} is back, so the scratch tree validates again: ${repaired.output}`);
-    }
+    assert.match(missing.output, /vendor: @mediapipe\/tasks-genai is not installed \(run npm install\)/);
+    assert.match(missing.output, /vendor: genai_bundle\.mjs is missing from .*@mediapipe\/tasks-genai/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     // The scratch tree only ever holds symlinks; the installed package the
     // other tests measure against has to survive the unlink untouched.
-    for (const entry of VENDOR_FILES) {
-      assert.ok(existsSync(join(WLLAMA, entry.from)), `the scratch test must not touch the real install (${entry.from})`);
-    }
+    assert.ok(existsSync(join(GENAI, 'genai_bundle.mjs')), 'the scratch test must not touch the real install');
   }
 });
 

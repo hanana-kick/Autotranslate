@@ -12,9 +12,11 @@
 
       <section class="card">
         <h2 data-i18n="options_behavior"></h2>
+        <p class="host" id="tabHost"></p>
+        <p class="hint" id="tabStatus" role="status"></p>
         <div class="grid">
           <label class="switch">
-            <input type="checkbox" id="enabled" />
+            <input type="checkbox" id="enabled" disabled />
             <span data-i18n="options_enabled"></span>
           </label>
           <label class="switch">
@@ -29,6 +31,44 @@
       </section>
 
       <section class="card">
+        <h2 data-i18n="server_engine"></h2>
+        <div class="field">
+          <label for="engine" data-i18n="server_engine"></label>
+          <select id="engine">
+            <option value="local" data-i18n="server_local"></option>
+            <option value="openai" data-i18n="server_openai"></option>
+          </select>
+        </div>
+        <div id="serverSection" hidden>
+          <p class="hint" data-i18n="server_privacy"></p>
+          <div class="field">
+            <label for="serverBaseUrl" data-i18n="server_baseUrl"></label>
+            <input type="url" id="serverBaseUrl" placeholder="http://localhost:8000/v1" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="serverApiKey" data-i18n="server_apiKey"></label>
+            <input type="password" id="serverApiKey" spellcheck="false" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="serverModel" data-i18n="server_model"></label>
+            <input type="text" id="serverModel" list="serverModels" placeholder="big" spellcheck="false" autocomplete="off" />
+            <datalist id="serverModels"></datalist>
+          </div>
+          <div class="field">
+            <label for="serverTimeoutMs" data-i18n="server_timeout"></label>
+            <input type="number" id="serverTimeoutMs" min="5000" max="300000" step="1000" />
+          </div>
+          <button id="loadServerModels" type="button" class="secondary" data-i18n="server_loadModels"></button>
+          <p class="status" id="serverStatus" role="status"></p>
+        </div>
+        <div class="row wrap">
+          <button id="testEngine" type="button" class="secondary" data-i18n="options_test"></button>
+        </div>
+        <p class="status" id="testStatus" role="status"></p>
+        <p class="hint" data-i18n="server_testHint"></p>
+      </section>
+
+      <section class="card" id="localSection">
         <h2 data-i18n="options_local"></h2>
         <div class="grid">
           <p class="hint" id="localSupport" data-i18n="options_localHint"></p>
@@ -46,16 +86,18 @@
             <label for="modelUrl" data-i18n="options_modelUrl"></label>
             <input type="url" id="modelUrl" spellcheck="false" autocomplete="off" />
           </div>
+          <div class="field">
+            <label for="modelToken" data-i18n="options_modelToken"></label>
+            <input type="password" id="modelToken" spellcheck="false" autocomplete="off" />
+          </div>
+          <p class="hint" data-i18n="options_modelTokenHint"></p>
           <div class="row wrap">
             <button id="downloadModel" type="button" data-i18n="options_download"></button>
             <button id="cancelDownload" type="button" class="secondary" data-i18n="options_cancel" hidden></button>
-            <input type="file" id="modelFile" accept=".gguf,application/octet-stream" hidden />
+            <input type="file" id="modelFile" accept=".task,application/octet-stream" hidden />
             <button id="pickModel" type="button" class="secondary" data-i18n="options_pickFile"></button>
             <button id="prepareModel" type="button" class="secondary" data-i18n="options_prepare"></button>
-            <button id="testEngine" type="button" class="secondary" data-i18n="options_test"></button>
           </div>
-          <p class="hint" data-i18n="options_modelLicence"></p>
-          <p class="status" id="testStatus" role="status"></p>
           <progress id="modelProgress" max="100" value="0" hidden></progress>
           <p class="status" id="modelStatus" role="status"></p>
         </div>
@@ -115,11 +157,11 @@
     <script src="lib/constants.js"></script>
     <script src="lib/browser.js"></script>
     <script src="lib/rules.js"></script>
-    <script src="lib/plamo3.js"></script>
     <script src="lib/local.js"></script>
     <script src="lib/modelstore.js"></script>
     <script src="lib/modelflow.js"></script>
     <script src="lib/settings.js"></script>
+    <script src="lib/ui.js"></script>
     <script src="options.js"></script>
   </body>
 </html>
