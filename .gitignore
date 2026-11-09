@@ -14,5 +14,3 @@ weight/
 
 # Browser QA evidence is uploaded by Actions, never packaged
 test-results/
-.cache/
-vendor-src/
