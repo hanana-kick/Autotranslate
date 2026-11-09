@@ -14,3 +14,7 @@ weight/
 
 # Browser QA evidence is uploaded by Actions, never packaged
 test-results/
+
+# Local build scratch: plamo:gguf downloads and the generated ONNX vendor files
+.cache/
+vendor-src/
