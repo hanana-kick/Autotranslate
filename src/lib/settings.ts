@@ -105,7 +105,8 @@ namespace AT.settings {
   }
 
   // Browser UI language -> one of C.LANGS, region folded where we have no
-  // regional variant ('pt-BR' -> 'pt').
+  // regional variant ('ja-JP' -> 'ja'). A UI language the picker does not
+  // offer becomes 'en'.
   export function uiLang(): string {
     const raw =
       AT.api?.i18n?.getUILanguage?.() ??

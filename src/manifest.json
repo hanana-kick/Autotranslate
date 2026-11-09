@@ -31,12 +31,16 @@
       "lib/pagecontext.js",
       "lib/targets.js",
       "lib/rules.js",
+      "vendor/onnxruntime/ort-common.all.js",
+      "vendor/onnxruntime/ort-webgpu.all.js",
+      "vendor/onnxruntime/transformers.web.js",
       "lib/local.js",
       "lib/modelstore.js",
       "lib/ui.js",
       "lib/settings.js",
       "lib/engines.js",
       "lib/localhost.js",
+      "lib/onnxhost.js",
       "background.js"
     ]
   },

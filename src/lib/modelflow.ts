@@ -106,18 +106,30 @@ namespace AT.modelflow {
     const started = Date.now();
     const url = AT.local.normalizeDownloadUrl(install.url ?? SOURCE.url);
     if (!url) return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'bad-url', retired: [] };
-    const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
+    const card = AT.local.sourceFor(url) ?? (url === SOURCE.url ? SOURCE : null);
+    const expected = card?.size;
     if (expected && !(await AT.modelstore.fits(expected))) {
       return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'no-space', retired: [] };
     }
     await keepStorage();
-    const result = await AT.modelstore.download({
-      url,
-      token: install.token ?? '',
-      expectedSize: expected,
-      signal: install.signal,
-      onProgress: install.onProgress
-    });
+    // An ONNX card is a set of files, not one graph: fetch the parts beside it.
+    const result =
+      card?.kind === 'onnx'
+        ? await AT.modelstore.ingestOnnx({
+            graphUrl: url,
+            name: card.dtype === 'fp16' ? 'model_fp16.onnx' : undefined,
+            expectedSize: expected,
+            signal: install.signal,
+            onProgress: install.onProgress,
+            parts: card.parts ?? []
+          })
+        : await AT.modelstore.download({
+            url,
+            token: install.token ?? '',
+            expectedSize: expected,
+            signal: install.signal,
+            onProgress: install.onProgress
+          });
     return settle(result, started);
   }
 

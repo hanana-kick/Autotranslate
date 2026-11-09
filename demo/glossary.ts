@@ -3,10 +3,6 @@
 // without a network. The real build sends the same `texts` array to
 // AT.engines instead.
 namespace AT.demo {
-  const OPEN = '\uE000';
-  const CLOSE = '\uE001';
-  const MARKER = new RegExp(`${OPEN}(\\d+)${CLOSE}`, 'g');
-
   const PHRASES: Record<string, string | undefined> = {
     'autotranslate keeps the page, replaces the words': 'Autotranslate는 페이지는 그대로, 단어만 바꿉니다',
     'autotranslate style-safe engine sample': 'Autotranslate 스타일 보존 엔진 샘플',
@@ -85,30 +81,14 @@ namespace AT.demo {
   }
 
   export type TranslateOptions = {
-    /** Drop the run markers, so the engine has to fall back to per-piece requests. */
-    lossy?: boolean;
     latencyMs?: number;
   };
 
   export function translate(texts: readonly string[], options: TranslateOptions = {}): Promise<string[]> {
-    const { lossy = false, latencyMs = 120 } = options;
+    const { latencyMs = 120 } = options;
     const { promise, resolve } = Promise.withResolvers<string[]>();
     setTimeout(() => {
-      resolve(
-        texts.map((text) => {
-          let out = '';
-          let cursor = 0;
-          let match: RegExpExecArray | null;
-          MARKER.lastIndex = 0;
-          while ((match = MARKER.exec(text)) !== null) {
-            out += lookup(text.slice(cursor, match.index));
-            if (!lossy) out += match[0];
-            cursor = MARKER.lastIndex;
-          }
-          out += lookup(text.slice(cursor));
-          return out;
-        })
-      );
+      resolve(texts.map(lookup));
     }, latencyMs);
     return promise;
   }

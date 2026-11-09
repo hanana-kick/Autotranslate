@@ -109,6 +109,7 @@ namespace AT.localhost {
     loadedBytes: 0,
     loadMs: null,
     generations: 0,
+    calibration: null,
     lastError: null
   };
 

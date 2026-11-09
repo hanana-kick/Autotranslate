@@ -69,14 +69,7 @@ h1 {
   color: var(--muted);
 }
 
-.field {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-}
-
 button,
-select,
 input[type="search"] {
   font: inherit;
   color: var(--ink);
@@ -105,7 +98,6 @@ button.primary {
   border-color: var(--brand);
 }
 
-select,
 input[type="search"] {
   padding: 6px 8px;
 }

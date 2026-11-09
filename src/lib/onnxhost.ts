@@ -1,0 +1,468 @@
+// The ONNX on-device host: the same host contract as `AT.localhost` (load,
+// unload, status, translate, handle), but the runtime is Transformers.js over
+// onnxruntime-web WebGPU, and the model is the ONNX export of PLaMo 3 Translate
+// stored in OPFS. Everything that is not the runtime - prompts, packing, the
+// script guard, the retry policy - is shared with the GGUF host through
+// `AT.local` and `AT.plamo3`, so a page cannot tell which runtime answers.
+//
+// The vendored runtime arrives as classic scripts that publish three globals
+// (`AT_ORT_COMMON`, `AT_ORT_WEBGPU`, `AT_TRANSFORMERS`); the model's own files
+// (config, tokenizer, the graph) are served to Transformers.js through a
+// custom cache backed by OPFS, so nothing but the extension's own origin is
+// ever fetched.
+//
+// Load after lib/constants.js, lib/browser.js, lib/plamo3.js, lib/local.js and
+// lib/modelstore.js, and after vendor/ort-common.all.js,
+// vendor/ort-webgpu.all.js and vendor/transformers.web.js.
+namespace AT.onnxhost {
+  const C = AT.C;
+  const L = AT.local;
+  const P = AT.plamo3;
+
+  /** The members of the vendored Transformers.js global this file touches. */
+  type TfModule = {
+    env: Record<string, any>;
+    AutoTokenizer: { from_pretrained: (id: string) => Promise<Tokenizer> };
+    pipeline: (task: string, id: string, options: Record<string, unknown>) => Promise<Pipeline>;
+  };
+  type Tokenizer = {
+    (text: string, options?: { add_special_tokens?: boolean }): { input_ids: { data: ArrayLike<number | bigint> } };
+    decode(ids: number[] | ArrayLike<number | bigint>, options?: { skip_special_tokens?: boolean }): string;
+    apply_chat_template(
+      messages: { role: string; content: string }[],
+      options: { target_lang: string; add_generation_prompt: boolean; tokenize: false }
+    ): string;
+  };
+  type Pipeline = (prompt: string, options: Record<string, unknown>) => Promise<{ generated_text: string }[]>;
+
+  /** The seam a test replaces: how the vendored runtime and the model's files
+   *  are reached. Production leaves both undefined. */
+  type Seams = {
+    runtime?: () => TfModule;
+    modelFiles?: (name: string) => Promise<Blob | null>;
+    tokenizer?: Tokenizer;
+  };
+
+  let seams: Seams = {};
+  let tf: TfModule | null = null;
+  let tokenizer: Tokenizer | null = null;
+  let pipe: Pipeline | null = null;
+  let loadedId: string | null = null;
+  let loadedBytes = 0;
+  let loadMs: number | null = null;
+  let generations = 0;
+  let queue: Promise<unknown> = Promise.resolve();
+  let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let loading: Promise<void> | null = null;
+  let reporter: ((status: AT.local.LocalStatus) => void) | null = null;
+  let lastMaxTokens = L.DEFAULT_MAX_TOKENS;
+
+  const state: AT.local.LocalStatus = {
+    target: L.TARGET_OFFSCREEN,
+    supported: false,
+    reason: null,
+    state: 'unloaded',
+    modelId: null,
+    modelName: null,
+    loadedBytes: 0,
+    loadMs: null,
+    generations: 0,
+    calibration: null,
+    lastError: null
+  };
+
+  export function configure(patch: Seams): void {
+    seams = { ...seams, ...patch };
+    if (patch.tokenizer) tokenizer = patch.tokenizer;
+  }
+
+  export function install(place: 'offscreen' | 'background', report: (status: AT.local.LocalStatus) => void): AT.local.LocalStatus {
+    state.target = place;
+    reporter = report;
+    void checkSupport();
+    publish();
+    return state;
+  }
+
+  function publish(): void {
+    state.generations = generations;
+    state.loadedBytes = loadedBytes;
+    state.loadMs = loadMs;
+    state.modelId = loadedId;
+    reporter?.(state);
+  }
+
+  function fail(reason: string, detail: unknown): never {
+    state.state = 'error';
+    state.reason = reason;
+    state.lastError = String((detail as { message?: unknown })?.message ?? detail ?? reason).slice(0, 300);
+    publish();
+    const error = new Error(state.lastError) as Error & { reason: string; code: string };
+    error.reason = reason;
+    error.code = L.codeForReason(reason);
+    throw error;
+  }
+
+  async function checkSupport(): Promise<void> {
+    if (state.supported) return;
+    if (typeof navigator === 'undefined' || !('gpu' in navigator)) {
+      state.supported = false;
+      state.reason = 'no-webgpu';
+      state.state = state.state === 'unloaded' ? 'unloaded' : state.state;
+      publish();
+      throw new Error('this browser has no WebGPU');
+    }
+    state.supported = true;
+    state.reason = null;
+    publish();
+  }
+
+  function runtime(): TfModule {
+    if (seams.runtime) return seams.runtime();
+    const global = globalThis as Record<string, unknown>;
+    const mod = global.AT_TRANSFORMERS as TfModule | undefined;
+    if (!mod) throw new Error('the ONNX runtime bundle is not loaded');
+    return mod;
+  }
+
+  /** The model's own small files live next to the graph in OPFS; the graph
+   *  itself is served as one response so Transformers.js streams it into the
+   *  WebGPU session without a second copy in the JS heap. */
+  async function modelFile(name: string): Promise<Blob | null> {
+    if (seams.modelFiles) return seams.modelFiles(name);
+    const record = await AT.modelstore.get(modelIdForCache).catch(() => null);
+    if (!record) return null;
+    // The graph is the model's main file; everything else is a named part.
+    if (name.endsWith('.onnx')) return AT.modelstore.read(record.id).catch(() => null);
+    return AT.modelstore.readPart(record.id, name).catch(() => null);
+  }
+
+  /** The model whose files the cache serves; set before the pipeline loads. */
+  let modelIdForCache = '';
+
+  /** Serves the ONNX model's files to Transformers.js from OPFS. A relative
+   *  model id makes the library take its local-file branch, and the custom
+   *  cache answers every fetch from the store, so nothing crosses the network. */
+  function installCache(): void {
+    const env = tf!.env;
+    env.allowRemoteModels = false;
+    env.allowLocalModels = true;
+    env.useFS = false;
+    env.useFSCache = false;
+    env.useBrowserCache = false;
+    env.useCustomCache = true;
+    env.experimental_useCrossOriginStorage = false;
+    env.localModelPath = './';
+    env.customCache = {
+      match: async (request: unknown) => {
+        // The library asks for both the joined path and the raw cache key, and
+        // neither names the file the way the store keeps it, so match on the
+        // trailing path segment of either.
+        const raw = typeof request === 'string' ? request : String((request as { url?: string })?.url ?? '');
+        const name = raw.split('/').filter(Boolean).pop() ?? '';
+        const blob = await modelFile(name);
+        if (!blob) return undefined;
+        const total = Number((blob as Blob).size);
+        return new Response(blob, {
+          headers: { 'content-length': String(total), 'content-type': 'application/octet-stream' }
+        });
+      },
+      put: async () => undefined
+    };
+    env.backends.onnx.wasm.wasmPaths = AT.getURL('vendor/onnxruntime/');
+    env.backends.onnx.wasm.numThreads = 1;
+  }
+
+  /** The JS Unigram tokenizer has no byte-fallback, so an out-of-vocab
+   *  character encodes to `unk` and is lost. The card's reference expands such
+   *  characters to their UTF-8 bytes as `<0xXX>` tokens, which are in the
+   *  vocab, reproducing the ids the Rust tokenizer produces. */
+  export function expandByteFallback(text: string): string {
+    const tok = tokenizer ?? seams.tokenizer!;
+    const encoded = tok(text, { add_special_tokens: false });
+    const ids = Array.from(encoded.input_ids.data as ArrayLike<number | bigint>).map(Number);
+    if (!ids.includes(0)) return text;
+    let out = '';
+    for (const ch of text) {
+      const one = Array.from(tok(ch, { add_special_tokens: false }).input_ids.data as ArrayLike<number | bigint>).map(Number);
+      if (one.length === 1 && one[0] !== 0) {
+        out += ch;
+        continue;
+      }
+      for (const byte of new TextEncoder().encode(ch)) {
+        out += '<0x' + byte.toString(16).toUpperCase().padStart(2, '0') + '>';
+      }
+    }
+    return out;
+  }
+
+  /** The PFML3 prompt exactly as `AT.plamo3.buildPrompt` builds it, rendered
+   *  through the tokenizer's own chat template so the special tokens line up
+   *  with the ONNX graph's expectations. */
+  function renderPrompt(target: string, text: string, hint: string | null): string {
+    // Pass the page text as a plain string, not a chat: the pipeline then keeps
+    // `return_full_text` on, so `generated_text` is prompt + answer and the
+    // answer is the slice after the prompt. A chat input would make the
+    // pipeline render the template itself, which is both slower and wrong here
+    // because we already control the target language through the prompt.
+    const safe = P.sanitize(text);
+    const context = hint === null ? null : P.sanitize(hint);
+    return tokenizer!.apply_chat_template(
+      [{ role: 'user', content: expandByteFallback(safe) }],
+      {
+        target_lang: P.langFor(target) ?? 'ko',
+        add_generation_prompt: true,
+        tokenize: false,
+        ...(context === null ? {} : { context })
+      }
+    );
+  }
+
+  async function ensureLoaded(modelId: string, maxTokens: number, target: string): Promise<void> {
+    lastMaxTokens = maxTokens;
+    requireTarget(target);
+    if (loadedId === modelId && pipe) {
+      touchIdleTimer();
+      return;
+    }
+    if (loading) {
+      await loading;
+      if (loadedId === modelId && pipe) {
+        requireTarget(target);
+        return;
+      }
+    }
+    await checkSupport();
+    const record = await AT.modelstore.get(modelId);
+    if (!record) fail('model-missing', `model ${modelId} is not stored`);
+    requireTarget(target);
+    state.state = 'loading';
+    state.modelId = record.id;
+    state.modelName = record.name;
+    state.lastError = null;
+    publish();
+    const started = Date.now();
+    loading = (async () => {
+      tf = runtime();
+      modelIdForCache = modelId;
+      installCache();
+      // A bare model id (not a URL, but shaped like a repo id) makes
+      // Transformers.js take its local-file branch, which fetches through the
+      // custom cache (OPFS) instead of the network; the cache matches on the
+      // file name, so the id's own directory prefix is irrelevant.
+      const tok = await tf.AutoTokenizer.from_pretrained('onnx-model');
+      const card = L.MODEL_SOURCES.find((source) => source.url === record.sourceUrl && source.kind === 'onnx');
+      const dtype = card?.dtype ?? 'fp16';
+      const gen = await tf.pipeline('text-generation', 'onnx-model', { dtype, device: 'webgpu' });
+      tokenizer = tok;
+      pipe = gen;
+      loadedId = modelId;
+      loadedBytes = Number(record.size) || 0;
+      loadMs = Date.now() - started;
+      state.state = 'ready';
+      generations = 0;
+      publish();
+      // Warm the pipeline with a sentence in the page's target language so the
+      // first real generation does not pay for a cold WebGPU pipeline.
+      await warmup(target);
+    })();
+    try {
+      await loading;
+    } finally {
+      loading = null;
+    }
+  }
+
+  async function warmup(target: string): Promise<void> {
+    if (!pipe || !tokenizer) return;
+    const lang = P.langFor(target) ?? 'ko';
+    const prompt = tokenizer.apply_chat_template(
+      [{ role: 'user', content: expandByteFallback(P.sanitize('Good morning.')) }],
+      { target_lang: lang, add_generation_prompt: true, tokenize: false }
+    );
+    await pipe(prompt, { max_new_tokens: 8, do_sample: false });
+  }
+
+  async function teardown(cause: string): Promise<void> {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = null;
+    pipe = null;
+    tokenizer = null;
+    tf = null;
+    loadedId = null;
+    loadedBytes = 0;
+    loadMs = null;
+    generations = 0;
+    state.state = 'unloaded';
+    state.reason = cause === 'idle' ? 'idle-unloaded' : null;
+    state.modelId = null;
+    state.modelName = null;
+    publish();
+  }
+
+  function touchIdleTimer(): void {
+    if (idleTimer) clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => {
+      void teardown('idle');
+    }, L.IDLE_UNLOAD_MS);
+  }
+
+  function enqueue<T>(job: () => Promise<T>): Promise<T> {
+    const run = queue.then(job, job);
+    queue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
+
+  function requireTarget(target: string): void {
+    if (P.langFor(target) === null) {
+      fail('no-target', `the installed model has no language for ${target || 'that target'}`);
+    }
+  }
+
+  /** One generation, bounded by a wall clock like the GGUF host's. */
+  async function generate(prompt: string, maxNewTokens: number, targetHint: string): Promise<string> {
+    if (!pipe) fail('not-loaded', 'no model is loaded');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
+    try {
+      const out = await pipe(prompt, {
+        max_new_tokens: maxNewTokens,
+        do_sample: false,
+        abort_signal: controller.signal
+      });
+      generations += 1;
+      touchIdleTimer();
+      // The pipeline decodes with special tokens skipped, so the prompt's own
+      // `<|plamo:...|>` markers are stripped from the output and the answer is
+      // not a suffix of the prompt string. What survives verbatim is the plain
+      // text between them: the output element's `lang` value is the target
+      // code, and everything after that is the translation.
+      const item = out?.[0]?.generated_text;
+      const text = typeof item === 'string' ? item : '';
+      const lang = P.langFor(targetHint) ?? '';
+      const at = lang ? text.lastIndexOf(lang) : -1;
+      let answer = at >= 0 ? text.slice(at + lang.length) : text;
+      return answer;
+    } catch (error: unknown) {
+      const message = String((error as { message?: unknown })?.message ?? error);
+      fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  const SELF_SUFFICIENT_CHARS = 40;
+
+  function usable(answer: string, text: string, target: string): boolean {
+    if (!answer || L.isRunaway(answer, text)) return false;
+    const lang = P.langFor(target);
+    return lang === null || P.checkScript(answer, lang);
+  }
+
+  async function translateOne(target: string, text: string, hint: string | null): Promise<string> {
+    const plain = renderPrompt(target, text, null);
+    const framed = hint === null ? plain : renderPrompt(target, text, hint);
+    const leadIsPlain = hint === null || text.length >= SELF_SUFFICIENT_CHARS;
+    const lead = leadIsPlain ? plain : framed;
+    const cap = L.answerTokens(text, lastMaxTokens, lead);
+    const answer = (await generate(lead, cap, target)).trim();
+    if (usable(answer, text, target)) return answer;
+    const follow = leadIsPlain ? framed : plain;
+    const retry = (await generate(follow, L.answerTokens(text, lastMaxTokens, follow), target)).trim();
+    return usable(retry, text, target) ? retry : '';
+  }
+
+  async function translateChunk(target: string, texts: string[], hint: string | null): Promise<string[]> {
+    if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', hint)];
+    const batch = texts.map((text, index) => `${index + 1}. ${P.sanitize(text).replace(/\s+/g, ' ').trim()}`).join('\n');
+    const prompt = renderPrompt(target, batch, hint);
+    const cap = L.answerTokens(texts, lastMaxTokens, prompt);
+    const reply = (await generate(prompt, cap, target)).trim();
+    const parsed = L.parseNumbered(reply, texts.length);
+    if (parsed) return parsed.map((answer) => answer.trim());
+    AT.warn('on-device split mismatch, retrying per text', texts.length);
+    const out: string[] = [];
+    for (const text of texts) out.push(await translateOne(target, text, hint));
+    return out;
+  }
+
+  async function translateNow(request: AT.localhost.TranslateRequest): Promise<AT.localhost.HostReply> {
+    const texts = Array.isArray(request.texts)
+      ? request.texts.filter((text): text is string => typeof text === 'string')
+      : [];
+    const askedTarget = typeof request.target === 'string' ? request.target : '';
+    const maxTokens = Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS;
+    const hint = typeof request.context === 'string' ? request.context.slice(0, 200) : null;
+    if (texts.length === 0) return { translations: [] };
+    if (P.langFor(askedTarget) === null) {
+      fail('no-target', `no model translates into ${askedTarget || 'that language'}`);
+    }
+    const modelId = typeof request.modelId === 'string' && request.modelId ? request.modelId : '';
+    if (!modelId) fail('no-model', 'no model is selected');
+    state.state = 'busy';
+    publish();
+    try {
+      lastMaxTokens = maxTokens;
+      await ensureLoaded(modelId, maxTokens, askedTarget);
+      const translations = await translateChunk(askedTarget, texts, hint);
+      state.state = 'ready';
+      publish();
+      return { translations };
+    } catch (error: unknown) {
+      const reason = (error as { reason?: string })?.reason ?? 'generation-failed';
+      fail(reason, error);
+    }
+  }
+
+  export async function status(): Promise<AT.local.LocalStatus> {
+    try {
+      await checkSupport();
+    } catch {
+      // checkSupport recorded the reason before it threw.
+    }
+    publish();
+    return state;
+  }
+
+  export async function load(modelId: string, maxTokens: number, target: string): Promise<AT.local.LocalStatus> {
+    await ensureLoaded(modelId, maxTokens, target);
+    return state;
+  }
+
+  export async function unload(cause = 'requested'): Promise<AT.local.LocalStatus> {
+    await teardown(cause);
+    return state;
+  }
+
+  export async function translate(request: AT.localhost.TranslateRequest): Promise<AT.localhost.HostReply> {
+    return await enqueue(() => translateNow(request));
+  }
+
+  export async function handle(message: AT.Message): Promise<AT.localhost.HostReply> {
+    switch (message?.type) {
+      case C.MSG.LOCAL_TRANSLATE:
+        return await translate(message as AT.localhost.TranslateRequest);
+      case C.MSG.LOCAL_LOAD: {
+        const request = message as { modelId?: unknown; target?: unknown; maxTokens?: unknown };
+        const modelId = typeof request.modelId === 'string' ? request.modelId : '';
+        if (!modelId) fail('no-model', 'no model is selected');
+        const askedTarget =
+          typeof request.target === 'string' && P.langFor(request.target) !== null ? request.target : 'ko';
+        return {
+          status: await enqueue(() => load(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS, askedTarget))
+        };
+      }
+      case C.MSG.LOCAL_UNLOAD:
+        await enqueue(() => Promise.resolve());
+        return { status: await unload('requested') };
+      case C.MSG.LOCAL_QUERY:
+      case C.MSG.LOCAL_STATUS:
+        return { status: await status() };
+      default:
+        return {};
+    }
+  }
+}

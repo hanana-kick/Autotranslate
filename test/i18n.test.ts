@@ -216,13 +216,14 @@ test('both shipped catalogues carry the on-device wording', () => {
     'options_localNone',
     'options_localMaxTokens',
     'options_modelUrl',
-    'options_modelToken',
-    'options_modelTokenHint',
     'options_download',
+    'options_pickFile',
+    'options_prepare',
     'options_downloading',
     'options_downloadDone',
     'options_downloadFailed',
-    'options_needsToken',
+    'options_notPersisted',
+    'options_deleted',
     'options_noModels',
     'options_usage',
     'options_localUnsupported',
@@ -230,7 +231,11 @@ test('both shipped catalogues carry the on-device wording', () => {
     'options_stateLoading',
     'options_stateReady',
     'options_stateBusy',
-    'options_stateError'
+    'options_stateError',
+    // The popup's own on-device line: the model prompt and the unverified
+    // marker, which every pair carries until this model has been checked.
+    'popup_localNoModel',
+    'popup_localUnverified'
   ];
   for (const key of needed) {
     assert.ok(enCatalogue[key]?.message, `en.${key} is used by the model manager`);
@@ -252,9 +257,11 @@ test('every host state has wording the popup can show', () => {
 
   const unsupported = AT.local.describeStatus(null, false, msg);
   const unloaded = AT.local.describeStatus(null, true, msg);
-  const loading = describe('loading', { modelName: 'TranslateGemma 4B IT (int8, web)' });
-  const busy = describe('busy', { modelName: 'TranslateGemma 4B IT (int8, web)' });
-  const ready = describe('ready', { modelName: 'TranslateGemma 4B IT (int8, web)', loadMs: 4200 });
+  // The name the host publishes is the card label the options page offered.
+  const MODEL = 'PLaMo 3 Translate 0.8B (Q4_K_M)';
+  const loading = describe('loading', { modelName: MODEL });
+  const busy = describe('busy', { modelName: MODEL });
+  const ready = describe('ready', { modelName: MODEL, loadMs: 4200 });
   const failed = describe('error', { lastError: 'no webgpu device' });
 
   assert.equal(unsupported, enCatalogue['options_localUnsupported']?.message);
@@ -264,7 +271,7 @@ test('every host state has wording the popup can show', () => {
   assert.ok(ready.startsWith(String(enCatalogue['options_stateReady']?.message)));
   assert.ok(failed.startsWith(String(enCatalogue['options_stateError']?.message)));
 
-  assert.ok(loading.includes('TranslateGemma 4B IT (int8, web)'), 'the sentence names the model being loaded');
+  assert.ok(loading.includes(MODEL), 'the sentence names the model being loaded');
   assert.ok(ready.includes('4200 ms'), 'a ready model says how long it took to get here');
   assert.ok(failed.includes('no webgpu device'), 'the reason the host gave has to be visible');
 

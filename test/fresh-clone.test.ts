@@ -9,9 +9,9 @@ import { cpSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, sym
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ROOT } from './helpers.ts';
-import { ENTRIES, RUNTIME_ENTRIES, TARGETS, archiveName } from '../scripts/package-spec.ts';
+import { ENTRIES, ONNX_RUNTIME_ENTRIES, RUNTIME_ENTRIES, TARGETS, archiveName } from '../scripts/package-spec.ts';
 
-const COPIED = ['package.json', 'tsconfig.json', 'tsconfig.tools.json', 'src', 'demo', 'scripts', 'test'];
+const COPIED = ['package.json', 'tsconfig.json', 'tsconfig.tools.json', 'src', 'demo', 'scripts', 'test', 'vendor-src'];
 
 const run = (dir: string, args: string[]) => {
   const result = spawnSync(process.execPath, ['scripts/build.ts', ...args], { cwd: dir, encoding: 'utf8' });
@@ -29,6 +29,10 @@ test('a clean checkout validates, builds and packages', () => {
   try {
     for (const name of COPIED) cpSync(join(ROOT, name), join(dir, name), { recursive: true });
     symlinkSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'), 'dir');
+    // The generated ONNX vendor files are not part of the checkout; symlink the
+    // directory instead of copying 69 MB into the scratch tree.
+    rmSync(join(dir, 'vendor-src'), { recursive: true, force: true });
+    symlinkSync(join(ROOT, 'vendor-src'), join(dir, 'vendor-src'), 'dir');
     assert.equal(existsSync(join(dir, 'build')), false, 'the scratch tree must start without build/');
     assert.equal(existsSync(join(dir, 'dist')), false, 'the scratch tree must start without dist/');
 
@@ -67,12 +71,21 @@ test('a clean checkout validates, builds and packages', () => {
       for (const host of ['lib/local.js', 'lib/modelstore.js', 'lib/localhost.js', 'offscreen.html', 'offscreen.js']) {
         assert.ok(bundle.includes(host), `${target}: ${host} is part of the on-device engine`);
       }
-      const runtime = bundle.filter((name) => name.startsWith('vendor/mediapipe/')).sort();
+      const runtime = bundle.filter((name) => name.startsWith('vendor/wllama/') || name.startsWith('vendor/mediapipe/')).sort();
       assert.deepEqual(runtime, [...RUNTIME_ENTRIES].sort(), `${target} must carry the whole on-device runtime`);
+      const onnx = bundle.filter((name) => name.startsWith('vendor/onnxruntime/')).sort();
+      assert.deepEqual(onnx, [...ONNX_RUNTIME_ENTRIES].sort(), `${target} must carry the whole ONNX runtime`);
       assert.deepEqual(
         readdirSync(join(dir, 'build', target, 'vendor')).sort(),
-        ['browser-polyfill.js', 'mediapipe'],
-        `${target}: vendor/ holds the polyfill and the runtime, nothing else`
+        ['browser-polyfill.js', 'mediapipe', 'onnxruntime', 'wllama'],
+        `${target}: vendor/ holds the polyfill and the two runtimes, nothing else`
+      );
+      // The wasm is the only file the loader asks for by path, so a truncated
+      // copy has to be caught here, not when the engine tries to boot it.
+      assert.equal(
+        readFileSync(join(dir, 'build', target, 'vendor/wllama/wllama.wasm')).subarray(0, 4).toString('latin1'),
+        '\0asm',
+        `${target}: the wasm copied by a clean build is not a wasm module`
       );
     }
 

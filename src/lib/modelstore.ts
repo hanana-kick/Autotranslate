@@ -5,6 +5,12 @@
 // covered without a browser.
 // Load after lib/constants.js, lib/local.js.
 namespace AT.modelstore {
+  /** Swap-file suffix `createWritable()` writes through before the name appears. */
+  const TMP_SUFFIX = '.tmp';
+  /** Longer than any transfer this extension makes: below it a file is a download
+   *  in progress, not debris. */
+  const RECENT_WRITE_MS = 60 * 60 * 1000;
+
   const L = AT.local;
   const S = L.STORE;
 
@@ -18,12 +24,24 @@ namespace AT.modelstore {
     all(store: string): Promise<unknown[]>;
   };
 
+  /** One byte file as the file system reports it: a sweep needs the name and the
+   *  age, nothing else. */
+  export type StoredFile = { name: string; lastModified: number };
+
+  type Listing = { values(): AsyncIterable<FileSystemHandle> };
+
   /** Byte storage, replaced by the tests. */
   export type Files = {
     /** Writes the whole stream; returns the number of bytes stored. */
     write(id: string, stream: ReadableStream<Uint8Array>): Promise<number>;
     read(id: string): Promise<Blob | null>;
+    /** Writes one named part of a multi-file model, under the same id. */
+    writePart(id: string, name: string, stream: ReadableStream<Uint8Array>): Promise<number>;
+    /** Reads one named part of a multi-file model. */
+    readPart(id: string, name: string): Promise<Blob | null>;
     remove(id: string): Promise<void>;
+    /** Every file under the model directory, including a half-written one. */
+    list(): Promise<StoredFile[]>;
     estimate(): Promise<{ usage: number; quota: number; persisted: boolean }>;
     persist(): Promise<boolean>;
   };
@@ -118,52 +136,78 @@ namespace AT.modelstore {
       if (!storage?.getDirectory) throw new Error('the origin private file system is unavailable');
       return storage.getDirectory();
     };
-    const child = async (name: string, create: boolean): Promise<FileSystemFileHandle | null> => {
+    const modelDir = async (id: string, create: boolean): Promise<FileSystemDirectoryHandle> => {
       const root = await directory();
-      const dir = await root.getDirectoryHandle(S.filesDir, create ? { create: true } : { create: false });
+      if (!create) {
+        // A pre-existing single-file model from an older build is a plain file.
+        const dir = await root.getDirectoryHandle(S.filesDir, { create: false });
+        try {
+          await dir.getDirectoryHandle(id, { create: false });
+          return dir.getDirectoryHandle(id, { create: false });
+        } catch {
+          return dir;
+        }
+      }
+      const dir = await root.getDirectoryHandle(S.filesDir, { create: true });
+      return dir.getDirectoryHandle(id, { create: true });
+    };
+    const partHandle = async (id: string, name: string | null, create: boolean): Promise<FileSystemFileHandle | null> => {
+      const dir = await modelDir(id, create);
       if (!create) {
         try {
-          return await dir.getFileHandle(name);
+          return name === null ? await dir.getFileHandle(id) : await dir.getFileHandle(name);
         } catch {
           return null;
         }
       }
-      return dir.getFileHandle(name, { create: true });
+      return name === null ? dir.getFileHandle(id, { create: true }) : dir.getFileHandle(name, { create: true });
+    };
+    const writeOne = async (handle: FileSystemFileHandle, stream: ReadableStream<Uint8Array>): Promise<number> => {
+      const writable = (await handle.createWritable()) as FileSystemWritableFileStream;
+      const reader = stream.getReader();
+      let written = 0;
+      try {
+        for (;;) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          if (!chunk.value) continue;
+          written += chunk.value.byteLength;
+          // A response without a length is still bounded: this is the only
+          // artefact the extension executes, and the quota is the user's disk.
+          if (written > L.MAX_MODEL_BYTES) throw new Error('model-too-large');
+          await writable.write(chunk.value as unknown as BufferSource);
+        }
+      } catch (error: unknown) {
+        try {
+          await writable.abort?.(error as Error);
+        } catch {
+          // An already-dead stream cannot be aborted; the throw below stands.
+        }
+        throw error;
+      }
+      // `close()` is where OPFS commits the swap file: a failure here means
+      // nothing was stored, so it must reach `ingest` and clean up.
+      await writable.close();
+      return written;
     };
     return {
       async write(id, stream) {
-        const handle = await child(id, true);
+        const handle = await partHandle(id, null, true);
         if (!handle) throw new Error(`cannot create the file for model ${id}`);
-        const writable = (await handle.createWritable()) as FileSystemWritableFileStream;
-        const reader = stream.getReader();
-        let written = 0;
-        try {
-          for (;;) {
-            const chunk = await reader.read();
-            if (chunk.done) break;
-            if (!chunk.value) continue;
-            written += chunk.value.byteLength;
-            // A response without a length is still bounded: this is the only
-            // artefact the extension executes, and the quota is the user's disk.
-            if (written > L.MAX_MODEL_BYTES) throw new Error('model-too-large');
-            await writable.write(chunk.value as unknown as BufferSource);
-          }
-          await writable.close();
-        } catch (error: unknown) {
-          await reader.cancel(error).catch(() => {});
-          try {
-            await writable.abort?.(error as Error);
-          } catch {
-            // An already-dead stream cannot be aborted; the throw below stands.
-          }
-          throw error;
-        } finally {
-          reader.releaseLock();
-        }
-        return written;
+        return writeOne(handle, stream);
+      },
+      async writePart(id, name, stream) {
+        const handle = await partHandle(id, name, true);
+        if (!handle) throw new Error(`cannot create ${name} for model ${id}`);
+        return writeOne(handle, stream);
       },
       async read(id) {
-        const handle = await child(id, false);
+        const handle = await partHandle(id, null, false);
+        if (!handle) return null;
+        return handle.getFile();
+      },
+      async readPart(id, name) {
+        const handle = await partHandle(id, name, false);
         if (!handle) return null;
         return handle.getFile();
       },
@@ -171,10 +215,38 @@ namespace AT.modelstore {
         const root = await directory();
         try {
           const dir = await root.getDirectoryHandle(S.filesDir, { create: false });
-          await dir.removeEntry(id);
+          await dir.removeEntry(id, { recursive: true });
         } catch {
           // Missing file or directory: nothing left to delete.
         }
+      },
+      async list() {
+        const root = await directory();
+        let dir: FileSystemDirectoryHandle;
+        try {
+          dir = await root.getDirectoryHandle(S.filesDir, { create: false });
+        } catch {
+          // No directory yet: nothing has ever been stored.
+          return [];
+        }
+        // The handle's own iterator yields [name, handle] pairs, values() handles.
+        const entries = dir as unknown as Listing;
+        const out: StoredFile[] = [];
+        for await (const handle of entries.values()) {
+          if (handle.kind === 'file') {
+            const file = await (handle as FileSystemFileHandle).getFile();
+            out.push({ name: handle.name, lastModified: Number(file.lastModified) || 0 });
+          } else {
+            // A model directory counts as its graph file for sweep purposes.
+            const sub = handle as unknown as Listing;
+            for await (const inner of sub.values()) {
+              if (inner.kind !== 'file') continue;
+              const file = await (inner as FileSystemFileHandle).getFile();
+              out.push({ name: `${handle.name}/${inner.name}`, lastModified: Number(file.lastModified) || 0 });
+            }
+          }
+        }
+        return out;
       },
       async estimate() {
         const storage = globalThis.navigator?.storage;
@@ -206,13 +278,25 @@ namespace AT.modelstore {
 
   // ------------------------------------------------------------------ records
 
+  // The engine's `callHost` picks the host module by the installed model's
+  // kind without awaiting, so the store hands it a synchronous view of the
+  // records it holds; `list()` and `get()` refresh that view.
+  let known: ModelRecord[] = [];
+  L.bindRecordLookup((modelId: string) => known.find((record) => record.id === modelId) ?? null);
+
   export async function list(): Promise<ModelRecord[]> {
     const raw = await driver().all(S.metaStore);
-    return L.normalizeModels(raw);
+    known = L.normalizeModels(raw);
+    return known;
   }
 
   export async function get(id: string): Promise<ModelRecord | null> {
     const record = L.normalizeModel(await driver().get(S.metaStore, id));
+    if (record) {
+      const existing = known.findIndex((entry) => entry.id === record.id);
+      if (existing >= 0) known[existing] = record;
+      else known.push(record);
+    }
     return record;
   }
 
@@ -238,6 +322,19 @@ namespace AT.modelstore {
     await files().remove(id);
     await driver().remove(S.metaStore, id);
     return existing !== null;
+  }
+
+  export async function sweep(): Promise<{ removed: string[] }> {
+    const known = new Set((await list()).map((record) => record.id));
+    const now = deps.now();
+    const removed: string[] = [];
+    for (const entry of await files().list()) {
+      if (now - entry.lastModified < RECENT_WRITE_MS) continue;
+      if (!entry.name.endsWith(TMP_SUFFIX) && known.has(entry.name)) continue;
+      await files().remove(entry.name);
+      removed.push(entry.name);
+    }
+    return { removed };
   }
 
   export type IngestRequest = {
@@ -287,6 +384,47 @@ namespace AT.modelstore {
    * Streams a model into storage. Only a complete file is registered, so an
    * aborted or failed transfer never leaves a half model behind.
    */
+  /** Rewrites `tokenizer.ggml.model` from `plamo3` to `plamo2` in place: the
+   *  runtime registers no `plamo2`... it registers `plamo2` and not `plamo3`, so a
+   *  PLaMo GGUF needs the tag the loader knows. Same length, no copy. */
+  function tokenizerPatch(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+    let buffer = new Uint8Array(0);
+    let patched = false;
+    const reader = source.getReader();
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          if (buffer.length) controller.enqueue(buffer);
+          controller.close();
+          return;
+        }
+        const value = chunk.value as Uint8Array;
+        if (!patched && buffer.length + value.byteLength >= 4096) {
+          const head = new Uint8Array(buffer.length + value.byteLength);
+          head.set(buffer, 0);
+          head.set(value, buffer.length);
+          const { bytes, patched: did } = AT.plamo3.patchTokenizerTag(head);
+          patched = did;
+          controller.enqueue(bytes);
+          buffer = new Uint8Array(0);
+          return;
+        }
+        const merged = new Uint8Array(buffer.length + value.byteLength);
+        merged.set(buffer, 0);
+        merged.set(value, buffer.length);
+        buffer = merged;
+        if (buffer.length >= 4096) {
+          controller.enqueue(buffer);
+          buffer = new Uint8Array(0);
+        }
+      },
+      cancel(reason: unknown) {
+        return reader.cancel(reason);
+      }
+    });
+  }
+
   export async function ingest(request: IngestRequest): Promise<IngestResult> {
     const url = L.normalizeDownloadUrl(request.sourceUrl) ?? '';
     const name = typeof request.name === 'string' ? request.name.trim().slice(0, 120) : '';
@@ -294,12 +432,24 @@ namespace AT.modelstore {
     if (!name) return { ok: false, record: null, error: 'no-name', bytes: 0 };
 
     const id = L.makeModelId(name, url, deps.now());
+    // The tokenizer rewrite is the one thing that may change the bytes on their
+    // way to storage, and it happens only to the file that needs it.
+    const stream = L.isPlamo3File({ name, sourceUrl: url })
+      ? tokenizerPatch(request.stream)
+      : request.stream;
     let bytes = 0;
     try {
-      bytes = await files().write(id, request.stream);
+      bytes = await files().write(id, stream);
     } catch (error: unknown) {
       await files().remove(id);
       const rejection = error as { name?: string; message?: string };
+      // Nothing will read this stream now. Cancelling is what stops the rest of
+      // the file arriving over the network into a stream nobody wants.
+      try {
+        await request.stream?.cancel('the file was not stored');
+      } catch {
+        // A stream that died with the write has nothing left to cancel.
+      }
       return {
         ok: false,
         record: null,
@@ -352,6 +502,137 @@ namespace AT.modelstore {
     return retired;
   }
 
+  export type OnnxInstallRequest = {
+    /** The graph's URL; also the base for the small parts beside it. */
+    graphUrl: string;
+    name?: string | undefined;
+    /** The graph's declared size, used as the truncation check. */
+    expectedSize?: number | undefined;
+    signal?: AbortSignal | undefined;
+    onProgress?: ((received: number, total: number | null) => void) | undefined;
+    /** The small files beside the graph, relative to the repo root. */
+    parts: string[];
+  };
+
+  /**
+   * Installs a multi-file ONNX export: the graph streams into OPFS as the
+   * model's main file, each small part (config, tokenizer) lands beside it,
+   * and only a complete set is registered. An aborted transfer leaves nothing
+   * behind, exactly like `ingest`.
+   */
+  export async function ingestOnnx(request: OnnxInstallRequest): Promise<IngestResult> {
+    const graphUrl = L.normalizeDownloadUrl(request.graphUrl);
+    if (!graphUrl) return { ok: false, record: null, error: 'bad-url', bytes: 0 };
+    const doFetch = deps.fetchImpl ?? (globalThis.fetch as unknown as StreamFetch | undefined);
+    if (typeof doFetch !== 'function') return { ok: false, record: null, error: 'no-fetch', bytes: 0 };
+    const name =
+      (typeof request.name === 'string' && request.name.trim()) || fileNameFromUrl(graphUrl) || 'model.onnx';
+    const id = L.makeModelId(name, graphUrl, deps.now());
+    // The parts live at the repo root, two levels above `onnx/model.onnx`.
+    const base = graphUrl.slice(0, graphUrl.lastIndexOf('/onnx/') + 1);
+
+    const fetchStream = async (url: string, expected: number | null): Promise<ReadableStream<Uint8Array> | null> => {
+      let response: StreamResponse;
+      try {
+        response = await doFetch(url, { headers: { Accept: 'application/octet-stream' }, signal: request.signal ?? null });
+      } catch (error: unknown) {
+        const rejection = error as { name?: string };
+        throw new Error(rejection?.name === 'AbortError' ? 'cancelled' : 'network');
+      }
+      if (!response.ok || !response.body) return null;
+      const declared = Number(response.headers.get('content-length'));
+      const total = Number.isFinite(declared) && declared > 0 ? Math.round(declared) : null;
+      if (expected !== null && total !== null && Math.abs(total - expected) / expected > 0.05) {
+        throw new Error('size-mismatch');
+      }
+      const reader = (response.body as NonNullable<StreamResponse['body']>).getReader();
+      return new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          const chunk = await reader.read();
+          if (chunk.done) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunk.value as Uint8Array);
+        },
+        cancel(reason: unknown) {
+          return reader.cancel(reason);
+        }
+      });
+    };
+
+    let bytes = 0;
+    try {
+      let lastReport = 0;
+      const graphStream = await fetchStream(graphUrl, request.expectedSize ?? null);
+      if (!graphStream) throw new Error('no-body');
+      const counted = countingStream(graphStream, (received) => {
+        const now = deps.now();
+        const total = request.expectedSize ?? null;
+        if (now - lastReport < L.DOWNLOAD_PROGRESS_INTERVAL_MS && !(total !== null && received >= total)) return;
+        lastReport = now;
+        request.onProgress?.(received, total);
+      });
+      bytes = await files().write(id, counted);
+      for (const part of request.parts) {
+        const partUrl = base + part;
+        const stream = await fetchStream(partUrl, null);
+        if (!stream) throw new Error(`missing part ${part}`);
+        await files().writePart(id, part, stream);
+      }
+    } catch (error: unknown) {
+      await files().remove(id);
+      const rejection = error as { name?: string; message?: string };
+      return {
+        ok: false,
+        record: null,
+        error: rejection?.name === 'AbortError' || rejection?.message === 'cancelled' ? 'cancelled' : (rejection?.message ?? 'write-failed'),
+        bytes: 0
+      };
+    }
+    if (typeof request.expectedSize === 'number' && request.expectedSize > 0 && bytes !== request.expectedSize) {
+      await files().remove(id);
+      return { ok: false, record: null, error: 'truncated', bytes };
+    }
+    const record = L.normalizeModel({
+      id,
+      name,
+      size: bytes,
+      sourceUrl: graphUrl,
+      createdAt: deps.now()
+    });
+    if (!record) {
+      await files().remove(id);
+      return { ok: false, record: null, error: bytes < L.MIN_MODEL_BYTES ? 'too-small' : 'invalid-record', bytes };
+    }
+    try {
+      await putRecord(record);
+    } catch (error: unknown) {
+      await files().remove(id);
+      return { ok: false, record: null, error: 'store-failed', bytes };
+    }
+    const retired = await replaceExisting(record).catch(() => [] as string[]);
+    return { ok: true, record, error: null, bytes, retired };
+  }
+
+  /** Reads one named part of a stored multi-file model. */
+  export async function readPart(id: string, name: string): Promise<Blob | null> {
+    if (!(await get(id))) return null;
+    return files().readPart(id, name);
+  }
+
+  /** Deletes previous copies of the same file; answers the ids it retired. */
+  async function replaceExisting(record: ModelRecord): Promise<string[]> {
+    const records = await list();
+    const retired: string[] = [];
+    for (const existing of records) {
+      if (existing.name === record.name && existing.id !== record.id && (await remove(existing.id))) {
+        retired.push(existing.id);
+      }
+    }
+    return retired;
+  }
+
   export type DownloadRequest = {
     url: string;
     name?: string | undefined;
@@ -389,7 +670,7 @@ namespace AT.modelstore {
       };
     }
     if (!response.ok) {
-      const reason = response.status === 401 || response.status === 403 ? 'needs-token' : `http-${response.status}`;
+      const reason = `http-${response.status}`;
       return { ok: false, record: null, error: reason, bytes: 0 };
     }
     if (!response.body) return { ok: false, record: null, error: 'no-body', bytes: 0 };

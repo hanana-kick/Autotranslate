@@ -24,6 +24,7 @@ const AT = load(
   'lib/constants.js',
   'lib/browser.js',
   'lib/gemma.js',
+  'lib/plamo3.js',
   'lib/pagecontext.js',
   'lib/targets.js',
   'lib/rules.js',
@@ -147,7 +148,7 @@ test('local: the region of the page joins the page context in one line', async (
 test('local: the target is the model code, not the picker code', async () => {
   stubSend(() => ({ ok: true, translations: ['你好'] }));
   await localModel({ target: 'zh-CN', texts: ['hello'] });
-  assert.equal((translates()[0] as ATNamespace).target, 'zh-Hans', 'Simplified Chinese is zh-Hans to this model');
+  assert.equal((translates()[0] as ATNamespace).target, 'zh-hans', 'Simplified Chinese is zh-hans to the PLaMo model');
 });
 
 test('local: a target outside the picker is refused before the host is woken', async () => {
@@ -168,6 +169,8 @@ test('local: a picker code the model cannot express fails as no-target', async (
   // for a picker entry the model revision drops, so simulate that gap.
   const korean = AT.gemma.LANGS.ko;
   delete AT.gemma.LANGS.ko;
+  const plamoKorean = AT.plamo3.LANGS.ko;
+  delete AT.plamo3.LANGS.ko;
   stubSend(() => ({ ok: true, translations: [''] }));
   try {
     await assert.rejects(
@@ -179,6 +182,7 @@ test('local: a picker code the model cannot express fails as no-target', async (
     );
   } finally {
     AT.gemma.LANGS.ko = korean;
+    AT.plamo3.LANGS.ko = plamoKorean;
   }
   assert.equal(translates().length, 0, 'no generation is attempted');
 });

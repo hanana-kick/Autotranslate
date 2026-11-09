@@ -90,12 +90,14 @@ namespace AT.engines {
     setting: string | undefined,
     texts: string[]
   ): Promise<{ lang: AT.gemma.GemmaLang | null; detected: string | null }> {
-    if (setting && setting !== 'auto') return { lang: AT.gemma.langFor(setting), detected: null };
+    if (setting && setting !== 'auto') {
+      return { lang: (AT.plamo3.langFor(setting) ?? AT.gemma.langFor(setting)) as AT.gemma.GemmaLang | null, detected: C.isSupportedLang(setting) ? setting : null };
+    }
     const sample = texts.join(' ').slice(0, 400);
     const answer = await AT.detectLanguage(sample);
     if (!answer) return { lang: null, detected: null };
     return {
-      lang: AT.gemma.langForDetected(answer.code),
+      lang: (AT.plamo3.langFor(answer.code) ?? AT.gemma.langForDetected(answer.code)) as AT.gemma.GemmaLang | null,
       detected: C.isSupportedLang(answer.code) ? answer.code : null
     };
   }
@@ -140,7 +142,7 @@ namespace AT.engines {
   async function translateChunk(
     args: TranslateRequest & { texts: string[]; target: string; localModelId: string; localMaxTokens: number }
   ): Promise<{ translations: string[]; detected: string | null }> {
-    const target = AT.gemma.langFor(args.target);
+    const target = (AT.plamo3.langFor(args.target) ?? AT.gemma.langFor(args.target)) as AT.gemma.GemmaLang | null;
     if (!target) {
       throw new EngineError('config', `the on-device model does not translate into ${args.target || 'that language'}`, {
         detail: 'no-target'
@@ -368,7 +370,7 @@ namespace AT.engines {
     }
 
     const batchOut = new Map<string, string>();
-    let detected: string | null = null;
+    let detected: string | null = source !== 'auto' && C.isSupportedLang(source) ? source : null;
     for (const chunk of chunks) {
       const result = await translateChunk({ ...request, texts: chunk, target, localModelId, localMaxTokens });
       chunk.forEach((text, index) => batchOut.set(text, result.translations[index] ?? text));

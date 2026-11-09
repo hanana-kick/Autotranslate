@@ -9,18 +9,24 @@ namespace AT.offscreen {
   const C = AT.C;
   const L = AT.local;
 
-  AT.localhost.install('offscreen', (status) => {
+  const report = (status: AT.local.LocalStatus): void => {
     // The background keeps the copy the popup reads; nobody answers here.
     void AT.sendMessage({ type: C.MSG.LOCAL_STATUS, status });
-  });
+  };
+  AT.localhost.install('offscreen', report);
+  if (typeof AT.onnxhost !== 'undefined') AT.onnxhost.install('offscreen', report);
 
   /** Only messages the background addressed to this document are ours. */
   const addressed = (message: AT.Message): boolean => (message as { to?: unknown }).to === L.TARGET_OFFSCREEN;
 
   /** The host answers with the same payload the background would have got
    *  back over the message boundary, so one dispatcher serves both. */
-  const handle = (message: AT.Message): Promise<AT.localhost.HostReply> | Record<string, never> =>
-    addressed(message) ? AT.localhost.handle(message) : {};
+  const handle = (message: AT.Message): Promise<AT.localhost.HostReply> | Record<string, never> => {
+    if (!addressed(message)) return {};
+    const modelId = typeof (message as { modelId?: unknown }).modelId === 'string' ? String((message as { modelId?: unknown }).modelId) : '';
+    const host = modelId && AT.local.modelKindFor(modelId) === 'onnx' && typeof AT.onnxhost !== 'undefined' ? AT.onnxhost : AT.localhost;
+    return host.handle(message);
+  };
 
   AT.onMessage({
     [C.MSG.LOCAL_TRANSLATE]: handle,

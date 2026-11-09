@@ -50,6 +50,7 @@ namespace AT.background {
   export type LocalRequest = {
     modelId?: string;
     maxTokens?: number;
+    target?: string;
   };
 
   /** at/state-changed, reported by the content script about itself. */
@@ -99,12 +100,16 @@ if (typeof self.importScripts === 'function') {
     'lib/pagecontext.js',
     'lib/targets.js',
     'lib/rules.js',
+    'vendor/onnxruntime/ort-common.all.js',
+    'vendor/onnxruntime/ort-webgpu.all.js',
+    'vendor/onnxruntime/transformers.web.js',
     'lib/local.js',
     'lib/modelstore.js',
     'lib/ui.js',
     'lib/settings.js',
     'lib/engines.js',
-    'lib/localhost.js'
+    'lib/localhost.js',
+    'lib/onnxhost.js'
   );
 }
 
@@ -173,7 +178,10 @@ if (typeof self.importScripts === 'function') {
     const ids = saved?.[TARGETS_KEY];
     if (!Array.isArray(ids)) return;
     const open = new Set((await api.tabs.query({})).map((tab) => tab?.id));
-    for (const id of ids) if (Number.isSafeInteger(id) && id >= 0 && open.has(id)) targets.add(id);
+    for (const id of ids) if (Number.isSafeInteger(id) && id >= 0 && open.has(id)) {
+      targets.add(id);
+      targetRevisions.set(id, 1);
+    }
   })().catch((error) => AT.warn('loading tab consent failed; defaulting OFF', error));
 
   function persistTargets(): Promise<void> {
@@ -619,18 +627,19 @@ if (typeof self.importScripts === 'function') {
   function readLocalRequest(
     message: AT.background.LocalRequest,
     settings: AT.settings.Settings
-  ): { modelId: string; maxTokens: number } {
+  ): { modelId: string; maxTokens: number; target: string } {
     const modelId = typeof message?.modelId === 'string' && message.modelId ? message.modelId : settings.localModelId;
     const maxTokens = Number(message?.maxTokens) > 0 ? Number(message.maxTokens) : settings.localMaxTokens;
-    return { modelId, maxTokens };
+    const target = typeof message?.target === 'string' && message.target ? message.target : settings.targetLang;
+    return { modelId, maxTokens, target };
   }
 
   async function prepareLocal(message: AT.background.LocalRequest): Promise<AT.MessageResult> {
     const settings = await getSettings({ force: true });
-    const { modelId, maxTokens } = readLocalRequest(message, settings);
+    const { modelId, maxTokens, target } = readLocalRequest(message, settings);
     if (!modelId) throw new Error('no on-device model is selected');
     await ensureHost();
-    const reply = await AT.local.callHost({ type: C.MSG.LOCAL_LOAD, modelId, maxTokens });
+    const reply = await AT.local.callHost({ type: C.MSG.LOCAL_LOAD, modelId, maxTokens, target });
     if (!reply?.ok) {
       // The host decides whether its failure is a configuration or a provider
       // problem; dropping that code here would turn every case into a generic one.

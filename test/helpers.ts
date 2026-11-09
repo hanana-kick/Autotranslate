@@ -48,3 +48,58 @@ export function deferred<T = void>() {
   });
   return { promise, resolve, reject };
 }
+
+/** How much of a GGUF `AT.modelstore` holds back while it rewrites the tokenizer
+ *  tag. A scripted download has to serve that much of its header as real bytes
+ *  or the ingest never gets far enough to patch it. */
+export const GGUF_PROBE_BYTES = 1 << 20;
+
+/**
+ * The head of a PLaMo GGUF file: the magic, version 3, a tensor count and the
+ * metadata section `AT.modelstore`'s ingest reads, padded to the size the ingest
+ * probes. The tokenizer tag is the one a converted file carries (`plamo3`), and
+ * an array of strings sits ahead of it so a walker that only understood scalars
+ * would never reach the key.
+ */
+export function ggufHead(model = 'plamo3', architecture = 'plamo3'): Uint8Array {
+  const parts: number[] = [];
+  const u32 = (value: number): void => {
+    for (let shift = 0; shift < 4; shift += 1) parts.push((value / 2 ** (8 * shift)) & 0xff);
+  };
+  const u64 = (value: number): void => {
+    for (let shift = 0; shift < 8; shift += 1) parts.push(Math.floor(value / 2 ** (8 * shift)) & 0xff);
+  };
+  const raw = (value: Uint8Array): void => {
+    for (const one of value) parts.push(one);
+  };
+  const string = (value: string): void => {
+    const encoded = new Uint8Array(Buffer.from(value, 'utf8'));
+    u64(encoded.length);
+    raw(encoded);
+  };
+  raw(new Uint8Array(Buffer.from('GGUF', 'utf8')));
+  u32(3); // version
+  u64(1); // n_tensors
+  u64(4); // n_kv
+  string('general.architecture');
+  u32(8);
+  string(architecture);
+  string('tokenizer.ggml.added_tokens');
+  u32(9); // array
+  u32(8); // of string
+  u64(2);
+  string('<|plamo:tag|>');
+  string('<|plamo:bos|>');
+  string('tokenizer.ggml.pre');
+  u32(8);
+  string('default');
+  string('tokenizer.ggml.model');
+  u32(8);
+  string(model);
+  // The rest of the probe is zeros: the walker stops at the last metadata entry,
+  // so nothing reads past it.
+  const bytes = Uint8Array.from(parts);
+  const padded = new Uint8Array(GGUF_PROBE_BYTES);
+  padded.set(bytes, 0);
+  return padded;
+}

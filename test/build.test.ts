@@ -22,6 +22,7 @@ const walk = (dir: string, prefix = ''): string[] =>
 const CSP = "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'";
 
 const GENAI = join(ROOT, 'node_modules', '@mediapipe', 'tasks-genai');
+const WLLAMA = join(ROOT, 'node_modules', '@wllama', 'wllama', 'esm');
 
 /** The on-device runtime `scripts/build.ts` copies out of the installed package. */
 const VENDOR_FILES: { from: string; to: string }[] = [
@@ -29,7 +30,9 @@ const VENDOR_FILES: { from: string; to: string }[] = [
   { from: 'wasm/genai_wasm_internal.js', to: 'vendor/mediapipe/wasm/genai_wasm_internal.js' },
   { from: 'wasm/genai_wasm_internal.wasm', to: 'vendor/mediapipe/wasm/genai_wasm_internal.wasm' },
   { from: 'wasm/genai_wasm_nosimd_internal.js', to: 'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.js' },
-  { from: 'wasm/genai_wasm_nosimd_internal.wasm', to: 'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.wasm' }
+  { from: 'wasm/genai_wasm_nosimd_internal.wasm', to: 'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.wasm' },
+  { from: 'index.js', to: 'vendor/wllama/index.js' },
+  { from: 'wasm/wllama.wasm', to: 'vendor/wllama/wllama.wasm' }
 ];
 
 
@@ -198,10 +201,11 @@ test('both bundles ship the on-device runtime byte for byte from the installed p
     const archive = listZip(readFileSync(join(ROOT, 'dist', archiveName(pkg, target)))).map((entry) => entry.name);
     for (const entry of VENDOR_FILES) {
       const shipped = join(ROOT, 'build', target, entry.to);
-      assert.ok(existsSync(shipped), `${target}/${entry.to} was not copied out of @mediapipe/tasks-genai`);
+      const pkg = entry.to.startsWith('vendor/mediapipe/') ? GENAI : WLLAMA;
+      assert.ok(existsSync(shipped), `${target}/${entry.to} was not copied out of its package`);
       assert.deepEqual(
         readFileSync(shipped),
-        readFileSync(join(GENAI, entry.from)),
+        readFileSync(join(pkg, entry.from)),
         `${target}/${entry.to} is not the bytes that were installed`
       );
       assert.ok(archive.includes(entry.to), `${target}: ${entry.to} is missing from the zip`);
@@ -284,7 +288,7 @@ test('the packaging gate refuses a bundle that lost the on-device runtime', () =
   for (const target of TARGETS) {
     assert.equal(build([`--target=${target}`]).status, 0);
     const entries = walk(join('build', target))
-      .filter((name) => !name.startsWith('vendor/mediapipe/'))
+      .filter((name) => !name.startsWith('vendor/mediapipe/') && !name.startsWith('vendor/wllama/'))
       .map((name) => ({ name, data: readFileSync(join(ROOT, 'build', target, name)) }));
     writeFileSync(join(ROOT, 'dist', archiveName(pkg, target)), buildZip(entries));
     const result = verify([target]);
@@ -303,6 +307,7 @@ test('the validator refuses a tree without the on-device runtime', () => {
     for (const name of ['package.json', 'tsconfig.json', 'tsconfig.tools.json', 'src', 'scripts']) {
       cpSync(join(ROOT, name), join(dir, name), { recursive: true });
     }
+    symlinkSync(join(ROOT, 'vendor-src'), join(dir, 'vendor-src'), 'dir');
     mkdirSync(join(dir, 'node_modules'));
     for (const name of readdirSync(join(ROOT, 'node_modules'))) {
       symlinkSync(join(ROOT, 'node_modules', name), join(dir, 'node_modules', name), 'dir');
@@ -319,7 +324,7 @@ test('the validator refuses a tree without the on-device runtime', () => {
     const missing = run(['--check']);
     assert.equal(missing.status, 1);
     assert.match(missing.output, /vendor: @mediapipe\/tasks-genai is not installed \(run npm install\)/);
-    assert.match(missing.output, /vendor: genai_bundle\.mjs is missing from @mediapipe\/tasks-genai/);
+    assert.match(missing.output, /vendor: genai_bundle\.mjs is missing from .*@mediapipe\/tasks-genai/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     // The scratch tree only ever holds symlinks; the installed package the

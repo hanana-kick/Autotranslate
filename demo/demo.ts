@@ -31,7 +31,6 @@ namespace AT.demoPage {
     toggle: elementAs<HTMLButtonElement>('toggle'),
     probe: elementAs<HTMLButtonElement>('probe'),
     merge: elementAs<HTMLInputElement>('merge'),
-    simulation: elementAs<HTMLSelectElement>('simulation'),
     status: elementAs<HTMLElement>('status'),
     verdict: elementAs<HTMLElement>('verdict'),
     calls: elementAs<HTMLElement>('calls'),
@@ -51,8 +50,7 @@ namespace AT.demoPage {
     return found;
   };
   const elements = (root: Element): Element[] => [root, ...root.querySelectorAll('*')];
-  const show = (value: unknown): string =>
-    String(value).replace(/\uE000(\d+)\uE001/g, '⟦$1⟧').replace(/\s+/g, ' ').trim();
+  const show = (value: unknown): string => String(value).replace(/\s+/g, ' ').trim();
   const describe = (node: Node): string => node.parentElement?.tagName.toLowerCase() ?? '?';
   const computedValue = (style: CSSStyleDeclaration, prop: string): string =>
     style.getPropertyValue(prop.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`));
@@ -90,9 +88,9 @@ namespace AT.demoPage {
       item.textContent = `요청 ${String(index + 1)} · 문자열 ${String(call.sent.length)}개 · ${String(call.ms)}ms`;
       call.sent.forEach((sent, position) => {
         const line = document.createElement('span');
-        const marker = document.createElement('em');
-        marker.textContent = show(sent);
-        line.append(marker);
+        const from = document.createElement('em');
+        from.textContent = show(sent);
+        line.append(from);
         const received = call.received[position];
         if (received !== undefined) line.append(` → ${show(received)}`);
         item.append(line);
@@ -139,7 +137,6 @@ namespace AT.demoPage {
       `캐시 ${String(stats.cached)}`,
       `병합 런 ${String(stats.runs)}`,
       `인라인 병합 ${els.merge.checked ? '켜짐' : '꺼짐'}`,
-      `모델 ${els.simulation.value === 'lossy' ? '마커 유실 시뮬레이션' : '마커 보존'}`,
       extra
     ].filter(Boolean).join(' · ');
   }
@@ -152,10 +149,7 @@ namespace AT.demoPage {
       maxNodes: 600,
       translate: async (texts) => {
         const started = performance.now();
-        const out = await AT.demo.translate(texts, {
-          lossy: els.simulation.value === 'lossy',
-          latencyMs: 140
-        });
+        const out = await AT.demo.translate(texts, { latencyMs: 140 });
         calls.push({ sent: texts, received: out, ms: Math.round(performance.now() - started) });
         renderCalls();
         return out;
@@ -243,7 +237,6 @@ namespace AT.demoPage {
   });
   els.probe.addEventListener('click', verify);
   els.merge.addEventListener('change', rerun);
-  els.simulation.addEventListener('change', rerun);
 
   renderCalls();
   renderMapping();
