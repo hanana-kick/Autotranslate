@@ -77,7 +77,7 @@ fs.writeFileSync(path.join(OUT, 'ort-common.all.js'), common);
     .filter(Boolean)
     .map((n) => (n === 'default' ? 'default: $l' : n.includes(' as ') ? n.split(' as ').map((y) => y.trim()).reverse().join(': ') : n));
   s = s.slice(0, m.index) + 'var AT_ORT_WEBGPU = { ' + entries.join(', ') + ' };\nglobalThis.AT_ORT_WEBGPU = AT_ORT_WEBGPU;\n';
-  s = s.replaceAll('import.meta.url', '(globalThis.__ORT_SCRIPT_URL || (globalThis.__ORT_SCRIPT_URL = (document.currentScript && document.currentScript.src) || location.href))');
+  s = s.replaceAll('import.meta.url', '(globalThis.__ORT_SCRIPT_URL || (globalThis.__ORT_SCRIPT_URL = (typeof document !== "undefined" && document.currentScript && document.currentScript.src) || (typeof location !== "undefined" && location.href) || ""))');
   s = s.replace(/import\.meta\b/g, '(globalThis.__ORT_SCRIPT_META || (globalThis.__ORT_SCRIPT_META = { url: (document.currentScript && document.currentScript.src) || location.href }))');
   s = s.replace(/import_meta_url/g, '_script_url').replace(/import_meta/g, '_scriptmeta');
   fs.writeFileSync(path.join(OUT, 'ort-webgpu.all.js'), s);
@@ -104,7 +104,7 @@ fs.writeFileSync(path.join(OUT, 'ort-common.all.js'), common);
     .filter(Boolean)
     .map((n) => (n.includes(' as ') ? n.split(' as ').map((y) => y.trim()).reverse().join(': ') : n));
   s = s.slice(0, start) + 'var AT_TRANSFORMERS = { ' + names.join(', ') + ' };\nglobalThis.AT_TRANSFORMERS = AT_TRANSFORMERS;\n';
-  s = s.replaceAll('import.meta.url', '(globalThis.__TF_SCRIPT_URL || (globalThis.__TF_SCRIPT_URL = (document.currentScript && document.currentScript.src) || location.href))');
+  s = s.replaceAll('import.meta.url', '(globalThis.__TF_SCRIPT_URL || (globalThis.__TF_SCRIPT_URL = (typeof document !== "undefined" && document.currentScript && document.currentScript.src) || (typeof location !== "undefined" && location.href) || ""))');
   s = s.replace(/import\.meta\b/g, '(globalThis.__TF_SCRIPT_META || (globalThis.__TF_SCRIPT_META = { url: (document.currentScript && document.currentScript.src) || location.href }))');
   s = s.replace(/import_meta_url/g, '_script_url').replace(/import_meta/g, '_scriptmeta');
   s = s.replace('  Tensor: Tensor2,', '  Tensor: ORT_Tensor,');
