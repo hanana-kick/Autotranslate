@@ -21,7 +21,9 @@
     "test:browser": "node --test --test-concurrency=1 test/browser/*.test.mjs",
     "test:browser:dom": "node --test test/browser/dom.test.mjs",
     "plamo:gguf": "node scripts/plamo-gguf.ts",
-    "onnx:vendor": "node scripts/onnx-vendor.ts"
+    "onnx:vendor": "node scripts/onnx-vendor.ts",
+    "prebuild": "npm run onnx:vendor",
+    "preci": "npm run onnx:vendor"
   },
   "devDependencies": {
     "@huggingface/transformers": "^4.3.2",
