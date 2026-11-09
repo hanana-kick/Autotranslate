@@ -20,6 +20,10 @@ runs:
       shell: bash
       run: npm ci --no-audit --no-fund
 
+    - name: Generate the ONNX runtime vendor files
+      shell: bash
+      run: npm run onnx:vendor
+
     - name: Type-check sources and tooling
       shell: bash
       run: npm run typecheck
