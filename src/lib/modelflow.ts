@@ -30,7 +30,7 @@ namespace AT.modelflow {
   };
 
   /** The source the extension offers by default; the user may still pick a file. */
-  export const SOURCE = AT.local.MODEL_SOURCES[0]!;
+  export const SOURCE = AT.local.defaultSource();
 
   /** Eviction would cost the user a 3.6 GiB download, so ask for an exemption. */
   export async function keepStorage(): Promise<void> {

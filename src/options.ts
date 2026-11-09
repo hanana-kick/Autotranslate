@@ -509,7 +509,7 @@ namespace AT.options {
     AT.ui.bindTabSwitch(el('enabled'), document.getElementById('tabHost')!, document.getElementById('tabStatus')!);
     buildSelects();
     settings = await AT.settings.load();
-    el('modelUrl').value = AT.local.MODEL_SOURCES[0]?.url ?? '';
+    el('modelUrl').value = AT.local.defaultSource().url;
     if (settings.engine === 'local') el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     // Ask first, then report: the usage line is only meaningful once the
     // browser has answered whether it will keep the bytes.
