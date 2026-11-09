@@ -771,17 +771,20 @@ test('closing a tab drops its state and storage edits refresh the cache', async 
   assert.equal(savedReply.ok, true, 'the settings save is acknowledged: ' + JSON.stringify(savedReply));
   const cached = await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
   assert.equal(cached.ok, true);
+  await new Promise((resolve) => setImmediate(resolve));
   const before = recorded.tabMessages.filter((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE).at(-1);
   assert.equal(before!.message.settings.targetLang, 'de', 'the cached settings are reused');
 
   recorded.storage.settings.targetLang = 'ja';
   const stale = await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
   assert.equal(stale.ok, true);
+  await new Promise((resolve) => setImmediate(resolve));
   const stillCached = recorded.tabMessages.filter((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE).at(-1);
   assert.equal(stillCached!.message.settings.targetLang, 'de', 'an external write is invisible until onChanged fires');
 
   await fire(events.storageChanged, { settings: { newValue: recorded.storage.settings } }, 'local');
   await send({ type: AT.C.MSG.TRANSLATE_TAB, tabId: 7 });
+  await new Promise((resolve) => setImmediate(resolve));
   const refreshed = recorded.tabMessages.filter((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE).at(-1);
   assert.equal(refreshed!.message.settings.targetLang, 'ja', 'onChanged invalidates the settings cache');
 });
