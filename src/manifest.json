@@ -3,7 +3,7 @@
   "name": "__MSG_extensionName__",
   "short_name": "__MSG_shortName__",
   "description": "__MSG_description__",
-  "version": "0.1.2",
+  "version": "0.1.6",
   "default_locale": "en",
   "minimum_chrome_version": "121",
   "icons": {
@@ -27,7 +27,7 @@
       "vendor/browser-polyfill.js",
       "lib/constants.js",
       "lib/browser.js",
-      "lib/plamo3.js",
+      "lib/gemma.js",
       "lib/pagecontext.js",
       "lib/targets.js",
       "lib/rules.js",
@@ -53,10 +53,11 @@
     "scripting",
     "contextMenus",
     "offscreen",
-    "sidePanel"
+    "sidePanel",
+    "unlimitedStorage"
   ],
   "side_panel": {
-    "default_path": "welcome.html"
+    "default_path": "options.html"
   },
   "host_permissions": [
     "<all_urls>"

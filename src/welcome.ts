@@ -1,6 +1,5 @@
-// First run: pick the target language, install the model once, then turn
-// translation on. The extension is disabled until this page finishes, so a
-// fresh install never sits there translating with no model.
+// First run: choose an on-device model or configure a compatible server.
+// Setup never opts a tab in: translation still requires explicit per-tab ON.
 // Compiled as a classic script next to welcome.html; loads after
 // lib/constants.js, lib/browser.js, lib/local.js, lib/modelstore.js,
 // lib/modelflow.js and lib/settings.js.
@@ -15,10 +14,12 @@ namespace AT.welcome {
     cancel: HTMLButtonElement;
     pick: HTMLButtonElement;
     modelFile: HTMLInputElement;
+    modelToken: HTMLInputElement;
     progress: HTMLProgressElement;
     status: HTMLParagraphElement;
     start: HTMLButtonElement;
     options: HTMLButtonElement;
+    serverOptions: HTMLButtonElement;
   };
 
   function el<K extends keyof Fields>(id: K): Fields[K] {
@@ -96,15 +97,17 @@ namespace AT.welcome {
       const text =
         outcome.error === 'cancelled'
           ? AT.i18n.msg('options_cancelled')
-          : outcome.error === 'no-space'
-            ? AT.i18n.msg('options_noSpace', AT.local.formatBytes(AT.modelflow.SOURCE.size))
-            : outcome.stored
-              // The file is in storage; only loading it failed. Saying the
-              // import failed would send the user to repeat a gigabyte copy.
-              ? AT.i18n.msg('welcome_modelStored', outcome.error ?? 'model-load-failed')
-              : source === 'file'
-                ? AT.i18n.msg('welcome_importFailed', outcome.error ?? 'unknown')
-                : `${AT.i18n.msg('options_downloadFailed')}: ${outcome.error ?? 'unknown'}`;
+          : outcome.error === 'needs-token'
+            ? AT.i18n.msg('options_needsToken')
+            : outcome.error === 'no-space'
+              ? AT.i18n.msg('options_noSpace', AT.local.formatBytes(AT.modelflow.SOURCE.size))
+              : outcome.stored
+                // The file is in storage; only loading it failed. Saying the
+                // import failed would send the user to repeat a 3.9 GiB copy.
+                ? AT.i18n.msg('welcome_modelStored', outcome.error ?? 'model-load-failed')
+                : source === 'file'
+                  ? AT.i18n.msg('welcome_importFailed', outcome.error ?? 'unknown')
+                  : `${AT.i18n.msg('options_downloadFailed')}: ${outcome.error ?? 'unknown'}`;
       readyModel = null;
       renderInstalled();
       setStatus(text, 'error');
@@ -132,9 +135,15 @@ namespace AT.welcome {
     inflight = controller;
     setBusy(true);
     setStatus(AT.i18n.msg('welcome_starting'), 'info');
+    const token = el('modelToken').value.trim();
+    await AT.modelstore.setToken(token).catch((error: unknown) => AT.warn('storing the token failed', reason(error)));
     try {
       await settle(
-        await AT.modelflow.installFromUrl({ signal: controller.signal, onProgress: showProgress })
+        await AT.modelflow.installFromUrl({
+          token,
+          signal: controller.signal,
+          onProgress: showProgress
+        })
       );
     } catch (error: unknown) {
       inflight = null;
@@ -162,13 +171,14 @@ namespace AT.welcome {
     }
   }
 
-  /** Done: the extension is on, points at the model, and has a target language. */
+  /** Finish provider setup without selecting a tab for translation. */
   async function start(): Promise<void> {
-    if (!readyModel) return;
+    const remote = settings?.engine === 'openai' && AT.settings.serverConfigured(settings);
+    if (!readyModel && !remote) return;
     el('start').disabled = true;
     settings = await AT.settings.save({
-      enabled: true,
-      localModelId: readyModel.id,
+      enabled: false,
+      localModelId: readyModel?.id ?? settings!.localModelId,
       targetLang: el('targetLang').value
     });
     document.body.dataset.done = 'true';
@@ -186,13 +196,16 @@ namespace AT.welcome {
   }
 
   function wire(): void {
+    el('serverOptions').addEventListener('click', () => {
+      void AT.settings.save({ engine: 'openai' }).then(() => AT.ui.openPage('options.html', 'auto', AT.ui.targetTabId()));
+    });
     el('download').addEventListener('click', () => void download());
     el('cancel').addEventListener('click', () => inflight?.abort());
     el('pick').addEventListener('click', () => el('modelFile').click());
     el('modelFile').addEventListener('change', () => void pickFile());
     el('start').addEventListener('click', () => void start());
     el('options').addEventListener('click', () => {
-      void AT.api?.runtime.openOptionsPage();
+      void AT.ui.openPage('options.html', 'auto', AT.ui.targetTabId());
     });
   }
 
@@ -209,6 +222,12 @@ namespace AT.welcome {
     );
     el('targetLang').value = settings.targetLang;
     wire();
+    if (settings.engine === 'openai') {
+      el('start').disabled = !AT.settings.serverConfigured(settings);
+      setStatus(AT.i18n.msg('server_needConfig'), 'info');
+      return;
+    }
+    el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     await showSupport();
     // A profile that already has the file (a reinstall, a second browser) skips
     // the transfer and only has to confirm.

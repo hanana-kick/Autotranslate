@@ -1,6 +1,6 @@
 {
   "name": "autotranslate",
-  "version": "0.1.2",
+  "version": "0.1.6",
   "private": true,
   "description": "Automatic page translation extension for Chrome and Firefox (Manifest V3).",
   "type": "module",
@@ -10,18 +10,22 @@
     "build:firefox": "node scripts/build.ts --target=firefox",
     "watch": "node scripts/build.ts --watch",
     "icons": "node scripts/make-icons.ts",
-    "plamo:gguf": "node scripts/plamo-gguf.ts",
     "predemo": "tsc -p tsconfig.json",
     "demo": "node scripts/serve-demo.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tools.json",
     "lint": "node scripts/build.ts --check",
     "verify": "node scripts/verify-package.ts",
     "pretest": "tsc -p tsconfig.json",
-    "test": "node --test test/*.test.ts",
+    "test": "node --test test/*.test.ts test/native-extension/host-monitor.test.mjs",
     "ci": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify",
+    "test:browser": "node --test --test-concurrency=1 test/browser/*.test.mjs",
+    "test:browser:dom": "node --test test/browser/dom.test.mjs",
+    "plamo:gguf": "node scripts/plamo-gguf.ts",
     "onnx:vendor": "node scripts/onnx-vendor.ts"
   },
   "devDependencies": {
+    "@huggingface/transformers": "^4.3.2",
+    "@mediapipe/tasks-genai": "0.10.30",
     "@types/node": "^26.6.5",
     "@wllama/wllama": "^3.8.1",
     "typescript": "^5.9.3",
@@ -29,8 +33,5 @@
   },
   "engines": {
     "node": ">=24"
-  },
-  "dependencies": {
-    "@huggingface/transformers": "^4.3.2"
   }
 }

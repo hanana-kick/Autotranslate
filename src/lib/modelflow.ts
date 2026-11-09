@@ -9,6 +9,7 @@ namespace AT.modelflow {
 
   export type Install = {
     url?: string;
+    token?: string;
     signal?: AbortSignal;
     onProgress?: Progress;
   };
@@ -22,24 +23,24 @@ namespace AT.modelflow {
     name: string;
     bytes: number;
     seconds: number;
-    /** `cancelled`, `bad-url`, the store's own code, or a load failure. */
+    /** `cancelled`, `needs-token`, `bad-url`, the store's own code, or a load failure. */
     error: string | null;
     /** Ids of earlier copies this transfer replaced. */
     retired: string[];
   };
 
-  /** The card the extension offers by default: the best file that can actually be
-   *  fetched. The user may still name another url or pick a file. */
-  export const SOURCE = AT.local.defaultSource();
+  /** The source the extension offers by default; the user may still pick a file. */
+  export const SOURCE = AT.local.MODEL_SOURCES[0]!;
 
-  /** Eviction would cost the user a re-download of the card's whole file, so ask
-   *  for an exemption from the start. */
+  /** Eviction would cost the user a 3.6 GiB download, so ask for an exemption. */
   export async function keepStorage(): Promise<void> {
-    try {
-      await AT.modelstore.requestPersistence();
-    } catch (error: unknown) {
+    // Firefox can leave this promise pending while a browser-owned permission
+    // panel awaits input. Persistence is optional: download quota is checked
+    // independently. Never make accepting an eviction exemption a prerequisite
+    // for downloading/importing the user's model. No permission is auto-granted.
+    void AT.modelstore.requestPersistence().catch((error: unknown) => {
       AT.warn('asking for persistent storage failed', String((error as { message?: unknown })?.message ?? error));
-    }
+    });
   }
 
   /**
@@ -56,22 +57,47 @@ namespace AT.modelflow {
     if (!result.ok || !result.record) {
       return { ok: false, stored: false, modelId: '', name, bytes, seconds, error: result.error ?? 'unknown', retired: [] };
     }
-    const prepared = await prepare(result.record.id);
-    return {
-      ok: prepared.ok,
-      stored: true,
-      modelId: result.record.id,
-      name: result.record.name,
-      bytes,
-      seconds,
-      error: prepared.ok ? null : (prepared.error ?? 'model-load-failed'),
-      retired: result.retired ?? []
+    const record = result.record;
+    const activate = async (): Promise<Outcome> => {
+      const previous = await AT.settings.load();
+      const prepared = await prepare(record.id);
+      const outcome: Outcome = {
+        ok: prepared.ok, stored: true, modelId: record.id, name: record.name,
+        bytes, seconds, error: prepared.ok ? null : (prepared.error ?? 'model-load-failed'), retired: []
+      };
+      if (!prepared.ok) return outcome;
+      try {
+        // Persist the selection before deleting anything. On a storage failure
+        // both files remain recoverable; a failed model never replaces the old one.
+        await AT.settings.save({ localModelId: record.id });
+      } catch (error: unknown) {
+        return { ...outcome, ok: false, error: String((error as Error)?.message ?? error) };
+      }
+      try {
+        outcome.retired = await AT.modelstore.retireReplaced(record.id, previous.localModelId);
+      } catch (error: unknown) {
+        // Cleanup may be retried later; the new, verified selection still works.
+        AT.warn('retiring the replaced model failed', error);
+      }
+      return outcome;
     };
+    // Options and onboarding can be open together. Serialize activation across
+    // extension documents, not just within one UI's single-flight button.
+    const locks = globalThis.navigator?.locks;
+    return locks ? locks.request('autotranslate-model-activation', activate) : activate();
   }
 
   /** Asks the host to load a model; only a successful load means it can translate. */
   export async function prepare(modelId: string): Promise<{ ok: boolean; error: string | null }> {
-    const reply = await AT.sendMessage({ type: C.MSG.LOCAL_PREPARE, modelId });
+    const message = { type: C.MSG.LOCAL_PREPARE, modelId };
+    let reply = await AT.sendMessage(message);
+    // Event-page startup can lose the first message after a long download.
+    // Only an idempotent prepare with a missing receiver may be retried, once,
+    // after a real host handshake. Never retry a model/provider failure here.
+    if (!reply.ok && reply.code === 'no-response') {
+      const awake = await AT.sendMessage({ type: C.MSG.LOCAL_GET_STATUS });
+      if (awake.ok) reply = await AT.sendMessage(message);
+    }
     if (reply?.ok) return { ok: true, error: null };
     return { ok: false, error: String(reply?.error ?? 'the model did not load') };
   }
@@ -80,29 +106,18 @@ namespace AT.modelflow {
     const started = Date.now();
     const url = AT.local.normalizeDownloadUrl(install.url ?? SOURCE.url);
     if (!url) return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'bad-url', retired: [] };
-    const card = AT.local.sourceFor(url) ?? (url === SOURCE.url ? SOURCE : null);
-    const expected = card?.size;
+    const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
     if (expected && !(await AT.modelstore.fits(expected))) {
       return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'no-space', retired: [] };
     }
     await keepStorage();
-    // An ONNX card is a set of files, not one graph: fetch the parts beside it.
-    const result =
-      card?.kind === 'onnx'
-        ? await AT.modelstore.ingestOnnx({
-            graphUrl: url,
-            name: card.dtype === 'fp16' ? 'model_fp16.onnx' : undefined,
-            expectedSize: expected,
-            signal: install.signal,
-            onProgress: install.onProgress,
-            parts: card.parts ?? []
-          })
-        : await AT.modelstore.download({
-            url,
-            expectedSize: expected,
-            signal: install.signal,
-            onProgress: install.onProgress
-          });
+    const result = await AT.modelstore.download({
+      url,
+      token: install.token ?? '',
+      expectedSize: expected,
+      signal: install.signal,
+      onProgress: install.onProgress
+    });
     return settle(result, started);
   }
 
@@ -113,9 +128,10 @@ namespace AT.modelflow {
     return settle(result, started);
   }
 
-  /** The model the user already has, if any; the newest one wins. */
+  /** Prefer the active selection over a newer, potentially failed staged file. */
   export async function installed(): Promise<AT.local.ModelRecord | null> {
     const models = await AT.modelstore.list();
-    return models[0] ?? null;
+    const settings = await AT.settings.load();
+    return models.find((model) => model.id === settings.localModelId) ?? models[0] ?? null;
   }
 }

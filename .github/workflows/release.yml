@@ -1,69 +1,115 @@
-name: Release
+name: Release (Chrome compatible server)
 
-# One path: a push to main builds, tests and packages the extension, then
-# publishes it as the release for the version in package.json — creating the
-# release the first time that version is pushed, and replacing its assets on
-# every push after. Bumping the version is how you cut a new release.
-
+# This feature release requires current real SERVER-mode extension QA, browser
+# regressions, planner acceptance and reproducible builds. It does not relabel
+# historical native TranslateGemma runs as validation of a changed archive.
+# The native model/worker implementation is retained; fresh native-model and
+# local-speed certification are separate. Firefox issue #2 remains unresolved.
 on:
   push:
     branches: [main]
-
 permissions:
   contents: write
-
+  actions: read
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
+  browser:
+    uses: ./.github/workflows/browser.yml
+    permissions:
+      contents: read
+  planner:
+    uses: ./.github/workflows/planner-audit.yml
+    permissions:
+      contents: read
+  server:
+    uses: ./.github/workflows/compatible-server.yml
+    permissions:
+      contents: read
   release:
-    name: Package and publish
+    needs: [browser, planner, server]
+    name: Publish the exact server-tested Chrome package
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-
-      # Installs, type-checks, validates, tests, builds both bundles, runs the
-      # packaging gate and proves the archives are reproducible. Nothing below
-      # runs unless all of that passed.
       - uses: ./.github/actions/build-extension
-
-      - name: Checksums
+      - uses: actions/download-artifact@v4
+        with:
+          name: actual-server-extension-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/server-qa
+      - name: Check real model evidence against the release archive
         shell: bash
         run: |
           set -euo pipefail
-          (cd dist && sha256sum ./*.zip > SHA256SUMS.txt)
-          cat dist/SHA256SUMS.txt
-
-      - name: Publish the release for this version
-        shell: bash
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import path from 'node:path';import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';import {execFileSync} from 'node:child_process';
+          const dir=path.join(process.env.RUNNER_TEMP,'server-qa');
+          const version=JSON.parse(fs.readFileSync('package.json','utf8')).version;
+          assert.equal(version,'0.1.6','reassess release scope for future versions');
+          const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+          const archive='dist/autotranslate-'+version+'-chrome.zip';
+          const sha=hash(fs.readFileSync(archive));
+          assert.equal(hash(fs.readFileSync(path.join(dir,'candidate-extension.zip'))),sha,'publish only the package actually installed in the server test');
+          const report=JSON.parse(fs.readFileSync(path.join(dir,'summary.json'),'utf8'));
+          assert.equal(report.version,version);assert.equal(report.passed,true);assert.equal(report.installedFilesUnchanged,true);assert.deepEqual(report.errors,[]);
+          const expected=[
+            'fresh-onboarding-can-select-server-without-model',
+            'actual-server-model-list-and-unsaved-keyless-translation-test',
+            'bearer-auth-error-and-real-authenticated-translation',
+            'real-server-tab-opt-in-translation-and-exact-html-restoration',
+            'dynamic-insertion-text-node-reuse-and-current-source-restore',
+            'server-mode-needs-no-local-model-or-native-generation-and-keeps-key-out-of-content',
+            'HTTP-rate-limit-fails-without-DOM-corruption-and-explicit-retry-recovers'
+          ];
+          for(const name of expected)assert.equal(report.checks.find(c=>c.name===name)?.passed,true,name);
+          assert.ok(report.requests.some(r=>r.path.endsWith('/chat/completions')&&r.status===200&&r.completed));
+          assert.ok(report.requests.every(r=>r.credentialsInBody!==true));
+          const backend=JSON.parse(fs.readFileSync(path.join(dir,'backend-evidence.json'),'utf8'));
+          assert.equal(backend.cpuBackend,true);assert.equal(backend.gpuLayers,0);
+          const model=JSON.parse(fs.readFileSync(path.join(dir,'model-provenance.json'),'utf8'));
+          assert.ok(model.models.some(m=>m.name===report.model));
+          const names=execFileSync('unzip',['-Z1',archive],{encoding:'utf8'}).trim().split('\n').filter(n=>!n.endsWith('/'));
+          assert.equal(names.length,40);
+          const installed=JSON.parse(fs.readFileSync(path.join(dir,'installed-sha256.json'),'utf8'));
+          for(const name of names){
+            assert.ok(!name.startsWith('/')&&!name.split('/').includes('..'));
+            const bytes=execFileSync('unzip',['-p',archive,name],{maxBuffer:64*1024*1024});
+            assert.equal(hash(bytes),installed[name],'installed file differs: '+name);
+          }
+          const result={version,sourceCommit:process.env.GITHUB_SHA,workflowRun:process.env.GITHUB_RUN_ID,sha256:sha,browser:report.browser,backend,model:model.models.find(m=>m.name===report.model),checks:report.checks,installedFiles:names.length,scope:'Actual installed Chrome extension with real HTTP model responses; local native runtime is retained but not newly certified by this server-mode run.'};
+          fs.writeFileSync('dist/SERVER_QA.json',JSON.stringify(result,null,2));
+          fs.writeFileSync('dist/SHA256SUMS.txt',sha+'  '+path.basename(archive)+'\n');
+          console.log(JSON.stringify({version,sha256:sha,checks:expected.length,installedFiles:names.length}));
+          JS
+      - name: Publish Chrome with explicit verification scope
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           tag="v$version"
-          files=(dist/*.zip dist/SHA256SUMS.txt)
-          notes="$RUNNER_TEMP/notes.md"
-          {
-            echo "Autotranslate $version, built from \`${GITHUB_SHA::12}\`."
-            echo
-            echo "- workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo
-            echo "Chrome: unzip, then load the folder from chrome://extensions with"
-            echo "Developer mode on. Firefox: install the zip as a temporary add-on from"
-            echo "about:debugging, or sign it with \`web-ext\`."
-          } > "$notes"
+          notes="$RUNNER_TEMP/server-release-notes.md"
+          cat > "$notes" <<EOF
+          Autotranslate $version — Chrome, built from \`${GITHUB_SHA::12}\`.
 
+          - OpenAI-compatible Chat Completions server selection: Base URL, optional bearer API key, model ID, model listing and unsaved-settings connection test.
+          - Server mode requires no on-device model download or WebGPU. It sends explicitly selected tabs' text to the configured server.
+          - Per-tab ON/OFF, source-bound side panel/separate options window, dynamic DOM translation and current-source restoration are retained.
+          - This exact archive passed actual installed-extension QA against a real CPU Ollama/Qwen2.5:7B server. Authentication/rate-limit error cases use an explicitly labelled forwarding gateway; successful translations are not fabricated.
+          - Type/unit/package, deterministic browser and planner gates also passed. SERVER_QA.json records the current server-mode evidence and exact archive SHA-256.
+          - The original local inference SDK/model/worker are retained. This release does not claim a fresh native TranslateGemma model run or a new local-inference speed benchmark. Existing native-startup limitations and Firefox issue #2 remain; no Firefox archive is published.
+
+          Verification run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          Setup: Options → OpenAI-compatible server → Base URL/model → Save → explicitly enable the intended tab.
+          EOF
           if gh release view "$tag" >/dev/null 2>&1; then
-            echo "release $tag exists: replacing its assets"
-            gh release upload "$tag" "${files[@]}" --clobber
-          else
-            gh release create "$tag" "${files[@]}" \
-              --title "Autotranslate $version" \
-              --notes-file "$notes" \
-              --target "$GITHUB_SHA"
+            echo 'An existing release is never silently overwritten.' >&2
+            exit 1
           fi
+          gh release create "$tag" dist/*-chrome.zip dist/SHA256SUMS.txt dist/SERVER_QA.json --title "Autotranslate $version (Chrome)" --notes-file "$notes" --target "$GITHUB_SHA"
           gh release view "$tag"

@@ -9,6 +9,16 @@ namespace AT.options {
   // the call sites stay as short as the untyped version was.
   type Fields = {
     enabled: HTMLInputElement;
+    engine: HTMLSelectElement;
+    localSection: HTMLElement;
+    serverSection: HTMLElement;
+    serverBaseUrl: HTMLInputElement;
+    serverApiKey: HTMLInputElement;
+    serverModel: HTMLInputElement;
+    serverTimeoutMs: HTMLInputElement;
+    serverModels: HTMLDataListElement;
+    loadServerModels: HTMLButtonElement;
+    serverStatus: HTMLParagraphElement;
     showBadge: HTMLInputElement;
     debug: HTMLInputElement;
     testEngine: HTMLButtonElement;
@@ -21,6 +31,7 @@ namespace AT.options {
     localUsage: HTMLParagraphElement;
     modelList: HTMLUListElement;
     modelUrl: HTMLInputElement;
+    modelToken: HTMLInputElement;
     downloadModel: HTMLButtonElement;
     cancelDownload: HTMLButtonElement;
     modelFile: HTMLInputElement;
@@ -44,9 +55,10 @@ namespace AT.options {
 
   // What the form holds: `version` comes from settings.save, and the limit
   // fields are still the input strings normalize() later coerces.
-  type FormValues = Omit<AT.settings.Settings, 'version' | 'maxNodes' | 'localMaxTokens'> & {
+  type FormValues = Omit<AT.settings.Settings, 'version' | 'enabled' | 'maxNodes' | 'localMaxTokens' | 'serverRevision' | 'serverTimeoutMs'> & {
     maxNodes: string;
     localMaxTokens: string;
+    serverTimeoutMs: string;
   };
 
   /** The TEST_ENGINE reply: `result` is there exactly when `ok` is. */
@@ -112,8 +124,19 @@ namespace AT.options {
     );
   }
 
+  function renderEngine(): void {
+    const remote = el('engine').value === 'openai';
+    el('localSection').hidden = remote;
+    el('serverSection').hidden = !remote;
+  }
+
   function render(): void {
-    el('enabled').checked = settings!.enabled;
+    el('engine').value = settings!.engine;
+    el('serverBaseUrl').value = settings!.serverBaseUrl;
+    el('serverApiKey').value = settings!.serverApiKey;
+    el('serverModel').value = settings!.serverModel;
+    el('serverTimeoutMs').value = String(settings!.serverTimeoutMs);
+    renderEngine();
     el('showBadge').checked = settings!.showBadge;
     el('debug').checked = settings!.debug;
     el('targetLang').value = settings!.targetLang;
@@ -128,14 +151,18 @@ namespace AT.options {
 
   function collect(): FormValues {
     return {
-      enabled: el('enabled').checked,
+      engine: el('engine').value === 'openai' ? 'openai' : 'local',
+      serverBaseUrl: el('serverBaseUrl').value,
+      serverApiKey: el('serverApiKey').value,
+      serverModel: el('serverModel').value,
+      serverTimeoutMs: el('serverTimeoutMs').value,
       showBadge: el('showBadge').checked,
       debug: el('debug').checked,
       targetLang: el('targetLang').value,
       sourceLang: el('sourceLang').value,
       maxNodes: el('maxNodes').value,
       siteRules: settings!.siteRules,
-      localModelId: el('localModel').value,
+      localModelId: el('engine').value === 'openai' ? settings!.localModelId : el('localModel').value,
       localMaxTokens: el('localMaxTokens').value
     };
   }
@@ -147,7 +174,9 @@ namespace AT.options {
     const patch: Partial<AT.settings.Settings> = {
       ...nextSettings,
       maxNodes: Number(nextSettings.maxNodes),
-      localMaxTokens: Number(nextSettings.localMaxTokens)
+      localMaxTokens: Number(nextSettings.localMaxTokens),
+      serverTimeoutMs: Number(nextSettings.serverTimeoutMs),
+      serverBaseUrl: AT.settings.normalizeServerBaseUrl(nextSettings.serverBaseUrl)
     };
     settings = await AT.settings.save(patch);
     render();
@@ -225,10 +254,6 @@ namespace AT.options {
 
   async function refreshModels(): Promise<void> {
     try {
-      // Bytes no record claims are invisible here and undeletable from here;
-      // sweeping first makes the list and the usage line say the same thing.
-      const swept = await AT.modelstore.sweep();
-      if (swept.removed.length > 0) AT.log('dropped unclaimed model files', swept.removed.join(', '));
       models = await AT.modelstore.list();
       const usage = await AT.modelstore.usage();
       const said = AT.i18n.msg('options_usage', [
@@ -296,17 +321,19 @@ namespace AT.options {
     el('modelProgress').hidden = true;
     setBusy(false);
     if (!outcome.ok) {
-      const detail = `: ${outcome.error ?? 'unknown'}`;
+      const detail = outcome.error === 'needs-token' ? '' : `: ${outcome.error ?? 'unknown'}`;
       // Two different things happened: the bytes are stored but the model does
       // not load, or nothing arrived at all. Saying "download failed" for the
-      // first one sends the user to re-download the gigabyte they already have.
+      // first one sends the user to re-download 3.9 GiB they already have.
       setStatus(
         el('modelStatus'),
         outcome.error === 'cancelled'
           ? AT.i18n.msg('options_cancelled')
-          : outcome.stored
-            ? AT.i18n.msg('options_modelStored', outcome.error ?? 'model-load-failed')
-            : AT.i18n.msg('options_downloadFailed') + detail,
+          : outcome.error === 'needs-token'
+            ? AT.i18n.msg('options_needsToken')
+            : outcome.stored
+              ? AT.i18n.msg('options_modelStored', outcome.error ?? 'model-load-failed')
+              : AT.i18n.msg('options_downloadFailed') + detail,
         'error'
       );
       if (outcome.stored && outcome.modelId) {
@@ -342,17 +369,19 @@ namespace AT.options {
       setStatus(el('modelStatus'), AT.i18n.msg('options_badUrl'), 'error');
       return;
     }
-    // Claim the transfer before the first await: a second click used to start a
-    // second download of the same gigabyte.
+    // Claim the transfer before the first await: a second click during the
+    // token write used to start a second download of the same 3.9 GiB.
     if (inflight) return;
-    const expected = AT.local.sourceFor(url)?.size;
+    const token = el('modelToken').value.trim();
+    const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
     const controller = new AbortController();
     inflight = controller;
     setBusy(true);
     showProgress(0, expected ?? null);
+    await AT.modelstore.setToken(token).catch((error: unknown) => setStatus(el('modelStatus'), reason(error), 'error'));
     try {
       await settle(
-        await AT.modelflow.installFromUrl({ url, signal: controller.signal, onProgress: showProgress })
+        await AT.modelflow.installFromUrl({ url, token, signal: controller.signal, onProgress: showProgress })
       );
     } finally {
       if (inflight === controller) inflight = null;
@@ -388,7 +417,25 @@ namespace AT.options {
   }
 
   function wire(): void {
-    el('save').addEventListener('click', () => persist(collect()));
+    el('save').addEventListener('click', async () => {
+      try { await persist(collect()); }
+      catch { setStatus(el('saveStatus'), AT.i18n.msg('server_badConfig'), 'error'); }
+    });
+    el('engine').addEventListener('change', () => {
+      renderEngine();
+      if (el('engine').value === 'local') void refreshModels();
+    });
+    el('loadServerModels').addEventListener('click', async () => {
+      el('loadServerModels').disabled = true;
+      setStatus(el('serverStatus'), AT.i18n.msg('server_loadingModels'), 'info');
+      try {
+        const response = await AT.sendMessage({ type: C.MSG.SERVER_MODELS, draft: collect() });
+        if (!response.ok || !Array.isArray(response.models)) throw new Error(String(response.error ?? AT.i18n.msg('server_modelsUnavailable')));
+        el('serverModels').replaceChildren(...response.models.filter((id): id is string => typeof id === 'string').map(id => option(id, id)));
+        setStatus(el('serverStatus'), AT.i18n.msg('server_modelsLoaded', String(response.models.length)), 'ok');
+      } catch (error) { setStatus(el('serverStatus'), reason(error), 'error'); }
+      finally { el('loadServerModels').disabled = false; }
+    });
 
     el('reset').addEventListener('click', async () => {
       settings = await AT.settings.reset();
@@ -410,24 +457,18 @@ namespace AT.options {
       setStatus(el('testStatus'), AT.i18n.msg('options_testing'), 'info');
       const response = (await AT.sendMessage({
         type: C.MSG.TEST_ENGINE,
-        target: el('targetLang').value
+        target: el('targetLang').value,
+        draft: collect()
       })) as TestReply;
       if (!response?.ok) {
         setStatus(el('testStatus'), `${response?.code ? `[${response.code}] ` : ''}${response?.error}`, 'error');
-        return;
-      }
-      const output = (response.result.output ?? '').trim();
-      if (!output) {
-        // The model said nothing. That is not a working translation, and the
-        // page will have to ask that text again later.
-        setStatus(el('testStatus'), AT.i18n.msg('options_testEmpty'), 'warn');
         return;
       }
       setStatus(
         el('testStatus'),
         // Both placeholders of "$1$ ($2$ ms)" need a value: msg() takes a single
         // substitutions argument, so a third positional argument is dropped.
-        AT.i18n.msg('options_testOk', [output, String(response.result.ms)]),
+        AT.i18n.msg('options_testOk', [response.result.output ?? '', String(response.result.ms)]),
         'ok'
       );
     });
@@ -442,6 +483,9 @@ namespace AT.options {
     });
     el('prepareModel').addEventListener('click', () => {
       void prepareLocal();
+    });
+    el('modelToken').addEventListener('change', () => {
+      void AT.modelstore.setToken(el('modelToken').value.trim());
     });
   }
 
@@ -462,21 +506,22 @@ namespace AT.options {
 
   document.addEventListener('DOMContentLoaded', async () => {
     AT.i18n.apply(document);
+    AT.ui.bindTabSwitch(el('enabled'), document.getElementById('tabHost')!, document.getElementById('tabStatus')!);
     buildSelects();
     settings = await AT.settings.load();
-    // The card the extension can actually fetch today, so the field is never
-    // prefilled with a url nobody hosts.
-    el('modelUrl').value = AT.local.defaultSource().url;
+    el('modelUrl').value = AT.local.MODEL_SOURCES[0]?.url ?? '';
+    if (settings.engine === 'local') el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     // Ask first, then report: the usage line is only meaningful once the
     // browser has answered whether it will keep the bytes.
-    await AT.modelflow.keepStorage();
+    if (settings.engine === 'local') await AT.modelflow.keepStorage();
     // The model list decides what the model select can show, so the form is
     // painted once the store has answered rather than from settings alone.
-    await Promise.all([refreshModels(), refreshLocalStatus()]);
+    if (settings.engine === 'local') await Promise.all([refreshModels(), refreshLocalStatus()]);
     render();
     // Listeners go on last: a Save before `render()` would persist the markup's
     // empty defaults over the user's settings.
     wire();
     watchStorage();
+    document.body.dataset.ready = 'true';
   });
 }

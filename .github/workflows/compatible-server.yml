@@ -1,0 +1,96 @@
+name: Actual extension and compatible model server
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches: [feat/openai-compatible-server]
+    paths: ['src/**', 'scripts/**', 'package*.json', 'test/server-extension/**', '.github/workflows/compatible-server.yml']
+permissions:
+  contents: read
+jobs:
+  real-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OLLAMA_HOST: 127.0.0.1:11434
+      OLLAMA_NUM_PARALLEL: '1'
+      OLLAMA_MAX_LOADED_MODELS: '1'
+      OLLAMA_KEEP_ALIVE: 30m
+      OLLAMA_CONTEXT_LENGTH: '4096'
+      CUDA_VISIBLE_DEVICES: '-1'
+      BASE_MODEL: qwen2.5:7b
+      SERVER_MODEL: autotranslate-qa:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:chrome
+      - name: Browser test driver
+        run: |
+          npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+          npx playwright install --with-deps chromium
+      - name: Verified official CPU-capable model server
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ollama" test-results/server-extension
+          curl -fL --retry 3 https://github.com/ollama/ollama/releases/download/v0.40.13/ollama-linux-amd64.tar.zst -o "$RUNNER_TEMP/ollama.tar.zst"
+          echo "c9490e0f520be21271d969e6703f012268b1d39f8b70dd58854e5bfef7a75bb6  $RUNNER_TEMP/ollama.tar.zst" | sha256sum -c -
+          tar --zstd -xf "$RUNNER_TEMP/ollama.tar.zst" -C "$RUNNER_TEMP/ollama"
+          echo "$RUNNER_TEMP/ollama/bin" >> "$GITHUB_PATH"
+          nohup "$RUNNER_TEMP/ollama/bin/ollama" serve > test-results/server-extension/ollama.log 2>&1 &
+          for i in $(seq 1 60); do curl -fsS http://127.0.0.1:11434/api/version > test-results/server-extension/server-version.json && break; sleep 1; done
+          curl -fsS http://127.0.0.1:11434/api/version
+          "$RUNNER_TEMP/ollama/bin/ollama" pull "$BASE_MODEL"
+          # Server-side sampling configuration, not canned translations or a
+          # provider-specific extension request. Keep the original failing 3B
+          # evidence; that model emitted French for a Korean heading request.
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import assert from 'node:assert/strict';
+          const model=process.env.SERVER_MODEL;
+          async function api(path,body){const r=await fetch('http://127.0.0.1:11434/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(300000)});assert.ok(r.ok,path+' HTTP '+r.status);return r.json();}
+          const created=await api('create',{model,from:process.env.BASE_MODEL,parameters:{temperature:0},stream:false});
+          assert.equal(created.status,'success');
+          fs.writeFileSync('test-results/server-extension/model-configuration.json',JSON.stringify(await api('show',{model}),null,2));
+          fs.writeFileSync('test-results/server-extension/server-preload.json',JSON.stringify(await api('generate',{model,prompt:'',stream:false,keep_alive:'30m',options:{num_gpu:0}}),null,2));
+          JS
+          curl -fsS http://127.0.0.1:11434/api/tags > test-results/server-extension/model-provenance.json
+          curl -fsS http://127.0.0.1:11434/api/ps > test-results/server-extension/model-process.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import assert from 'node:assert/strict';
+          const data=JSON.parse(fs.readFileSync('test-results/server-extension/model-process.json','utf8'));
+          assert.ok(data.models.length > 0, 'actual model must be resident');
+          const log=fs.readFileSync('test-results/server-extension/ollama.log','utf8');
+          assert.match(log,/inference compute.*id=cpu library=cpu/);
+          assert.match(log,/-ngl 0(?: |")/);
+          assert.match(log,/loaded CPU backend/);
+          assert.doesNotMatch(log,/offloaded [1-9]\d*\//);
+          fs.writeFileSync('test-results/server-extension/backend-evidence.json',JSON.stringify({cpuBackend:true,gpuLayers:0,baseModel:process.env.BASE_MODEL,serverModel:process.env.SERVER_MODEL,temperature:0,reportedSizeVram:data.models.map(m=>m.size_vram),note:'CPU/AMX verified from backend and launch logs; size_vram is not treated as GPU allocation'},null,2));
+          JS
+      - name: Install original extension and translate via actual HTTP model responses
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check test/server-extension/e2e.mjs
+          node test/server-extension/e2e.mjs 2>&1 | tee test-results/server-extension/execution.log
+      - name: Check unchanged production and collect the candidate package
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- src scripts package.json package-lock.json
+          mkdir -p test-results/server-extension
+          cp dist/*-chrome.zip test-results/server-extension/candidate-extension.zip
+          sha256sum dist/*-chrome.zip > test-results/server-extension/package-sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: actual-server-extension-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/server-extension/
+          if-no-files-found: error
+          retention-days: 14

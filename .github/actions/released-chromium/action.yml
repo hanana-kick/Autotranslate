@@ -1,0 +1,39 @@
+name: Released Chrome for Testing
+description: Install the exact official stable archive without modifying browser or extension
+runs:
+  using: composite
+  steps:
+    - name: Verify official archive and exact released browser version
+      shell: bash
+      run: |
+        set -euo pipefail
+        version=156.0.8078.80
+        platform=mac-arm64
+        test "$RUNNER_OS" = macOS
+        test "$(uname -m)" = arm64
+        mkdir -p "$RUNNER_TEMP/released-chrome" test-results/native-extension
+        object="$version/$platform/chrome-$platform.zip"
+        url="https://storage.googleapis.com/chrome-for-testing-public/$object"
+        curl -fL --retry 3 "$url" -o "$RUNNER_TEMP/released-chrome.zip"
+        curl -fsSL --retry 3 "https://storage.googleapis.com/storage/v1/b/chrome-for-testing-public/o/${object//\//%2F}" -o "$RUNNER_TEMP/released-chrome-metadata.json"
+        node --input-type=module <<'JS'
+        import fs from 'node:fs';
+        import {createHash} from 'node:crypto';
+        import assert from 'node:assert/strict';
+        const meta=JSON.parse(fs.readFileSync(process.env.RUNNER_TEMP+'/released-chrome-metadata.json','utf8'));
+        const data=fs.readFileSync(process.env.RUNNER_TEMP+'/released-chrome.zip');
+        assert.equal(meta.bucket,'chrome-for-testing-public');
+        assert.equal(meta.name,'156.0.8078.80/mac-arm64/chrome-mac-arm64.zip');
+        assert.equal(data.length,Number(meta.size));
+        assert.equal(createHash('md5').update(data).digest('base64'),meta.md5Hash,'publisher archive checksum');
+        fs.writeFileSync('test-results/native-extension/browser-provenance.json',JSON.stringify({name:meta.name,bucket:meta.bucket,generation:meta.generation,size:data.length,publisherMd5:meta.md5Hash,sha256:createHash('sha256').update(data).digest('hex'),integrity:'size and checksum matched official HTTPS object metadata',bundleResigned:false,securityPolicyChanged:false},null,2));
+        JS
+        # CfT archives are not sealed Developer ID app bundles. Verify the exact
+        # publisher object, without re-signing, deleting attributes or changing
+        # macOS execution/security policies. Launch failure still fails this job.
+        unzip -q "$RUNNER_TEMP/released-chrome.zip" -d "$RUNNER_TEMP/released-chrome"
+        app="$RUNNER_TEMP/released-chrome/chrome-$platform/Google Chrome for Testing.app"
+        binary="$app/Contents/MacOS/Google Chrome for Testing"
+        "$binary" --version | tee test-results/native-extension/browser-release.txt
+        "$binary" --version | grep -F "$version"
+        printf 'CHROMIUM_BINARY=%s\nCHROMIUM_VERSION=%s\n' "$binary" "$version" >> "$GITHUB_ENV"

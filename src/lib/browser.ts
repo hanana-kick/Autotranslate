@@ -6,7 +6,20 @@ namespace AT {
     id?: number;
     url?: string;
     title?: string | null;
-    status?: string;
+    active?: boolean;
+    windowId?: number;
+    lastAccessed?: number;
+  };
+
+  /** A browser-owned channel gives long model preparation an explicit lifetime. */
+  export type RuntimePort = {
+    name: string;
+    postMessage: (message: unknown) => void;
+    disconnect: () => void;
+    error?: { message?: string };
+    sender?: Sender;
+    onMessage: { addListener: (listener: (message: unknown) => void) => void };
+    onDisconnect: { addListener: (listener: () => void) => void };
   };
 
   export type RuntimeApi = {
@@ -14,6 +27,8 @@ namespace AT {
     getManifest: () => { version?: string };
     openOptionsPage: () => Promise<void>;
     sendMessage: (message: unknown) => Promise<unknown>;
+    connect?: (options: { name: string }) => RuntimePort;
+    onConnect?: { addListener: (listener: (port: RuntimePort) => void) => void };
     onMessage: { addListener: (listener: MessageListener) => void };
     onInstalled: { addListener: (listener: (details: { reason?: string }) => void) => void };
     onStartup: { addListener: (listener: () => void) => void };
@@ -22,16 +37,23 @@ namespace AT {
   export type TabsApi = {
     create: (properties: { url: string; active?: boolean }) => Promise<Tab | undefined>;
     get: (tabId: number) => Promise<Tab | undefined>;
-    query: (queryInfo: { active?: boolean; currentWindow?: boolean }) => Promise<(Tab | undefined)[]>;
+    query: (queryInfo: { active?: boolean; currentWindow?: boolean; windowId?: number }) => Promise<(Tab | undefined)[]>;
     sendMessage: (tabId: number, message: unknown) => Promise<unknown>;
     onUpdated: {
       addListener: (listener: (tabId: number, changeInfo: { status?: string }, tab: Tab) => void) => void;
     };
     onRemoved: { addListener: (listener: (tabId: number) => void) => void };
+    onActivated?: { addListener: (listener: (info: { tabId: number; windowId?: number }) => void) => void };
   };
 
   export type StorageApi = {
+    /** Browser-session consent: survives worker sleep, never browser restart. */
+    session?: {
+      get: (key: string) => Promise<{ [key: string]: unknown }>;
+      set: (items: { [key: string]: unknown }) => Promise<void>;
+    };
     local: {
+      setAccessLevel?: (options: { accessLevel: 'TRUSTED_CONTEXTS' }) => Promise<void>;
       get: (key: string) => Promise<{ [key: string]: unknown }>;
       set: (items: { [key: string]: unknown }) => Promise<void>;
     };
@@ -40,6 +62,10 @@ namespace AT {
         listener: (changes: { [area: string]: { oldValue?: unknown; newValue?: unknown } }, areaName: string) => void
       ) => void;
     };
+  };
+
+  export type WindowsApi = {
+    create: (options: { url: string; type: 'popup'; width: number; height: number; focused: boolean }) => Promise<unknown>;
   };
 
   export type ActionApi = {
@@ -86,6 +112,7 @@ namespace AT {
   export type BrowserApi = {
     runtime: RuntimeApi;
     tabs?: TabsApi;
+    windows?: WindowsApi;
     storage?: StorageApi;
     action?: ActionApi;
     scripting?: ScriptingApi;
@@ -126,7 +153,7 @@ namespace AT {
     message: Message,
     sender: Sender,
     sendResponse: (response: Response) => void
-  ) => boolean;
+  ) => boolean | Promise<Response>;
 
   /** Rejections carry no shape: an Error, a DOMException, or anything a handler threw. */
   type Rejection = { message?: unknown; code?: unknown };
@@ -162,6 +189,7 @@ namespace AT {
   export let api: BrowserApi | undefined;
   export let runtime: RuntimeApi | null | undefined;
   export let tabs: TabsApi | null | undefined;
+  export let windows: WindowsApi | null | undefined;
   export let storage: StorageApi | null | undefined;
   export let action: ActionApi | null | undefined;
   export let scripting: ScriptingApi | null | undefined;
@@ -175,6 +203,7 @@ namespace AT {
   api = extensionApi;
   runtime = extensionApi.runtime ?? null;
   tabs = extensionApi.tabs ?? null;
+  windows = extensionApi.windows ?? null;
   storage = extensionApi.storage ?? null;
   action = extensionApi.action ?? null;
   scripting = extensionApi.scripting ?? null;
@@ -261,26 +290,57 @@ namespace AT {
   };
 
   // Wraps a message listener table so handlers can be plain async functions.
-  // Returns true from the listener and answers via sendResponse, which works
-  // identically in Chrome and Firefox.
+  // Return the actual reply Promise through the standard browser API. Firefox
+  // owns this pending asynchronous response for the event-page lifetime; the
+  // Chrome polyfill converts it to its callback contract. A raw chrome fallback
+  // retains sendResponse for hosts that do not support promise listeners.
+  const MODEL_PORT = 'autotranslate-model-prepare-v1';
+
   export function onMessage(handlers: MessageHandlers): void {
+    // Only the preparation owner claims this channel; other pages leave it alone.
+    if (Object.hasOwn(handlers, C.MSG.LOCAL_PREPARE)) {
+      extensionApi.runtime.onConnect?.addListener((port) => {
+        if (port.name !== MODEL_PORT) return;
+        let active = true, received = false;
+        port.onDisconnect.addListener(() => { active = false; });
+        port.onMessage.addListener((raw) => {
+          if (received) return;
+          received = true;
+          const message = raw && typeof raw === 'object' ? raw as Message : undefined;
+          const handler = message?.type === C.MSG.LOCAL_PREPARE ? handlers[C.MSG.LOCAL_PREPARE] : undefined;
+          const reply: Promise<Response> = Promise.resolve().then(async () => {
+            if (!handler) throw new Error('unknown model preparation command');
+            return { ok: true, ...((await handler(message!, port.sender ?? {})) ?? {}) };
+          }).catch((error: unknown) => {
+            const failure = error as Rejection;
+            return { ok: false, error: String(failure?.message ?? error), code: failure?.code ?? null };
+          });
+          void reply.then((response) => {
+            if (!active) return;
+            try { port.postMessage(response); } catch { /* The caller closed its page. */ }
+          });
+        });
+      });
+    }
     extensionApi.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Own properties only: `handlers['constructor']` would otherwise resolve
       // to Object and answer a type nobody handles.
       const handler = Object.hasOwn(handlers, message?.type ?? '') ? handlers[message?.type] : undefined;
       if (!handler) return false;
-      Promise.resolve()
+      const reply: Promise<Response> = Promise.resolve()
         .then(() => handler(message, sender))
-        .then((result) => sendResponse({ ok: true, ...(result ?? {}) }))
+        .then((result) => ({ ok: true, ...(result ?? {}) }))
         .catch((error: unknown) => {
           AT.warn(message.type, error);
           const rejection = error as Rejection;
-          sendResponse({
+          return {
             ok: false,
             error: rejection?.message ?? String(error),
             code: rejection?.code ?? null
-          });
+          };
         });
+      if (globals.browser === extensionApi) return reply;
+      void reply.then(sendResponse);
       return true;
     });
   }
@@ -289,8 +349,43 @@ namespace AT {
   // runtime then resolves with undefined (or rejects when the receiving
   // context is gone). Callers all branch on `response.ok`, so collapse both
   // shapes into one failure object instead of leaking rejections.
+  function prepareOverPort(message: Message): Promise<Response> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let port: RuntimePort | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = (response: Response): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve(response);
+        try { port?.disconnect(); } catch { /* Already disconnected. */ }
+      };
+      // Includes two bounded slow software initializations, never an infinite wait.
+      timer = setTimeout(() => finish({ ok: false, error: 'model preparation channel timed out', code: 'provider' }), 45 * 60 * 1000);
+      try {
+        port = extensionApi.runtime.connect!({ name: MODEL_PORT });
+        port.onMessage.addListener((response) => {
+          if (!response || typeof response !== 'object' || typeof (response as Partial<Response>).ok !== 'boolean') {
+            finish({ ok: false, error: 'invalid model preparation response', code: 'no-response' });
+          } else finish(response as Response);
+        });
+        port.onDisconnect.addListener(() => finish({ ok: false,
+          error: port?.error?.message ?? 'model preparation channel closed', code: 'no-response' }));
+        port.postMessage(message);
+      } catch (error: unknown) {
+        finish({ ok: false, error: String((error as Rejection)?.message ?? error), code: 'no-response' });
+      }
+    });
+  }
+
   export async function sendMessage(message: Message | null | undefined): Promise<Response> {
     const type = message?.type ?? 'message';
+    // The document-host preparation uses a native operation-scoped channel.
+    // Chrome offscreen and every other command retain ordinary messaging.
+    if (message && type === C.MSG.LOCAL_PREPARE && !supportsOffscreen() && extensionApi.runtime.connect) {
+      return prepareOverPort(message);
+    }
     try {
       const response = await extensionApi.runtime.sendMessage(message);
       // The listener owns the payload; whatever object it answered with is

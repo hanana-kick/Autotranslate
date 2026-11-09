@@ -1,0 +1,45 @@
+name: Browser regression
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  chromium:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build
+      # Test-only tooling, pinned independently of the extension's tiny runtime
+      # dependency set. --package-lock=false leaves the application lock intact.
+      - name: Install pinned browser test tooling
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      - run: npx playwright install --with-deps chromium
+      - name: Native DOM and real extension lifecycle (deterministic model double)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/browser
+          npm run test:browser 2>&1 | tee test-results/browser/results.tap
+      - name: Browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-evidence-${{ github.run_id }}-${{ github.job }}
+          path: test-results/browser/
+          if-no-files-found: warn
+          retention-days: 14

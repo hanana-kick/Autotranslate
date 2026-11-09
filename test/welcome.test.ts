@@ -116,7 +116,8 @@ const FIELDS: readonly (readonly [string, string])[] = [
   ['progress', 'progress'],
   ['status', 'p'],
   ['start', 'button'],
-  ['options', 'button']
+  ['options', 'button'],
+  ['serverOptions', 'button']
 ];
 
 /** welcome.html ships these with the `hidden` attribute. */
@@ -397,7 +398,7 @@ test('a successful download paints progress, arms start and saves the model', as
   // extension on with the language the user picked.
   assert.deepEqual(calls.saves, [
     { localModelId: MODEL.id },
-    { enabled: true, localModelId: MODEL.id, targetLang: 'de' }
+    { enabled: false, localModelId: MODEL.id, targetLang: 'de' }
   ]);
   assert.equal(env.doc.body.dataset.done, 'true');
   assert.equal(field('start').hidden, true);

@@ -12,10 +12,12 @@ namespace AT {
     STATE_CHANGED: string;
     GET_STATE: string;
     SET_SETTINGS: string;
+    SET_TAB_ENABLED: string;
     RESET_SETTINGS: string;
     SET_SITE_RULE: string;
     REMOVE_SITE_RULE: string;
     TEST_ENGINE: string;
+    SERVER_MODELS: string;
     TRANSLATE_TAB: string;
     RESTORE_TAB: string;
     CONTENT_TRANSLATE: string;
@@ -27,6 +29,7 @@ namespace AT {
     LOCAL_TRANSLATE: string;
     LOCAL_LOAD: string;
     LOCAL_UNLOAD: string;
+    LOCAL_COUNT: string;
     LOCAL_QUERY: string;
     // host -> background
     LOCAL_STATUS: string;
@@ -51,6 +54,7 @@ namespace AT {
     LANG_CODES: Set<string>;
     isSupportedLang: (code: string | null | undefined) => boolean;
     sameLanguage: (a: string | null | undefined, b: string | null | undefined) => boolean;
+    RTL_LANGS: Record<string, true | undefined>;
     SITE_RULE_ACTIONS: readonly SiteRuleAction[];
   };
 
@@ -61,7 +65,7 @@ namespace AT {
     // Hard ceiling on DOM text nodes touched per run; keeps huge feeds cheap.
     DEFAULT_MAX_NODES: 600,
     // Ceiling for nodes translated by the MutationObserver in one tick.
-    OBSERVER_BATCH_NODES: 40,
+    OBSERVER_BATCH_NODES: 16,
     // Longer texts are split into sentences before they are sent: about 50
     // Latin tokens, well inside a sentence's worth of meaning. Only a text
     // longer than this pays for the extra round trip.
@@ -92,10 +96,12 @@ namespace AT {
       // popup / options -> background
       GET_STATE: 'at/get-state',
       SET_SETTINGS: 'at/set-settings',
+      SET_TAB_ENABLED: 'at/set-tab-enabled',
       RESET_SETTINGS: 'at/reset-settings',
       SET_SITE_RULE: 'at/set-site-rule',
       REMOVE_SITE_RULE: 'at/remove-site-rule',
       TEST_ENGINE: 'at/test-engine',
+      SERVER_MODELS: 'at/server-models',
       TRANSLATE_TAB: 'at/translate-tab',
       RESTORE_TAB: 'at/restore-tab',
       // background -> content script
@@ -110,6 +116,7 @@ namespace AT {
       LOCAL_TRANSLATE: 'at/local-translate',
       LOCAL_LOAD: 'at/local-load',
       LOCAL_UNLOAD: 'at/local-unload',
+      LOCAL_COUNT: 'at/local-count',
       // background -> host: "what is your state?" (`LOCAL_STATUS` travels the
       // other way; sharing one type let the background answer its own question).
       LOCAL_QUERY: 'at/local-query',
@@ -120,19 +127,36 @@ namespace AT {
       LOCAL_RELEASE: 'at/local-release',
       LOCAL_GET_STATUS: 'at/local-get-status'
     },
-    // The languages the offered model was released with. PLaMo 3 Translate
-    // publishes a benchmark table for en/ja/ko and ships a `target_lang`
-    // vocabulary of 53, but nothing outside this three has been measured here,
-    // and an answer nobody measured is not a reason to put a dead end in a
-    // picker.
     LANGS: [
       { code: 'en', native: 'English' },
       { code: 'ko', native: '한국어' },
-      { code: 'ja', native: '日本語' }
+      { code: 'ja', native: '日本語' },
+      { code: 'zh-CN', native: '简体中文' },
+      { code: 'zh-TW', native: '繁體中文' },
+      { code: 'ar', native: 'العربية' },
+      { code: 'bn', native: 'বাংলা' },
+      { code: 'de', native: 'Deutsch' },
+      { code: 'es', native: 'Español' },
+      { code: 'fa', native: 'فارسی' },
+      { code: 'fr', native: 'Français' },
+      { code: 'he', native: 'עברית' },
+      { code: 'hi', native: 'हिन्दी' },
+      { code: 'id', native: 'Bahasa Indonesia' },
+      { code: 'it', native: 'Italiano' },
+      { code: 'nl', native: 'Nederlands' },
+      { code: 'pl', native: 'Polski' },
+      { code: 'pt', native: 'Português' },
+      { code: 'ru', native: 'Русский' },
+      { code: 'th', native: 'ไทย' },
+      { code: 'tr', native: 'Türkçe' },
+      { code: 'uk', native: 'Українська' },
+      { code: 'vi', native: 'Tiếng Việt' }
     ],
     LANG_CODES: new Set<string>(),
     isSupportedLang,
     sameLanguage,
+    // Used only to pick a text direction for the selection card.
+    RTL_LANGS: { ar: true, fa: true, he: true, ur: true },
     SITE_RULE_ACTIONS: ['always', 'never']
   };
 
@@ -142,7 +166,7 @@ namespace AT {
     return typeof code === 'string' && C.LANG_CODES.has(code);
   }
 
-  // 'en-US' matches 'en'; a variant never matches a different base code.
+  // 'en-US' matches 'en'; regional variants stay distinct ('zh-CN' vs 'zh-TW').
   function sameLanguage(a: string | null | undefined, b: string | null | undefined): boolean {
     if (typeof a !== 'string' || typeof b !== 'string') return false;
     const left = a.trim().toLowerCase();
@@ -162,5 +186,28 @@ namespace AT {
 
   export function warn(...args: unknown[]): void {
     console.warn('[autotranslate]', ...args);
+  }
+}
+
+
+/** Protocol validity, not linguistic scoring. Never invent a translation when
+ * a provider emits control tokens, empty output or a runaway repetition. */
+namespace AT {
+  export type OutputIssue = 'empty-output' | 'control-token' | 'repeated-output' | 'excessive-output';
+  export function outputIssue(source: string, answer: string, partial = false): OutputIssue | null {
+    if (!partial && !answer.trim()) return 'empty-output';
+    // A page that literally discusses these tokens may legitimately contain them.
+    // Newly introduced controls, or more copies than the source, are not prose.
+    const controls = /<(?:pad|bos|eos|start_of_turn|end_of_turn)>|<\|(?:endoftext|im_start|im_end)\|>/g;
+    for (const token of new Set(answer.match(controls) ?? [])) {
+      if (answer.split(token).length > source.split(token).length) return 'control-token';
+    }
+    const ceiling = Math.min(262144, Math.max(2048, source.length * 24 + 256));
+    if (answer.length > ceiling) return 'excessive-output';
+    // Only long, newly introduced loops are structural errors. Names, short
+    // repeated words and source text which itself repeats must remain legal.
+    const repetition = /(.{2,80}?)\1{15,}/gu.exec(answer);
+    if (repetition && !source.includes(repetition[0])) return 'repeated-output';
+    return null;
   }
 }

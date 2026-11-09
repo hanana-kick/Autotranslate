@@ -1,0 +1,84 @@
+name: Extended native compatibility
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/review-hardening-20261031]
+    paths: ['src/**', 'test/native-extension/**', 'test/firefox-native/**', 'test/dynamic-extension/**', '.github/actions/released-chromium/**', '.github/workflows/extended-qa.yml']
+permissions:
+  contents: read
+concurrency:
+  group: extended-qa-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native:
+    name: Actual extension / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [firefox, youtube]
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci --no-audit --no-fund && npm run build
+      - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
+      - run: npx playwright install --with-deps chromium firefox
+      - uses: ./.github/actions/released-chromium
+        if: matrix.target == 'youtube'
+      - name: Official Firefox and pinned Mozilla WebDriver
+        if: matrix.target == 'firefox'
+        run: |
+          set -euo pipefail
+          binary='/Applications/Firefox.app/Contents/MacOS/firefox'
+          test -x "$binary"
+          codesign --verify --deep --strict /Applications/Firefox.app
+          mkdir -p test-results/firefox-webdriver
+          "$binary" --version | tee test-results/firefox-webdriver/browser-release.txt
+          printf 'FIREFOX_BINARY=%s\n' "$binary" >> "$GITHUB_ENV"
+          curl -fL --retry 3 https://github.com/mozilla/geckodriver/releases/download/v0.37.1/geckodriver-v0.37.1-macos-aarch64.tar.gz -o "$RUNNER_TEMP/geckodriver.tar.gz"
+          echo "d02b3f7003f999caf90974a2ef5da0286c05d01cee19112c86846d759fdba4f5  $RUNNER_TEMP/geckodriver.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/geckodriver.tar.gz" -C "$RUNNER_TEMP"
+          mv "$RUNNER_TEMP/geckodriver" "$RUNNER_TEMP/geckodriver-real"
+          printf '#!/bin/sh\nexec "%s/geckodriver-real" --allow-system-access "$@"\n' "$RUNNER_TEMP" > "$RUNNER_TEMP/geckodriver"
+          chmod +x "$RUNNER_TEMP/geckodriver"
+      - name: Original installed extension and model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HEADED: '1'
+          GECKODRIVER: ${{ runner.temp }}/geckodriver
+          TARGET: ${{ matrix.target }}
+          YOUTUBE_QA: ${{ matrix.target == 'youtube' && '1' || '0' }}
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/native-extension test-results/firefox-webdriver
+          if [ "$TARGET" = firefox ]; then
+            node --check test/firefox-native/released.mjs
+            node test/firefox-native/released.mjs 2>&1 | tee test-results/firefox-webdriver/execution.log
+          else
+            node test/dynamic-extension/run-dynamic.mjs 2>&1 | tee test-results/native-extension/execution.log
+          fi
+      - name: Verify unchanged production bundle and safe evidence
+        id: evidence
+        if: always()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git diff --exit-code -- src scripts package.json package-lock.json
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';import path from 'node:path';
+          function check(dir){if(!fs.existsSync(dir))return;for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())check(file);else if(/\.(json|log|html|txt)$/.test(file)){const s=fs.readFileSync(file,'utf8');if((process.env.HF_TOKEN&&s.includes(process.env.HF_TOKEN))||/hf_[A-Za-z0-9]{20,}/.test(s)){fs.rmSync(file);throw Error('credential-bearing evidence refused');}}}}
+          check('test-results/native-extension');check('test-results/firefox-webdriver');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
+        with:
+          name: native-${{ matrix.target }}-${{ github.run_id }}
+          path: |
+            test-results/native-extension/
+            test-results/firefox-webdriver/
+          retention-days: 7
