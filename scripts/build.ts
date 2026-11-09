@@ -334,6 +334,12 @@ function validate(): Check {
     const base = entry.to.startsWith('vendor/mediapipe/') ? MEDIAPIPE : WLLAMA;
     check.fail(existsSync(join(base, entry.from)), `vendor: ${entry.from} is missing from ${base}`);
   }
+  if (!existsSync(ONNX_VENDOR_DIR)) {
+    // CI checkouts do not carry the generated runtime; build it from the
+    // installed packages so the gate sees real files, never a missing dir.
+    const result = spawnSync(process.execPath, [join(ROOT, 'scripts', 'onnx-vendor.ts')], { encoding: 'utf8' });
+    if (result.status !== 0) throw new Error(`vendor: generating vendor-src failed: ${result.stderr || result.stdout}`);
+  }
   check.fail(existsSync(ONNX_VENDOR_DIR), 'vendor: vendor-src/onnxruntime is missing (run npm run onnx:vendor)');
   for (const entry of ONNX_RUNTIME_ENTRIES) {
     check.fail(existsSync(join(ONNX_VENDOR_DIR, entry.slice('vendor/onnxruntime/'.length))), `vendor: ${entry} is missing from vendor-src/onnxruntime (run npm run onnx:vendor)`);
