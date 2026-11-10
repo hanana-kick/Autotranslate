@@ -237,11 +237,10 @@ namespace AT.onnxhost {
    *  through the tokenizer's own chat template so the special tokens line up
    *  with the ONNX graph's expectations. */
   function renderPrompt(target: string, text: string, hint: string | null): string {
-    // Pass the page text as a plain string, not a chat: the pipeline then keeps
-    // `return_full_text` on, so `generated_text` is prompt + answer and the
-    // answer is the slice after the prompt. A chat input would make the
-    // pipeline render the template itself, which is both slower and wrong here
-    // because we already control the target language through the prompt.
+    // Pass the page text as a plain string, not a chat: the template is already
+    // applied here, and a chat input would make the pipeline render it again.
+    // The prompt is asked for with `return_full_text: false`, so the pipeline
+    // slices it off by token count and only the generation comes back.
     const safe = P.sanitize(text);
     const context = hint === null ? null : P.sanitize(hint);
     return tokenizer!.apply_chat_template(
@@ -360,7 +359,7 @@ namespace AT.onnxhost {
   }
 
   /** One generation, bounded by a wall clock like the GGUF host's. */
-  async function generate(prompt: string, maxNewTokens: number, targetHint: string): Promise<string> {
+  async function generate(prompt: string, maxNewTokens: number): Promise<string> {
     if (!pipe) fail('not-loaded', 'no model is loaded');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
@@ -368,6 +367,7 @@ namespace AT.onnxhost {
       const out = await pipe(prompt, {
         max_new_tokens: maxNewTokens,
         do_sample: false,
+        return_full_text: false,
         abort_signal: controller.signal
       });
       generations += 1;
@@ -377,12 +377,7 @@ namespace AT.onnxhost {
       // not a suffix of the prompt string. What survives verbatim is the plain
       // text between them: the output element's `lang` value is the target
       // code, and everything after that is the translation.
-      const item = out?.[0]?.generated_text;
-      const text = typeof item === 'string' ? item : '';
-      const lang = P.langFor(targetHint) ?? '';
-      const at = lang ? text.lastIndexOf(lang) : -1;
-      let answer = at >= 0 ? text.slice(at + lang.length) : text;
-      return answer;
+      return answerOf(out?.[0]?.generated_text);
     } catch (error: unknown) {
       const message = String((error as { message?: unknown })?.message ?? error);
       fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
@@ -394,18 +389,19 @@ namespace AT.onnxhost {
   /** The answer inside one generated text: the pipeline strips the prompt's
    *  special tokens, so the output element's `lang` value survives as the
    *  target code and everything after it is the translation. */
-  function answerOf(generated: unknown, targetHint: string): string {
-    const text = typeof generated === 'string' ? generated : '';
-    const lang = P.langFor(targetHint) ?? '';
-    const at = lang ? text.lastIndexOf(lang) : -1;
-    return at >= 0 ? text.slice(at + lang.length) : text;
+  /** The answer only: the pipeline is asked for `return_full_text: false`, so it
+   *  slices the prompt off by token count and hands back the generation itself.
+   *  Searching the text for the target code instead (the earlier shape) cuts at
+   *  the last `ko` anywhere in the output, which a source line can contain. */
+  function answerOf(generated: unknown): string {
+    return typeof generated === 'string' ? generated : '';
   }
 
   /** Several prompts in one graph run. Measured on an M5: one step costs 46 ms
    *  at batch 1 and 85 ms at batch 8, so eight sequences share the weights read
    *  instead of paying it eight times. Answers come back padded, so every
    *  caller validates its own before trusting it. */
-  async function generateMany(prompts: string[], maxNewTokens: number, targetHint: string): Promise<string[]> {
+  async function generateMany(prompts: string[], maxNewTokens: number): Promise<string[]> {
     if (!pipe) fail('not-loaded', 'no model is loaded');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
@@ -413,12 +409,13 @@ namespace AT.onnxhost {
       const out = await pipe(prompts, {
         max_new_tokens: maxNewTokens,
         do_sample: false,
+        return_full_text: false,
         abort_signal: controller.signal
       });
       generations += 1;
       touchIdleTimer();
       const list = Array.isArray(out) ? out : [out];
-      return list.map((item) => answerOf(item?.generated_text, targetHint));
+      return list.map((item) => answerOf(item?.generated_text));
     } catch (error: unknown) {
       const message = String((error as { message?: unknown })?.message ?? error);
       fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
@@ -441,10 +438,10 @@ namespace AT.onnxhost {
     const leadIsPlain = hint === null || text.length >= SELF_SUFFICIENT_CHARS;
     const lead = leadIsPlain ? plain : framed;
     const cap = L.answerTokens(text, lastMaxTokens, lead);
-    const answer = (await generate(lead, cap, target)).trim();
+    const answer = (await generate(lead, cap)).trim();
     if (usable(answer, text, target)) return answer;
     const follow = leadIsPlain ? framed : plain;
-    const retry = (await generate(follow, L.answerTokens(text, lastMaxTokens, follow), target)).trim();
+    const retry = (await generate(follow, L.answerTokens(text, lastMaxTokens, follow))).trim();
     return usable(retry, text, target) ? retry : '';
   }
 
@@ -460,7 +457,7 @@ namespace AT.onnxhost {
     if (texts.length <= MAX_BATCH) {
       const prompts = texts.map((text) => renderPrompt(target, text, hint));
       const cap = Math.max(...texts.map((text, index) => L.answerTokens(text, lastMaxTokens, prompts[index] ?? '')));
-      const answers = (await generateMany(prompts, cap, target)).map((answer) => answer.trim());
+      const answers = (await generateMany(prompts, cap)).map((answer) => answer.trim());
       if (answers.length === texts.length && answers.every((answer, index) => usable(answer, texts[index] ?? '', target))) {
         return answers;
       }
@@ -469,7 +466,7 @@ namespace AT.onnxhost {
     const batch = texts.map((text, index) => `${index + 1}. ${P.sanitize(text).replace(/\s+/g, ' ').trim()}`).join('\n');
     const prompt = renderPrompt(target, batch, hint);
     const cap = L.answerTokens(texts, lastMaxTokens, prompt);
-    const reply = (await generate(prompt, cap, target)).trim();
+    const reply = (await generate(prompt, cap)).trim();
     const parsed = L.parseNumbered(reply, texts.length);
     if (parsed) return parsed.map((answer) => answer.trim());
     AT.warn('on-device split mismatch, retrying per text', texts.length);

@@ -107,18 +107,22 @@ assert.ok(summary.adapter?.f16, 'the adapter must expose shader-f16 for a q4f16 
 // 1. The shipped download route, with the url the page prefilled: this is what
 // a user sees on a fresh profile. MODEL_URL only overrides the address.
 await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, MODEL_URL, { timeout: 15000 });
+console.log('[install] downloading', MODEL_URL);
+const startedInstall = Date.now();
 await options.locator('#downloadModel').click();
 await options.waitForFunction(
   () => document.querySelector('#modelStatus')?.dataset.kind === 'ok' || document.querySelector('#modelStatus')?.dataset.kind === 'error',
   null,
   { timeout: 600000 }
 );
+console.log('[install] done', Date.now() - startedInstall, 'ms');
 const status = await options.evaluate(() => ({
   kind: document.querySelector('#modelStatus')?.dataset.kind,
   text: document.querySelector('#modelStatus')?.textContent ?? '',
   modelId: document.querySelector('#localModel')?.value ?? ''
 }));
 summary.install = { url: MODEL_URL, ...status };
+console.log('[install]', status.kind, status.text);
 assert.equal(status.kind, 'ok', `install reported: ${status.text}`);
 
 // 2-4. A four-sequence page through the shipped per-tab switch.
@@ -130,14 +134,17 @@ await setTabEnabledUI(options, tabId, true);
 const started = Date.now();
 let translated = 0;
 let host = null;
+let tick = 0;
 while (Date.now() - started < PAGE_SECONDS) {
   translated = await page.evaluate(() => [...document.querySelectorAll('p')].filter((p) => /[\uAC00-\uD7AF]/.test(p.textContent ?? '')).length);
   if (translated === before.length) break;
   host = await options.evaluate(() => AT.sendMessage({ type: AT.C.MSG.LOCAL_GET_STATUS })).catch(() => null);
   if (host?.status?.state === 'failed') break;
+  if (++tick % 10 === 0) console.log('[page]', Math.round((Date.now() - started) / 1000) + 's', translated + '/' + before.length, host?.status?.state ?? '?');
   await new Promise((done) => setTimeout(done, 1000));
 }
 const after = await page.evaluate(() => [...document.querySelectorAll('p')].map((p) => p.textContent));
+console.log('[page] finished', translated + '/' + before.length, 'after', Math.round((Date.now() - started) / 1000) + 's');
 summary.page = {
   tabId, sequences: before.length, translated,
   seconds: Math.round((Date.now() - started) / 1000),
