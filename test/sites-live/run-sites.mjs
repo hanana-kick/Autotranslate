@@ -57,7 +57,7 @@ if (MODEL_DIR) {
     const file = join(MODEL_DIR, name === 'model_q4f16.onnx' ? 'model_q4f16.onnx' : name);
     try {
       const size = (await stat(file)).size;
-      await route.fulfill({ status: 200, headers: { 'content-type': 'application/octet-stream', 'content-length': String(size) }, body: await readFile(file) });
+      await route.fulfill({ status: 200, path: file });
     } catch {
       await route.fulfill({ status: 404, body: '' });
     }

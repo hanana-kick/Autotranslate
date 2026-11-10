@@ -1,23 +1,22 @@
-// Live verification of the ONNX (q4f16) on-device path: the real published
-// card, the real shipped options UI, the real background/offscreen split and
-// real WebGPU. Not part of `npm test` and not part of CI: it downloads 706 MB
-// and needs a GPU with shader-f16.
+// Live verification of the ONNX (q4f16) on-device path: the shipped options
+// download route, the real background/offscreen split, real WebGPU, and a page
+// that must come back in the target language and restore exactly.
 //
 //   npm run build
-//   node test/onnx-live/run-onnx.mjs
-//   YOUTUBE=1 node test/onnx-live/run-onnx.mjs   # adds a paused watch page
+//   npm run test:onnx                     # downloads the published card once
+//   MODEL_DIR=weight/plamo-3-translate-0.8b-onnx npm run test:onnx
+//   PROFILE_DIR=<dir> npm run test:onnx   # reuse an installed model
+//   YOUTUBE=1 ...                         # adds a paused watch page
 //
-// What it proves, in the order the product reaches it:
-//   1. the options download route stores the q4f16 graph and its five parts;
-//   2. the first load is routed to AT.onnxhost (the GGUF host's file sniff
-//      fails an ONNX graph, so a misroute is visible as "No model format
-//      matched" rather than as a wrong answer);
-//   3. the host answers at/local-count, so batches are packed per real tokens
-//      instead of the per-script estimate;
-//   4. a four-sequence page comes back in the target language and restores to
-//      the exact original text when the tab is turned off.
+// MODEL_DIR serves that directory over a local https origin, so the shipped
+// route still runs (fetch, byte-count check, OPFS write, parts by name) with the
+// network out of the picture. A blocked or slow CDN must not decide whether a
+// measurement is possible.
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { execFileSync } from 'node:child_process';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
+import { createReadStream } from 'node:fs';
 import { mkdir, mkdtemp, cp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -25,17 +24,15 @@ import { chromium, launchOptions, ROOT, OUTPUT } from '../browser/support.mjs';
 import { optionsReady, setTabEnabledUI, tabIdFor } from '../native-extension/tab-control.mjs';
 
 const CARD = 'https://huggingface.co/TeamFlaxia/plamo-3-translate-0.8b-onnx/resolve/main/onnx/model_q4f16.onnx';
-/** A model already on disk, so a measurement never downloads 673 MB again.
- *  Every file the card names must sit in this directory. */
+const GRAPH = 'model_q4f16.onnx';
 const MODEL_DIR = process.env.MODEL_DIR ? resolve(process.env.MODEL_DIR) : '';
-/** Where the local directory is served from: an https origin the shipped
- *  download route accepts, fulfilled from disk instead of the network. */
-const LOCAL_ORIGIN = 'https://model.local';
-const LOCAL_URL = `${LOCAL_ORIGIN}/onnx/model_q4f16.onnx`;
-// The card the page prefills; a local run installs from MODEL_DIR instead.
-const MODEL_URL = process.env.MODEL_URL || (MODEL_DIR ? LOCAL_URL : CARD);
+const PROFILE_DIR = process.env.PROFILE_DIR ? resolve(process.env.PROFILE_DIR) : '';
+const MODEL_URL = process.env.MODEL_URL || CARD;
 const PAGE_SECONDS = Number(process.env.PAGE_SECONDS || 240000);
-const summary = { chrome: null, adapter: null, install: null, page: null, countWarnings: 0, misroutes: 0, youtube: null, errors: [] };
+const summary = {
+  chrome: null, adapter: null, install: null, page: null,
+  countWarnings: 0, misroutes: 0, youtube: null, errors: []
+};
 
 const body =
   '<h1>Grid storage in winter</h1>' +
@@ -43,25 +40,59 @@ const body =
   '<p>Wind turbines produce more power in winter because cold air is denser.</p>' +
   '<p>Operators forecast demand hour by hour and hold reserve capacity for sudden clouds.</p>' +
   '<p>Solar panels lose efficiency when snow covers their surface.</p>';
-const server = createServer((request, response) => {
+const site = createHttpServer((request, response) => {
   response.setHeader('Content-Type', 'text/html; charset=utf-8');
   response.end(body);
 });
-await new Promise((done) => server.listen(0, '127.0.0.1', done));
-const origin = `http://127.0.0.1:${server.address().port}`;
+await new Promise((done) => site.listen(0, '127.0.0.1', done));
+const origin = `http://127.0.0.1:${site.address().port}`;
 
+await mkdir(OUTPUT, { recursive: true });
 const report = join(OUTPUT, 'onnx-q4f16-live.json');
+const console_ = [];
 process.on('uncaughtException', (error) => {
   summary.failure = String(error?.message ?? error);
   summary.consoleTail = console_.slice(-20);
   void writeFile(report, JSON.stringify(summary, null, 2));
 });
 
+/** Serves a model directory over https with a throwaway certificate. */
+async function serveModelDirectory(dir, work) {
+  const key = join(work, 'key.pem');
+  const cert = join(work, 'cert.pem');
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', key, '-out', cert,
+    '-days', '1', '-subj', '/CN=127.0.0.1'
+  ], { stdio: 'ignore' });
+  const server = createHttpsServer({ key: await readFile(key), cert: await readFile(cert) }, async (request, response) => {
+    const name = (request.url ?? '/').split('/').filter(Boolean).pop() ?? '';
+    const file = join(dir, name || GRAPH);
+    try {
+      const size = (await stat(file)).size;
+      response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': String(size) });
+      createReadStream(file).pipe(response);
+    } catch {
+      response.writeHead(404);
+      response.end();
+    }
+  });
+  await new Promise((done) => server.listen(0, '127.0.0.1', done));
+  const address = server.address();
+  const port = typeof address === 'object' && address ? address.port : 0;
+  return `https://127.0.0.1:${port}`;
+}
+
 const temporary = await mkdtemp(join(tmpdir(), 'onnx-live-'));
+const profile = PROFILE_DIR || join(temporary, 'profile');
+await mkdir(profile, { recursive: true });
+const localOrigin = MODEL_DIR ? await serveModelDirectory(MODEL_DIR, temporary) : '';
+if (localOrigin) console.log('[model] serving', MODEL_DIR, 'at', localOrigin);
+
 const extension = join(temporary, 'extension');
 await cp(join(ROOT, 'build/chrome'), extension, { recursive: true });
+console.log('[build] extension copied');
 
-const context = await chromium.launchPersistentContext(join(temporary, 'profile'), {
+const context = await chromium.launchPersistentContext(profile, {
   ...launchOptions,
   // WebGPU needs the GPU process; the shared options disable it for the
   // deterministic suites, which never reach a real adapter.
@@ -74,32 +105,25 @@ const context = await chromium.launchPersistentContext(join(temporary, 'profile'
     `--load-extension=${extension}`
   ],
   viewport: { width: 1100, height: 800 },
-  locale: 'en-US'
+  locale: 'en-US',
+  ...(localOrigin ? { ignoreHTTPSErrors: true } : {})
 });
 context.setDefaultTimeout(30000);
-if (MODEL_DIR) {
-  // The shipped route fetches over https and asks for the graph's parts by
-  // name; both come from disk here, with the byte count the page checks.
-  await context.route(`${LOCAL_ORIGIN}/**`, async (route) => {
-    const name = new URL(route.request().url()).pathname.split('/').filter(Boolean).pop() ?? '';
-    const file = join(MODEL_DIR, name === 'model_q4f16.onnx' ? 'model_q4f16.onnx' : name);
-    try {
-      const size = (await stat(file)).size;
-      await route.fulfill({
-        status: 200,
-        headers: { 'content-type': 'application/octet-stream', 'content-length': String(size) },
-        body: await readFile(file)
-      });
-    } catch {
-      await route.fulfill({ status: 404, body: '' });
-    }
-  });
-}
-
-const console_ = [];
-context.on('page', (page) => page.on('pageerror', (error) => summary.errors.push({ url: page.url(), error: error.message })));
-// The offscreen document logs the host's own progress; VERBOSE=1 shows it.
+context.on('page', (page) => {
+  page.on('pageerror', (error) => summary.errors.push({ url: page.url(), error: error.message }));
+});
 if (process.env.VERBOSE === '1') context.on('console', (message) => console.log('[ctx]', message.text().slice(0, 220)));
+if (localOrigin) {
+  const card = new URL(CARD);
+  const base = CARD.slice(0, CARD.lastIndexOf('/') + 1);
+  // The car's parts live beside it, so every request under that directory is
+  // answered from the directory on disk, keeping the shipped shape intact.
+  await context.route(`${base}**`, (route) => {
+    const name = new URL(route.request().url()).pathname.split('/').filter(Boolean).pop() ?? GRAPH;
+    return route.continue({ url: `${localOrigin}/onnx/${name}` });
+  });
+  void card;
+}
 
 let worker = context.serviceWorkers()[0];
 if (!worker) {
@@ -117,11 +141,9 @@ worker.on('console', (message) => {
   const text = message.text();
   if (process.env.VERBOSE === '1') console.log('[sw]', text.slice(0, 220));
   console_.push(text);
-  if (text.includes('No model format matched')) summary.misroutes += 1;
-  if (text.includes('the host did not count tokens')) summary.countWarnings += 1;
 });
-
 const extensionId = new URL(worker.url()).host;
+
 const options = await context.newPage();
 await options.goto(`chrome-extension://${extensionId}/options.html`);
 await optionsReady(options);
@@ -132,28 +154,23 @@ summary.adapter = await options.evaluate(async () => {
 });
 assert.ok(summary.adapter?.f16, 'the adapter must expose shader-f16 for a q4f16 graph');
 
-// 1. The shipped download route, with the url the page prefilled: this is what
-// a user sees on a fresh profile. MODEL_URL only overrides the address.
-if (MODEL_URL === CARD) {
-  // The shipped card must be what a fresh profile offers.
-  await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, CARD, { timeout: 15000 });
-} else {
-  await options.locator('#modelUrl').fill(MODEL_URL);
-}
-const reuse = process.env.PROFILE_DIR
+// 1. Install through the shipped route: the prefilled card on a fresh profile,
+// or the local directory, or a profile that already holds the model.
+const startedInstall = Date.now();
+const reuse = PROFILE_DIR
   ? await options.evaluate(async () => {
     const models = await AT.modelstore.list().catch(() => []);
-    const onnx = models.find((model) => /onnx/.test(model.name));
-    if (!onnx) return null;
-    await AT.settings.save({ localModelId: onnx.id });
-    return onnx.name;
+    const installed = models.find((model) => /onnx/.test(model.name));
+    if (!installed) return null;
+    await AT.settings.save({ localModelId: installed.id });
+    return installed.name;
   })
   : null;
-const startedInstall = Date.now();
 if (reuse) {
   console.log('[install] reusing', reuse, 'from the profile');
 } else {
-  console.log('[install] downloading', MODEL_URL);
+  await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, MODEL_URL, { timeout: 15000 });
+  console.log('[install] downloading', MODEL_URL, localOrigin ? '(from ' + localOrigin + ')' : '');
   await options.locator('#downloadModel').click();
   await options.waitForFunction(
     () => document.querySelector('#modelStatus')?.dataset.kind === 'ok' || document.querySelector('#modelStatus')?.dataset.kind === 'error',
@@ -161,14 +178,13 @@ if (reuse) {
     { timeout: 600000 }
   );
 }
-console.log('[install] done', Date.now() - startedInstall, 'ms');
 const status = await options.evaluate(() => ({
   kind: document.querySelector('#modelStatus')?.dataset.kind ?? null,
   text: document.querySelector('#modelStatus')?.textContent ?? '',
   modelId: document.querySelector('#localModel')?.value ?? ''
 }));
-summary.install = { url: MODEL_URL, reused: Boolean(reuse), ...status };
-console.log('[install]', reuse ? 'reused' : status.kind, status.text || reuse || '');
+summary.install = { url: MODEL_URL, reused: Boolean(reuse), local: localOrigin || null, ...status };
+console.log('[install]', reuse ? 'reused' : status.kind, status.text || reuse || '', Date.now() - startedInstall, 'ms');
 assert.ok(reuse || status.kind === 'ok', `install reported: ${status.text}`);
 
 // 2-4. A four-sequence page through the shipped per-tab switch.
@@ -185,22 +201,23 @@ while (Date.now() - started < PAGE_SECONDS) {
   translated = await page.evaluate(() => [...document.querySelectorAll('p')].filter((p) => /[\uAC00-\uD7AF]/.test(p.textContent ?? '')).length);
   if (translated === before.length) break;
   host = await options.evaluate(() => AT.sendMessage({ type: AT.C.MSG.LOCAL_GET_STATUS })).catch(() => null);
-  // What the content script itself thinks: a pass can finish while the page
-  // stays untouched, and only this says why.
   const content = await options.evaluate(async (id) => AT.api.tabs.sendMessage(id, { type: AT.C.MSG.CONTENT_STATE }), tabId).catch(() => null);
   summary.page ??= {};
   summary.page.content = content ?? null;
+  if (++tick % 5 === 0) {
+    console.log('[page]', Math.round((Date.now() - started) / 1000) + 's', translated + '/' + before.length,
+      host?.status?.state ?? '?', 'content', JSON.stringify(summary.page?.content ?? null).slice(0, 160));
+  }
   if (host?.status?.state === 'failed' || content?.error) break;
-  if (++tick % 10 === 0) console.log('[page]', Math.round((Date.now() - started) / 1000) + 's', translated + '/' + before.length, host?.status?.state ?? '?');
   await new Promise((done) => setTimeout(done, 1000));
 }
 const after = await page.evaluate(() => [...document.querySelectorAll('p')].map((p) => p.textContent));
-console.log('[page] finished', translated + '/' + before.length, 'after', Math.round((Date.now() - started) / 1000) + 's');
 summary.page = {
-  tabId, sequences: before.length, translated,
+  tabId, sequences: before.length, translated, after,
   seconds: Math.round((Date.now() - started) / 1000),
-  host: host?.status ?? null, after
+  host: host?.status ?? null
 };
+console.log('[page] finished', translated + '/' + before.length, 'after', summary.page.seconds + 's');
 assert.equal(translated, before.length, 'every paragraph must be translated');
 
 await setTabEnabledUI(options, tabId, false);
@@ -210,15 +227,15 @@ summary.page.restored = true;
 // 5. Optional live watch page: playback stopped for the whole run.
 if (process.env.YOUTUBE === '1') {
   const watch = await context.newPage();
-  await watch.goto('https://www.youtube.com/watch?v=jNQXAC9IVRw', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await watch.goto('https://www.youtube.com/watch?v=ywN3cX4VEII&hl=ja', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await watch.waitForTimeout(5000);
-  await watch.evaluate(() => document.querySelector('video')?.pause()).catch(() => {});
+  await watch.evaluate(() => document.querySelectorAll('video').forEach((video) => video.pause())).catch(() => {});
   const watchId = await tabIdFor(options, watch);
   await setTabEnabledUI(options, watchId, true);
   const ytStarted = Date.now();
   let ko = false;
-  console.log('[youtube] watching', watch.url().slice(0, 60));
   while (Date.now() - ytStarted < PAGE_SECONDS) {
+    await watch.evaluate(() => document.querySelectorAll('video').forEach((video) => video.pause())).catch(() => {});
     ko = await watch.evaluate(() => /[\uAC00-\uD7AF]/.test(document.querySelector('#description-inline-expander, ytd-text-inline-expander')?.textContent ?? ''));
     if (ko) break;
     const elapsed = Math.round((Date.now() - ytStarted) / 1000);
@@ -238,11 +255,10 @@ if (process.env.YOUTUBE === '1') {
 summary.misroutes = console_.filter((line) => line.includes('No model format matched')).length;
 summary.countWarnings = console_.filter((line) => line.includes('the host did not count tokens')).length;
 summary.consoleTail = console_.slice(-20);
-await mkdir(OUTPUT, { recursive: true });
 await writeFile(report, JSON.stringify(summary, null, 2));
 console.log(JSON.stringify({ report, ...summary }, null, 2));
 await context.close().catch(() => {});
-server.close();
+site.close();
 assert.equal(summary.misroutes, 0, 'the first load must not reach the GGUF host');
 assert.equal(summary.countWarnings, 0, 'the ONNX host must answer at/local-count');
 assert.deepEqual(summary.errors, [], 'no page errors');
