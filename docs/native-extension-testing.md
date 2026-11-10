@@ -64,6 +64,22 @@ to stay paused; it certifies one public watch page, not YouTube compatibility.
 
 On Linux, use the workflow's Xvfb command for headed browser tests. Do not bypass managed-browser extension policies.
 
+## A model on disk, not from the network
+
+Every live measurement used to download the 673 MB card again, and the CDN throttles repeats
+until a run stalls. Put the files under `weight/` once and point the runs at them:
+
+```sh
+npm run model:fetch                       # weight/plamo-3-translate-0.8b-onnx (graph + 5 parts)
+MODEL_DIR=weight/plamo-3-translate-0.8b-onnx npm run test:onnx
+MODEL_DIR=weight/plamo-3-translate-0.8b-onnx npm run test:sites
+```
+
+The harness answers `https://model.local/...` from that directory, so the shipped download route
+still runs end to end - the same fetch, the same byte-count check, the same OPFS write - with the
+network out of the picture. `PROFILE_DIR=<dir>` reuses an installed model instead, for repeats.
+Without `MODEL_DIR` the harness downloads the real card, which is what verifies the shipped URL.
+
 ## Real sites, visible browser
 
 `test/sites-live/run-sites.mjs` opens a visible Chrome for Testing window with the built

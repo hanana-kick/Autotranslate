@@ -18,15 +18,22 @@
 //      the exact original text when the tab is turned off.
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, cp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, cp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium, launchOptions, ROOT, OUTPUT } from '../browser/support.mjs';
 import { optionsReady, setTabEnabledUI, tabIdFor } from '../native-extension/tab-control.mjs';
 
 const CARD = 'https://huggingface.co/TeamFlaxia/plamo-3-translate-0.8b-onnx/resolve/main/onnx/model_q4f16.onnx';
-// The card the page prefills; the harness fails if the two ever disagree.
-const MODEL_URL = process.env.MODEL_URL || CARD;
+/** A model already on disk, so a measurement never downloads 673 MB again.
+ *  Every file the card names must sit in this directory. */
+const MODEL_DIR = process.env.MODEL_DIR ? resolve(process.env.MODEL_DIR) : '';
+/** Where the local directory is served from: an https origin the shipped
+ *  download route accepts, fulfilled from disk instead of the network. */
+const LOCAL_ORIGIN = 'https://model.local';
+const LOCAL_URL = `${LOCAL_ORIGIN}/onnx/model_q4f16.onnx`;
+// The card the page prefills; a local run installs from MODEL_DIR instead.
+const MODEL_URL = process.env.MODEL_URL || (MODEL_DIR ? LOCAL_URL : CARD);
 const PAGE_SECONDS = Number(process.env.PAGE_SECONDS || 240000);
 const summary = { chrome: null, adapter: null, install: null, page: null, countWarnings: 0, misroutes: 0, youtube: null, errors: [] };
 
@@ -70,6 +77,24 @@ const context = await chromium.launchPersistentContext(join(temporary, 'profile'
   locale: 'en-US'
 });
 context.setDefaultTimeout(30000);
+if (MODEL_DIR) {
+  // The shipped route fetches over https and asks for the graph's parts by
+  // name; both come from disk here, with the byte count the page checks.
+  await context.route(`${LOCAL_ORIGIN}/**`, async (route) => {
+    const name = new URL(route.request().url()).pathname.split('/').filter(Boolean).pop() ?? '';
+    const file = join(MODEL_DIR, name === 'model_q4f16.onnx' ? 'model_q4f16.onnx' : name);
+    try {
+      const size = (await stat(file)).size;
+      await route.fulfill({
+        status: 200,
+        headers: { 'content-type': 'application/octet-stream', 'content-length': String(size) },
+        body: await readFile(file)
+      });
+    } catch {
+      await route.fulfill({ status: 404, body: '' });
+    }
+  });
+}
 
 const console_ = [];
 context.on('page', (page) => page.on('pageerror', (error) => summary.errors.push({ url: page.url(), error: error.message })));
@@ -109,7 +134,12 @@ assert.ok(summary.adapter?.f16, 'the adapter must expose shader-f16 for a q4f16 
 
 // 1. The shipped download route, with the url the page prefilled: this is what
 // a user sees on a fresh profile. MODEL_URL only overrides the address.
-await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, MODEL_URL, { timeout: 15000 });
+if (MODEL_URL === CARD) {
+  // The shipped card must be what a fresh profile offers.
+  await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, CARD, { timeout: 15000 });
+} else {
+  await options.locator('#modelUrl').fill(MODEL_URL);
+}
 const reuse = process.env.PROFILE_DIR
   ? await options.evaluate(async () => {
     const models = await AT.modelstore.list().catch(() => []);

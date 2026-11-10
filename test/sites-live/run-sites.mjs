@@ -10,12 +10,16 @@
 // A site that blocks this machine is recorded as blocked, never worked around:
 // no user agent or cookie trickery, no account, no CAPTCHA bypass.
 import { chromium, launchOptions } from '../browser/support.mjs';
-import { mkdir, mkdtemp, cp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, cp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 const ROOT = '/Users/hana/sources/Autotranslate';
 const OUT = join(ROOT, 'test-results/browser');
+/** A model already on disk: the run installs from it instead of downloading. */
+const MODEL_DIR = process.env.MODEL_DIR ? resolve(process.env.MODEL_DIR) : '';
+const LOCAL_ORIGIN = 'https://model.local';
+const LOCAL_URL = `${LOCAL_ORIGIN}/onnx/model_q4f16.onnx`;
 const WATCH = process.env.WATCH || 'https://www.youtube.com/watch?v=ywN3cX4VEII&hl=ja';
 const REDDIT = process.env.REDDIT || 'https://www.reddit.com/r/LearnJapanese/';
 const TARGET = process.env.TARGET || 'ko';
@@ -47,6 +51,18 @@ const context = await chromium.launchPersistentContext(join(tmp, 'profile'), {
   locale: 'ja-JP'
 });
 context.setDefaultTimeout(60000);
+if (MODEL_DIR) {
+  await context.route(`${LOCAL_ORIGIN}/**`, async (route) => {
+    const name = new URL(route.request().url()).pathname.split('/').filter(Boolean).pop() ?? '';
+    const file = join(MODEL_DIR, name === 'model_q4f16.onnx' ? 'model_q4f16.onnx' : name);
+    try {
+      const size = (await stat(file)).size;
+      await route.fulfill({ status: 200, headers: { 'content-type': 'application/octet-stream', 'content-length': String(size) }, body: await readFile(file) });
+    } catch {
+      await route.fulfill({ status: 404, body: '' });
+    }
+  });
+}
 context.on('page', (page) => page.on('pageerror', (error) => summary.errors.push({ url: page.url(), error: error.message })));
 // A headed window starts its worker lazily; give it a page to wake up for.
 let worker = context.serviceWorkers()[0];
@@ -73,6 +89,7 @@ await options.evaluate((target) => AT.settings.save({ targetLang: target }), TAR
 await options.reload();
 await options.waitForFunction(() => !!globalThis.AT?.settings, null, { timeout: 30000 });
 await options.bringToFront();
+if (MODEL_DIR) await options.locator('#modelUrl').fill(LOCAL_URL);
 await options.locator('#downloadModel').click();
 await options.waitForFunction(
   () => ['ok', 'error'].includes(document.querySelector('#modelStatus')?.dataset.kind),
