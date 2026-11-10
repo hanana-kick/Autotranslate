@@ -153,7 +153,7 @@ namespace AT.local {
    * branch on it.
    */
   export async function callHost(message: AT.Message): Promise<AT.Response> {
-    const host = placement === 'background' ? hostModule(message) : undefined;
+    const host = placement === 'background' ? await hostModule(message) : undefined;
     if (!host) return AT.sendMessage(Object.assign({}, message, { to: TARGET_OFFSCREEN }));
     try {
       const reply = (await host.handle(message)) as Record<string, unknown>;
@@ -169,10 +169,11 @@ namespace AT.local {
   }
 
   /** The host module for the model a message names, or the GGUF host. */
-  function hostModule(message: AT.Message): { handle: (m: AT.Message) => Promise<unknown> } {
+  async function hostModule(message: AT.Message): Promise<{ handle: (m: AT.Message) => Promise<unknown> }> {
     const modelId = typeof (message as { modelId?: unknown }).modelId === 'string' ? String((message as { modelId?: unknown }).modelId) : '';
-    const record = modelId && lastKnownRecord ? lastKnownRecord(modelId) : null;
-    if (record && modelKind(record) === 'onnx' && typeof AT.onnxhost !== 'undefined') return AT.onnxhost;
+    if (!modelId) return AT.localhost;
+    const kind = await kindForHost(modelId);
+    if (kind === 'onnx' && typeof AT.onnxhost !== 'undefined') return AT.onnxhost;
     return AT.localhost;
   }
 
@@ -189,6 +190,28 @@ namespace AT.local {
   export function modelKindFor(modelId: string): ModelKind {
     const record = lastKnownRecord ? lastKnownRecord(modelId) : null;
     return record ? modelKind(record) : 'gguf';
+  }
+
+  /** Kinds this context has already resolved, so routing costs one store read
+   *  per model instead of one per message. */
+  const routedKinds = new Map<string, ModelKind>();
+
+  /** The kind of an installed model, reading the store once when this
+   *  context's synchronous view has not seen the id yet. A document that never
+   *  listed the records answers 'gguf' for everything; without this read the
+   *  first ONNX load would be handed to the GGUF host and fail its file sniff. */
+  export async function kindForHost(modelId: string): Promise<ModelKind> {
+    const remembered = routedKinds.get(modelId);
+    if (remembered) return remembered;
+    const synchronous = modelKindFor(modelId);
+    if (synchronous !== 'gguf') {
+      routedKinds.set(modelId, synchronous);
+      return synchronous;
+    }
+    const record = typeof AT.modelstore?.get === 'function' ? await AT.modelstore.get(modelId).catch(() => null) : null;
+    const kind = record ? modelKind(record) : 'gguf';
+    routedKinds.set(modelId, kind);
+    return kind;
   }
 
   /** Current native operation, reported before entering synchronous WASM. */

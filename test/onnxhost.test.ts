@@ -111,3 +111,23 @@ test('callHost picks the ONNX host for an ONNX record in the background placemen
     local.bindRecordLookup(() => null);
   }
 });
+
+test('a cold record view still routes an ONNX id to the ONNX host', async () => {
+  // A document that has never listed the records answers 'gguf' to every id
+  // synchronously; the first load must still reach the ONNX host, or the GGUF
+  // host's file sniff fails the model outright.
+  local.bindRecordLookup(() => null);
+  const real = AT.modelstore.get;
+  AT.modelstore.get = async (id: string) =>
+    id === 'cold-onnx'
+      ? { id, name: 'model_q4f16.onnx', size: 705701446, sourceUrl: 'https://x/onnx/model_q4f16.onnx', createdAt: 1 }
+      : null;
+  try {
+    assert.equal(local.modelKindFor('cold-onnx'), 'gguf', 'the synchronous view is cold');
+    assert.equal(await local.kindForHost('cold-onnx'), 'onnx');
+    assert.equal(await local.kindForHost('missing-id'), 'gguf', 'an id the store does not hold stays GGUF');
+  } finally {
+    AT.modelstore.get = real;
+    local.bindRecordLookup(() => null);
+  }
+});

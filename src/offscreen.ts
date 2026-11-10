@@ -21,10 +21,12 @@ namespace AT.offscreen {
 
   /** The host answers with the same payload the background would have got
    *  back over the message boundary, so one dispatcher serves both. */
-  const handle = (message: AT.Message): Promise<AT.localhost.HostReply> | Record<string, never> => {
+  const handle = async (message: AT.Message): Promise<AT.localhost.HostReply | Record<string, never>> => {
     if (!addressed(message)) return {};
     const modelId = typeof (message as { modelId?: unknown }).modelId === 'string' ? String((message as { modelId?: unknown }).modelId) : '';
-    const host = modelId && AT.local.modelKindFor(modelId) === 'onnx' && typeof AT.onnxhost !== 'undefined' ? AT.onnxhost : AT.localhost;
+    if (!modelId) return AT.localhost.handle(message);
+    const kind = await L.kindForHost(modelId);
+    const host = kind === 'onnx' && typeof AT.onnxhost !== 'undefined' ? AT.onnxhost : AT.localhost;
     return host.handle(message);
   };
 
