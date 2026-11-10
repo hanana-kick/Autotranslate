@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildZip, type ZipEntry } from './zip.ts';
-import { GECKO_ID, GECKO_MIN_VERSION, ONNX_RUNTIME_ENTRIES, RUNTIME_ENTRIES, archiveName, stripComments } from './package-spec.ts';
+import { BUNDLED_DIR, GECKO_ID, GECKO_MIN_VERSION, ONNX_RUNTIME_ENTRIES, RUNTIME_ENTRIES, archiveName, stripComments } from './package-spec.ts';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(ROOT, 'src');
@@ -392,6 +392,23 @@ function copyTree(from: string, to: string, filter: (path: string) => boolean = 
   }
 }
 
+/** The model files a bundle carries, from `weights/manifest.json`. The
+ *  download build has no directory and nothing is copied. */
+function copyBundledWeights(out: string): void {
+  const manifestPath = join(ROOT, BUNDLED_DIR, 'manifest.json');
+  if (!existsSync(manifestPath)) return;
+  const manifest = JSON.parse(read(manifestPath)) as { files?: unknown };
+  const files = Array.isArray(manifest.files) ? manifest.files.filter((name): name is string => typeof name === 'string') : [];
+  const target = join(out, BUNDLED_DIR);
+  mkdirSync(target, { recursive: true });
+  cpSync(manifestPath, join(target, 'manifest.json'));
+  for (const name of files) {
+    const source = join(ROOT, BUNDLED_DIR, name);
+    if (!existsSync(source)) throw new Error(`${name} is named by weights/manifest.json but is not in weights/`);
+    cpSync(source, join(target, name));
+  }
+}
+
 function build(target: string): string {
   const out = join(BUILD, target);
   rmSync(out, { recursive: true, force: true });
@@ -420,6 +437,7 @@ function build(target: string): string {
     mkdirSync(dirname(shipped), { recursive: true });
     cpSync(source, shipped);
   }
+  copyBundledWeights(out);
   return out;
 }
 

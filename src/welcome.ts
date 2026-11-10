@@ -231,7 +231,13 @@ namespace AT.welcome {
     await showSupport();
     // A profile that already has the file (a reinstall, a second browser) skips
     // the transfer and only has to confirm.
-    const existing = await AT.modelflow.installed();
+    let existing = await AT.modelflow.installed();
+    if (!existing && (await AT.modelflow.bundled())) {
+      // The package carries the weights: nothing to download, only to register.
+      const bundled = await AT.modelflow.installBundled();
+      if (bundled.ok) existing = await AT.modelflow.installed();
+      else AT.warn('the bundled model did not load', bundled.error);
+    }
     if (existing) {
       const prepared = await AT.modelflow.prepare(existing.id);
       if (prepared.ok) {

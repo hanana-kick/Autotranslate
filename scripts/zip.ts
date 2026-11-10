@@ -60,7 +60,13 @@ function dosStamp(date: Date): { time: number; date: number } {
 /** Builds a deterministic archive: entries sorted by name, one fixed timestamp. */
 export function buildZip(entries: readonly ZipEntry[], when = new Date(1980, 0, 1, 0, 0, 0)): Buffer {
   const { time, date } = dosStamp(when);
-  const sorted = [...entries].sort((a, b) => normaliseName(a.name).localeCompare(normaliseName(b.name)));
+  // Path order, by code unit: the packaging gate checks the archive against a
+  // sorted tree, and a locale-aware compare disagrees with it on names that
+  // differ only in punctuation (`tokenizer.json` against `tokenizer_config.json`).
+  const sorted = [...entries].sort((a, b) => {
+    const left = normaliseName(a.name), right = normaliseName(b.name);
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
   const chunks: Buffer[] = [];
   const central: Buffer[] = [];
   let offset = 0;

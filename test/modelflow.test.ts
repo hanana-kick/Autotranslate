@@ -121,3 +121,45 @@ for (const outcome of ['recovered', 'still-missing', 'provider-failure', 'wake-f
       : [AT.C.MSG.LOCAL_PREPARE, AT.C.MSG.LOCAL_GET_STATUS, AT.C.MSG.LOCAL_PREPARE]);
   });
 }
+
+test('a bundle without weights asks for nothing and reports no manifest', async () => {
+  resetGlobals();
+  const AT = load('lib/constants.js', 'lib/local.js', 'lib/modelstore.js', 'lib/modelflow.js');
+  AT.getURL = (path: string) => `chrome-extension://id/${path}`;
+  const asked: string[] = [];
+  globalThis.fetch = (async (url: string) => {
+    asked.push(String(url));
+    return { ok: false, status: 404, json: async () => null };
+  }) as typeof fetch;
+  assert.equal(await AT.modelflow.bundled(), null);
+  assert.deepEqual(asked, ['chrome-extension://id/weights/manifest.json']);
+  assert.equal((await AT.modelflow.installBundled()).error, 'no-bundle');
+});
+
+test('a bundled manifest is registered and selected without a transfer', async () => {
+  resetGlobals();
+  const AT = load('lib/constants.js', 'lib/local.js', 'lib/modelstore.js', 'lib/modelflow.js');
+  AT.getURL = (path: string) => `chrome-extension://id/${path}`;
+  globalThis.fetch = (async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ name: 'model_q4f16.onnx', size: 2_000_000, dtype: 'q4f16', sourceUrl: '' })
+  })) as unknown as typeof fetch;
+  const put: { name: string; size: number }[] = [];
+  AT.modelstore.putBundled = async (request: { name: string; size: number }) => {
+    put.push(request);
+    return { ok: true, record: { id: 'bundled-1', name: request.name, size: request.size, sourceUrl: '', createdAt: 1, bundled: true }, bytes: request.size };
+  };
+  let selected = '';
+  AT.settings = { load: async () => ({ localModelId: selected }), save: async (patch: { localModelId: string }) => {
+    selected = patch.localModelId;
+    return { localModelId: selected };
+  } };
+  AT.sendMessage = async () => ({ ok: true });
+  AT.modelstore.retireReplaced = async () => [];
+
+  const outcome = await AT.modelflow.installBundled();
+  assert.equal(outcome.ok, true, String(outcome.error));
+  assert.deepEqual(put, [{ name: 'model_q4f16.onnx', size: 2_000_000, sourceUrl: '' }]);
+  assert.equal(selected, 'bundled-1');
+});

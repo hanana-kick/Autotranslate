@@ -168,6 +168,7 @@ else lives in Options, which stays an ordinary settings page rather than part of
 | `npm run icons` | regenerate `src/icons/*.png` from `scripts/make-icons.ts` |
 | `npm run plamo:gguf` | build the BF16 GGUF PFN does not distribute: fetch `pfnet/plamo-3-translate-0.8b`, convert it with a pinned llama.cpp, rewrite the tokenizer tag, verify the result (see [Getting the model](#getting-the-model)) |
 | `npm run onnx:vendor` | regenerate `vendor-src/onnxruntime/` (the classic-script ONNX runtime the build copies) from the installed `@huggingface/transformers` + `onnxruntime-web` |
+| `npm run model:bundle` | fill `weights/` with the published q4f16 graph and its parts, so the next build ships them inside the package (`--from <dir>` copies files already downloaded) |
 
 The build is also the linter: it fails on a manifest/package version mismatch, a
 missing referenced file, a TypeScript error in `src/`, `demo/`, `scripts/` or `test/`, a
@@ -565,6 +566,15 @@ supplies it once: the card `AT.local.defaultSource()` names — the ONNX export 
 `TeamFlaxia/plamo-3-translate-0.8b-onnx` (published, ungated) is the default; the GGUF cards stay
 for the llama.cpp host, and the BF16 one carries no url until somebody hosts it — a file copied
 in by hand, or a url typed into Options.
+
+**Shipping the weights inside the bundle.** A build may carry the model instead of asking the
+user to download it: `npm run model:bundle` fills `weights/` with the published files and a
+`weights/manifest.json`, and the next build copies exactly what the manifest names. The record is
+written without touching OPFS (`AT.modelstore.putBundled`) and `AT.onnxhost` reads the graph from
+the package (`weights/<name>`), so a bundled install has nothing to transfer and nothing to store.
+Both targets use the same code and the same manifest; whether a bundle can be *published* is a
+distribution question, not a code one - Chrome accepts a package up to 2 GB, AMO's limit is 200 MB,
+so a 673 MiB q4f16 bundle is a Chrome-only or self-distributed Firefox build.
 
 PFN publishes `pfnet/plamo-3-translate-0.8b` as safetensors and distributes one GGUF:
 `plamo-3-translate-0.8b-Q4_K_M.gguf`, 573,125,952 bytes. Its card describes the BF16 conversion as

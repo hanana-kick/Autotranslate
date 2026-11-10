@@ -18,3 +18,6 @@ test-results/
 # Local build scratch: plamo:gguf downloads and the generated ONNX vendor files
 .cache/
 vendor-src/
+
+# Embedded model files (npm run model:bundle); 673 MiB, never source
+weights/

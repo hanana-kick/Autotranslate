@@ -87,6 +87,45 @@ namespace AT.modelflow {
     return locks ? locks.request('autotranslate-model-activation', activate) : activate();
   }
 
+  /** What a bundle that ships its own weights carries: written by the build
+   *  from `weights/manifest.json`, absent from the download build. */
+  export type BundledModel = { name: string; size: number; dtype: string; sourceUrl: string };
+
+  /** The embedded model's manifest, or null when this build has no weights. */
+  export async function bundled(): Promise<BundledModel | null> {
+    const url = typeof AT.getURL === 'function' ? AT.getURL('weights/manifest.json') : '';
+    if (!url) return null;
+    const response = await fetch(url).catch(() => null);
+    if (!response?.ok) return null;
+    const raw = (await response.json().catch(() => null)) as Record<string, unknown> | null;
+    if (!raw) return null;
+    const name = typeof raw.name === 'string' ? raw.name.trim().slice(0, 120) : '';
+    const size = Number(raw.size);
+    if (!name || !Number.isFinite(size) || size <= 0) return null;
+    return {
+      name,
+      size: Math.round(size),
+      dtype: typeof raw.dtype === 'string' ? raw.dtype : 'q4f16',
+      sourceUrl: typeof raw.sourceUrl === 'string' && raw.sourceUrl ? raw.sourceUrl : ''
+    };
+  }
+
+  /** Registers the embedded model and makes it the selection, without a
+   *  transfer: the bytes are already in the package. */
+  export async function installBundled(): Promise<Outcome> {
+    const started = Date.now();
+    const manifest = await bundled();
+    if (!manifest) {
+      return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'no-bundle', retired: [] };
+    }
+    const stored = await AT.modelstore.putBundled({
+      name: manifest.name,
+      size: manifest.size,
+      sourceUrl: manifest.sourceUrl
+    });
+    return await settle(stored, started);
+  }
+
   /** Asks the host to load a model; only a successful load means it can translate. */
   export async function prepare(modelId: string): Promise<{ ok: boolean; error: string | null }> {
     const message = { type: C.MSG.LOCAL_PREPARE, modelId };

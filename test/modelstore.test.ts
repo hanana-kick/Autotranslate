@@ -643,3 +643,24 @@ test('an ONNX graph that comes up short is truncated and removed', async () => {
   assert.equal(result.error, 'truncated');
   assert.equal((await modelstore.list()).length, 0);
 });
+
+test('a bundled model is a record with no bytes in this origin', async () => {
+  // The package carries the weights, so nothing is written here: the record
+  // must say so, or the host would look for a file in OPFS that never existed.
+  const f = active;
+  const result = await modelstore.putBundled({ name: 'model_q4f16.onnx', size: 2_000_000, sourceUrl: '' });
+  assert.equal(result.ok, true, String(result.error));
+  assert.equal(result.record?.bundled, true);
+  assert.equal(result.bytes, 2_000_000);
+  const listed = await modelstore.list();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0]?.bundled, true);
+  assert.equal(f.stored.has(listed[0]!.id), false, 'no file was written for a bundled model');
+  const usage = await modelstore.usage();
+  assert.equal(usage.modelBytes, 0, 'the package is not this origin\'s storage');
+});
+
+test('a bundled record needs a real name and a plausible size', async () => {
+  assert.equal((await modelstore.putBundled({ name: '', size: 2_000_000 })).error, 'no-name');
+  assert.equal((await modelstore.putBundled({ name: 'model_q4f16.onnx', size: 10 })).error, 'too-small');
+});

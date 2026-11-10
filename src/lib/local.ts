@@ -230,6 +230,9 @@ namespace AT.local {
     size: number;
     sourceUrl: string;
     createdAt: number;
+    /** The bytes ship inside the extension (`weights/`), not in OPFS: there is
+     *  no stored file to read, and deleting the record frees nothing on disk. */
+    bundled?: boolean;
   };
 
   /** What the on-device host reports about itself. */
@@ -879,7 +882,8 @@ namespace AT.local {
       name: typeof input.name === 'string' && input.name.trim() ? input.name.trim().slice(0, 120) : id,
       size: Math.round(size),
       sourceUrl: safeUrl(input.sourceUrl),
-      createdAt: Number.isFinite(createdAt) && createdAt > 0 ? Math.round(createdAt) : 0
+      createdAt: Number.isFinite(createdAt) && createdAt > 0 ? Math.round(createdAt) : 0,
+      ...(input.bundled === true ? { bundled: true } : {})
     };
   }
 

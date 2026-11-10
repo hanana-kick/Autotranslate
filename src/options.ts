@@ -516,7 +516,17 @@ namespace AT.options {
     if (settings.engine === 'local') await AT.modelflow.keepStorage();
     // The model list decides what the model select can show, so the form is
     // painted once the store has answered rather than from settings alone.
-    if (settings.engine === 'local') await Promise.all([refreshModels(), refreshLocalStatus()]);
+    if (settings.engine === 'local') {
+      // A bundle that ships its own weights has them already: register them
+      // before the list is painted so the model reads as installed, and only
+      // fall back to the transfer when the package carries none.
+      if (!settings.localModelId && (await AT.modelflow.bundled())) {
+        const bundled = await AT.modelflow.installBundled();
+        if (bundled.ok) settings = await AT.settings.load();
+        else AT.warn('the bundled model did not load', bundled.error);
+      }
+      await Promise.all([refreshModels(), refreshLocalStatus()]);
+    }
     render();
     // Listeners go on last: a Save before `render()` would persist the markup's
     // empty defaults over the user's settings.

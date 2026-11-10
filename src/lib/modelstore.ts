@@ -316,6 +316,36 @@ namespace AT.modelstore {
     await driver().put(S.metaStore, record.id, record);
   }
 
+  /** Records bytes that ship inside the extension. Nothing is written: the
+   *  graph is already on disk beside the code, and `AT.onnxhost` reads it from
+   *  the package instead of OPFS. Re-running replaces the earlier record under
+   *  the same name, so an updated bundle does not accumulate stale ids. */
+  export async function putBundled(request: {
+    name: string;
+    size: number;
+    sourceUrl?: string;
+  }): Promise<IngestResult> {
+    const name = typeof request.name === 'string' ? request.name.trim().slice(0, 120) : '';
+    const size = Number(request.size);
+    if (!name) return { ok: false, record: null, error: 'no-name', bytes: 0 };
+    if (!Number.isFinite(size) || size < L.MIN_MODEL_BYTES) {
+      return { ok: false, record: null, error: 'too-small', bytes: 0 };
+    }
+    const sourceUrl = typeof request.sourceUrl === 'string' ? request.sourceUrl : '';
+    const record = L.normalizeModel({
+      id: L.makeModelId(name, `bundled|${sourceUrl}`, deps.now()),
+      name,
+      size,
+      sourceUrl,
+      createdAt: deps.now(),
+      bundled: true
+    });
+    if (!record) return { ok: false, record: null, error: 'invalid-record', bytes: 0 };
+    await putRecord(record);
+    const retired = await replaceExisting(record).catch(() => [] as string[]);
+    return { ok: true, record, error: null, bytes: record.size, retired };
+  }
+
   /** Deletes metadata and bytes together; reports whether anything was there. */
   export async function remove(id: string): Promise<boolean> {
     const existing = await get(id);
@@ -753,7 +783,8 @@ namespace AT.modelstore {
   export async function usage(): Promise<Usage> {
     const records = await list();
     const estimate = await files().estimate();
-    const modelBytes = records.reduce((total, record) => total + record.size, 0);
+    // A bundled model occupies the package, not this origin's storage.
+    const modelBytes = records.reduce((total, record) => total + (record.bundled ? 0 : record.size), 0);
     return {
       usage: estimate.usage,
       quota: estimate.quota,

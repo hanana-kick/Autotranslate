@@ -91,6 +91,20 @@ export const ENTRIES = [
   ...RUNTIME_ENTRIES
 ];
 
+/** Where a bundle that carries its own weights keeps them, and the manifest
+ *  that names them. The download build has neither. */
+export const BUNDLED_DIR = 'weights';
+export const BUNDLED_MANIFEST = 'weights/manifest.json';
+
+/**
+ * Files a bundled build must ship beside the manifest: the graph and every
+ * part the manifest names. Read from the built tree, not from a list, because
+ * which parts exist is the exporter's decision, not this repository's.
+ */
+export function bundledEntries(files: string[]): string[] {
+  return [BUNDLED_MANIFEST, ...files.map((name) => `${BUNDLED_DIR}/${name}`)];
+}
+
 /**
  * Source text with comments removed, for checks that forbid a code pattern but
  * must not trip over prose (`chrome.offscreen` named in an explanation is not

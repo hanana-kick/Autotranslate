@@ -10,7 +10,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildZip, listZip, readZipEntry, type ZipEntry } from './zip.ts';
-import { ENTRIES, GECKO_ID, GECKO_MIN_VERSION, TARGETS, archiveName } from './package-spec.ts';
+import { BUNDLED_MANIFEST, ENTRIES, GECKO_ID, GECKO_MIN_VERSION, TARGETS, archiveName, bundledEntries } from './package-spec.ts';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const DIST = join(ROOT, 'dist');
@@ -64,6 +64,15 @@ function checkEntries(target: string, bundle: Buffer, tree: string[]): string[] 
   );
   for (const required of ENTRIES) {
     fail(names.includes(required), `${target}: the archive is missing ${required}`);
+  }
+  // A bundled build must carry every file its manifest names: a half-copied
+  // weights directory would ship an extension that cannot load its model.
+  if (names.includes(BUNDLED_MANIFEST)) {
+    const manifest = JSON.parse(new TextDecoder().decode(readZipEntry(bundle, BUNDLED_MANIFEST))) as { files?: unknown };
+    const files = Array.isArray(manifest.files) ? manifest.files.filter((name): name is string => typeof name === 'string') : [];
+    for (const required of bundledEntries(files)) {
+      fail(names.includes(required), `${target}: the archive is missing ${required}`);
+    }
   }
   fail(names.join('\n') === [...tree].sort().join('\n'), `${target}: the archive is not exactly build/${target} (${names.length} entries vs ${tree.length})`);
 
