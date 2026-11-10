@@ -258,6 +258,10 @@ async function boot(options: BootOptions = {}) {
   AT.modelflow = {
     SOURCE: AT.local.MODEL_SOURCES[0]!,
     installed: async () => options.installed ?? null,
+    // This build carries no weights: the embedded route is the download build's
+    // no-op, so every test below still scripts the transfer.
+    bundled: async () => null,
+    installBundled: async () => outcome({ ok: false, stored: false, error: 'no-bundle' }),
     prepare: async (id: string) => {
       calls.prepare.push(id);
       return options.prepare ?? { ok: true, error: null };
