@@ -27,7 +27,8 @@
     "prebuild:chrome": "npm run onnx:vendor",
     "prebuild:firefox": "npm run onnx:vendor",
     "test:onnx": "node test/onnx-live/run-onnx.mjs",
-    "model:bundle": "node scripts/bundle-weights.ts"
+    "model:bundle": "node scripts/bundle-weights.ts",
+    "test:sites": "node test/sites-live/run-sites.mjs"
   },
   "devDependencies": {
     "@huggingface/transformers": "^4.3.2",

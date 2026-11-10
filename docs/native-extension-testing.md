@@ -64,6 +64,26 @@ to stay paused; it certifies one public watch page, not YouTube compatibility.
 
 On Linux, use the workflow's Xvfb command for headed browser tests. Do not bypass managed-browser extension policies.
 
+## Real sites, visible browser
+
+`test/sites-live/run-sites.mjs` opens a visible Chrome for Testing window with the built
+extension, installs the default card through the shipped options page, then translates a
+Japanese YouTube stream with playback forced to stay paused and `reddit.com/r/LearnJapanese`.
+It writes `test-results/browser/sites-live.json` and screenshots beside it.
+
+```sh
+npm run build
+npm run test:sites            # window closes when the run ends
+KEEP_OPEN=1 npm run test:sites
+WATCH=<url> REDDIT=<url> npm run test:sites
+```
+
+Why headed: Reddit answers a visible browser where it refuses this machine's headless one.
+Branded Chrome refuses `--load-extension` since 137, so the window is Chrome for Testing -
+still a real browser, still the real extension. A site that blocks the machine is recorded as
+blocked and the run continues; no user-agent or cookie trickery, no account, no CAPTCHA bypass.
+The YouTube leg fails the run if fewer than two comments come back translated.
+
 ## Live YouTube boundary
 
 The fixture tests and youtube.com tests are distinct. The live test requires real search results, actual scroll-triggered inserted results, their automatic translation and exact restoration, and same-document navigation into a real watch URL.
