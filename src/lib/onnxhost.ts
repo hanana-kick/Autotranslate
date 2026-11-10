@@ -33,7 +33,11 @@ namespace AT.onnxhost {
       options: { target_lang: string; add_generation_prompt: boolean; tokenize: false }
     ): string;
   };
-  type Pipeline = (prompt: string, options: Record<string, unknown>) => Promise<{ generated_text: string }[]>;
+  /** A batch is an array of prompts: one graph run, one padded output each. */
+  type Pipeline = (
+    prompt: string | string[],
+    options: Record<string, unknown>
+  ) => Promise<{ generated_text: string }[]>;
 
   /** The seam a test replaces: how the vendored runtime and the model's files
    *  are reached. Production leaves both undefined. */
@@ -132,6 +136,12 @@ namespace AT.onnxhost {
     if (seams.modelFiles) return seams.modelFiles(name);
     const record = await AT.modelstore.get(modelIdForCache).catch(() => null);
     if (!record) return null;
+    // Bundled bytes live in the package beside the code: read them from there,
+    // never the network, and never copy them into OPFS.
+    if (record.bundled) {
+      const response = await fetch(AT.getURL(`weights/${name}`)).catch(() => null);
+      return response?.ok ? await response.blob() : null;
+    }
     // The graph is the model's main file; everything else is a named part.
     if (name.endsWith('.onnx')) return AT.modelstore.read(record.id).catch(() => null);
     return AT.modelstore.readPart(record.id, name).catch(() => null);
@@ -354,6 +364,42 @@ namespace AT.onnxhost {
     }
   }
 
+  /** The answer inside one generated text: the pipeline strips the prompt's
+   *  special tokens, so the output element's `lang` value survives as the
+   *  target code and everything after it is the translation. */
+  function answerOf(generated: unknown, targetHint: string): string {
+    const text = typeof generated === 'string' ? generated : '';
+    const lang = P.langFor(targetHint) ?? '';
+    const at = lang ? text.lastIndexOf(lang) : -1;
+    return at >= 0 ? text.slice(at + lang.length) : text;
+  }
+
+  /** Several prompts in one graph run. Measured on an M5: one step costs 46 ms
+   *  at batch 1 and 85 ms at batch 8, so eight sequences share the weights read
+   *  instead of paying it eight times. Answers come back padded, so every
+   *  caller validates its own before trusting it. */
+  async function generateMany(prompts: string[], maxNewTokens: number, targetHint: string): Promise<string[]> {
+    if (!pipe) fail('not-loaded', 'no model is loaded');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
+    try {
+      const out = await pipe(prompts, {
+        max_new_tokens: maxNewTokens,
+        do_sample: false,
+        abort_signal: controller.signal
+      });
+      generations += 1;
+      touchIdleTimer();
+      const list = Array.isArray(out) ? out : [out];
+      return list.map((item) => answerOf(item?.generated_text, targetHint));
+    } catch (error: unknown) {
+      const message = String((error as { message?: unknown })?.message ?? error);
+      fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   const SELF_SUFFICIENT_CHARS = 40;
 
   function usable(answer: string, text: string, target: string): boolean {
@@ -375,8 +421,24 @@ namespace AT.onnxhost {
     return usable(retry, text, target) ? retry : '';
   }
 
+  /** How many sequences one run may carry: past this the padding of unequal
+   *  prompts costs more than the shared weight read saves. */
+  const MAX_BATCH = 8;
+
   async function translateChunk(target: string, texts: string[], hint: string | null): Promise<string[]> {
     if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', hint)];
+    // One graph run for the whole chunk. Every answer is checked against its
+    // own source before it is trusted: a padded batch can bleed a neighbour's
+    // text into a row, and a wrong translation is worse than a slow one.
+    if (texts.length <= MAX_BATCH) {
+      const prompts = texts.map((text) => renderPrompt(target, text, hint));
+      const cap = Math.max(...texts.map((text, index) => L.answerTokens(text, lastMaxTokens, prompts[index] ?? '')));
+      const answers = (await generateMany(prompts, cap, target)).map((answer) => answer.trim());
+      if (answers.length === texts.length && answers.every((answer, index) => usable(answer, texts[index] ?? '', target))) {
+        return answers;
+      }
+      AT.warn('on-device batch did not answer every segment, retrying as one numbered prompt', texts.length);
+    }
     const batch = texts.map((text, index) => `${index + 1}. ${P.sanitize(text).replace(/\s+/g, ' ').trim()}`).join('\n');
     const prompt = renderPrompt(target, batch, hint);
     const cap = L.answerTokens(texts, lastMaxTokens, prompt);
