@@ -88,6 +88,7 @@ if (!worker) {
 assert.ok(worker, 'the extension registered a service worker');
 worker.on('console', (message) => {
   const text = message.text();
+  if (process.env.VERBOSE === '1') console.log('[sw]', text.slice(0, 220));
   console_.push(text);
   if (text.includes('No model format matched')) summary.misroutes += 1;
   if (text.includes('the host did not count tokens')) summary.countWarnings += 1;
@@ -166,9 +167,12 @@ if (process.env.YOUTUBE === '1') {
   await setTabEnabledUI(options, watchId, true);
   const ytStarted = Date.now();
   let ko = false;
+  console.log('[youtube] watching', watch.url().slice(0, 60));
   while (Date.now() - ytStarted < PAGE_SECONDS) {
     ko = await watch.evaluate(() => /[\uAC00-\uD7AF]/.test(document.querySelector('#description-inline-expander, ytd-text-inline-expander')?.textContent ?? ''));
     if (ko) break;
+    const elapsed = Math.round((Date.now() - ytStarted) / 1000);
+    if (elapsed % 20 < 3) console.log('[youtube]', elapsed + 's', ko ? 'ko' : 'en');
     await new Promise((done) => setTimeout(done, 2000));
   }
   summary.youtube = {
