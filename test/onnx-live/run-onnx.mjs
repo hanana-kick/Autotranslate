@@ -42,6 +42,13 @@ const server = createServer((request, response) => {
 await new Promise((done) => server.listen(0, '127.0.0.1', done));
 const origin = `http://127.0.0.1:${server.address().port}`;
 
+const report = join(OUTPUT, 'onnx-q4f16-live.json');
+process.on('uncaughtException', (error) => {
+  summary.failure = String(error?.message ?? error);
+  summary.consoleTail = console_.slice(-20);
+  void writeFile(report, JSON.stringify(summary, null, 2));
+});
+
 const temporary = await mkdtemp(join(tmpdir(), 'onnx-live-'));
 const extension = join(temporary, 'extension');
 await cp(join(ROOT, 'build/chrome'), extension, { recursive: true });
@@ -121,13 +128,20 @@ const tabId = await tabIdFor(options, page);
 await setTabEnabledUI(options, tabId, true);
 const started = Date.now();
 let translated = 0;
+let host = null;
 while (Date.now() - started < PAGE_SECONDS) {
   translated = await page.evaluate(() => [...document.querySelectorAll('p')].filter((p) => /[\uAC00-\uD7AF]/.test(p.textContent ?? '')).length);
   if (translated === before.length) break;
+  host = await options.evaluate(() => AT.sendMessage({ type: AT.C.MSG.LOCAL_GET_STATUS })).catch(() => null);
+  if (host?.status?.state === 'failed') break;
   await new Promise((done) => setTimeout(done, 1000));
 }
 const after = await page.evaluate(() => [...document.querySelectorAll('p')].map((p) => p.textContent));
-summary.page = { tabId, sequences: before.length, translated, seconds: Math.round((Date.now() - started) / 1000), after };
+summary.page = {
+  tabId, sequences: before.length, translated,
+  seconds: Math.round((Date.now() - started) / 1000),
+  host: host?.status ?? null, after
+};
 assert.equal(translated, before.length, 'every paragraph must be translated');
 
 await setTabEnabledUI(options, tabId, false);
@@ -161,11 +175,11 @@ if (process.env.YOUTUBE === '1') {
 
 summary.misroutes = console_.filter((line) => line.includes('No model format matched')).length;
 summary.countWarnings = console_.filter((line) => line.includes('the host did not count tokens')).length;
+summary.consoleTail = console_.slice(-20);
 await mkdir(OUTPUT, { recursive: true });
-const report = join(OUTPUT, 'onnx-q4f16-live.json');
 await writeFile(report, JSON.stringify(summary, null, 2));
 console.log(JSON.stringify({ report, ...summary }, null, 2));
-await context.close();
+await context.close().catch(() => {});
 server.close();
 assert.equal(summary.misroutes, 0, 'the first load must not reach the GGUF host');
 assert.equal(summary.countWarnings, 0, 'the ONNX host must answer at/local-count');
