@@ -116,6 +116,33 @@ namespace AT.onnxhost {
       publish();
       throw new Error('this browser has no WebGPU');
     }
+    // Every ONNX card here runs f16 activations, and a device without the
+    // shader-f16 feature fails inside ORT's first kernel ("Gather requires f16
+    // but the device does not support it") after the whole model loaded. Ask
+    // the adapter first, so the answer arrives in a second, not in a crash.
+    const surface = (globalThis.navigator as { gpu?: { requestAdapter?: () => Promise<unknown> } } | undefined)?.gpu;
+    let probe: ReturnType<typeof setTimeout> | undefined;
+    let adapter: unknown;
+    try {
+      adapter = await Promise.race([
+        surface?.requestAdapter?.() ?? Promise.resolve(null),
+        new Promise<never>((_resolve, reject) => {
+          probe = setTimeout(() => reject(new Error('WebGPU adapter probe timed out')), L.GPU_PROBE_TIMEOUT_MS);
+        })
+      ]);
+    } catch {
+      adapter = null;
+    } finally {
+      if (probe) clearTimeout(probe);
+    }
+    const features = (adapter as { features?: { has?: (name: string) => boolean } } | null)?.features;
+    if (!features?.has?.('shader-f16')) {
+      state.supported = false;
+      state.reason = 'no-webgpu';
+      state.state = state.state === 'unloaded' ? 'unloaded' : state.state;
+      publish();
+      throw new Error('this GPU has no f16 shader support, which every ONNX card here needs');
+    }
     state.supported = true;
     state.reason = null;
     publish();

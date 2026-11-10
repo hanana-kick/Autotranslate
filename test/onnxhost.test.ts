@@ -75,10 +75,10 @@ test('modelKind classifies gguf, onnx and unknown files', () => {
 test('the ONNX card is the default offer and carries its parts', () => {
   const source = local.defaultSource();
   assert.equal(source.kind, 'onnx');
-  assert.equal(source.id, 'plamo-3-translate-0.8b-onnx-fp16');
-  assert.ok(source.url.includes('model_fp16.onnx'));
-  assert.equal(source.size, 1781996033);
-  assert.equal(source.dtype, 'fp16', 'the default ONNX card is unquantized');
+  assert.equal(source.id, 'plamo-3-translate-0.8b-onnx-q4f16');
+  assert.ok(source.url.includes('model_q4f16.onnx'));
+  assert.equal(source.size, 705701446);
+  assert.equal(source.dtype, 'q4f16', 'the default is the graph the step and batch numbers were measured on');
   assert.ok((source.parts ?? []).includes('tokenizer.json'));
   assert.equal(local.sourceFor(source.url)?.id, source.id);
 });

@@ -25,6 +25,7 @@ import { chromium, launchOptions, ROOT, OUTPUT } from '../browser/support.mjs';
 import { optionsReady, setTabEnabledUI, tabIdFor } from '../native-extension/tab-control.mjs';
 
 const CARD = 'https://huggingface.co/TeamFlaxia/plamo-3-translate-0.8b-onnx/resolve/main/onnx/model_q4f16.onnx';
+// The card the page prefills; the harness fails if the two ever disagree.
 const MODEL_URL = process.env.MODEL_URL || CARD;
 const PAGE_SECONDS = Number(process.env.PAGE_SECONDS || 240000);
 const summary = { chrome: null, adapter: null, install: null, page: null, countWarnings: 0, misroutes: 0, youtube: null, errors: [] };
@@ -103,9 +104,9 @@ summary.adapter = await options.evaluate(async () => {
 });
 assert.ok(summary.adapter?.f16, 'the adapter must expose shader-f16 for a q4f16 graph');
 
-// 1. The shipped download route. The card's own url is prefilled; type it
-// explicitly so MODEL_URL can point at another published copy.
-await options.locator('#modelUrl').fill(MODEL_URL);
+// 1. The shipped download route, with the url the page prefilled: this is what
+// a user sees on a fresh profile. MODEL_URL only overrides the address.
+await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, MODEL_URL, { timeout: 15000 });
 await options.locator('#downloadModel').click();
 await options.waitForFunction(
   () => document.querySelector('#modelStatus')?.dataset.kind === 'ok' || document.querySelector('#modelStatus')?.dataset.kind === 'error',

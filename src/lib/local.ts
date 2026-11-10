@@ -365,10 +365,11 @@ namespace AT.local {
    *  hosts the converted file, and a card with an empty `url` is no download
    *  at all: the caller hears that back as `bad-url`. */
   export function defaultSource(): ModelSource {
-    // The unquantized ONNX export first: a smaller quantized download is an
-    // option, never the default.
+    // q4f16 first: 706 MB instead of 1.78 GB for the same weights at four bits
+    // per block, and the graph the batch and step measurements were taken on.
+    // The unquantized export stays a card the user can pick.
     return (
-      MODEL_SOURCES.find((source) => source.url !== '' && source.kind === 'onnx' && source.dtype === 'fp16') ??
+      MODEL_SOURCES.find((source) => source.url !== '' && source.kind === 'onnx' && source.dtype === 'q4f16') ??
       MODEL_SOURCES.find((source) => source.url !== '' && source.kind === 'onnx') ??
       MODEL_SOURCES.find((source) => source.url !== '') ??
       MODEL_SOURCES[0]!

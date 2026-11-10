@@ -490,8 +490,9 @@ test('every model card is an artefact the installer can fetch', () => {
 test('the default card is the published ONNX export, the GGUF cards stay for the other host', () => {
   const offered = local.defaultSource();
   assert.equal(offered.kind, 'onnx', 'the ONNX export is what this build runs by default');
-  assert.equal(offered.id, 'plamo-3-translate-0.8b-onnx-fp16');
-  assert.equal(offered.dtype, 'fp16', 'the offered download is never a quantization');
+  assert.equal(offered.id, 'plamo-3-translate-0.8b-onnx-q4f16');
+  assert.equal(offered.dtype, 'q4f16', 'the offered download is the 706 MB graph, not the 1.78 GB one');
+  assert.equal(offered.size, 705701446);
   assert.notEqual(offered.url, '', 'the offered card has an address the install button can use');
   assert.ok((offered.parts ?? []).length > 0, 'a multi-file model lists the parts beside its graph');
   assert.equal(local.PLAMO_BF16_URL, '', 'PFN publishes quantizations of this model only, no BF16 GGUF');

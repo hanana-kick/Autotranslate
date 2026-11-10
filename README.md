@@ -486,8 +486,9 @@ and a failed generation surfaces in the popup with a code (`config`, `provider`,
 
 | Card | Runtime | File | Licence |
 | --- | --- | --- | --- |
-| **PLaMo 3 Translate 0.8B (ONNX fp16)** — the default, unquantized | Transformers.js over onnxruntime-web WebGPU (`AT.onnxhost`) | `TeamFlaxia/plamo-3-translate-0.8b-onnx`: `onnx/model_fp16.onnx` at 1,781,996,033 bytes (an fp16 copy of the original BF16 checkpoint, weights untouched) plus `config.json`, `tokenizer.json`, `tokenizer_config.json`, `generation_config.json`, `chat_template.jinja`, fetched into OPFS together | PLaMo Community License |
-| PLaMo 3 Translate 0.8B (ONNX q4f16) | same runtime | `onnx/model_q4f16.onnx` at 705,701,446 bytes — the smaller quantized download, an option, never the default | PLaMo Community License |
+| **PLaMo 3 Translate 0.8B (ONNX q4f16)** — the default | Transformers.js over onnxruntime-web WebGPU (`AT.onnxhost`) | `TeamFlaxia/plamo-3-translate-0.8b-onnx`: `onnx/model_q4f16.onnx` at 705,701,446 bytes (fp16 activations, int4 weights) plus `config.json`, `tokenizer.json`, `tokenizer_config.json`, `generation_config.json`, `chat_template.jinja`, fetched into OPFS together | PLaMo Community License |
+| PLaMo 3 Translate 0.8B (ONNX fp16), unquantized | same host | `onnx/model_fp16.onnx` at 1,781,996,033 bytes (an fp16 copy of the original BF16 checkpoint, weights untouched), fetched the same way | PLaMo Community License |
+| PLaMo 3 Translate 0.8B (ONNX q4), fp32 activations | same host | `onnx/model_q4.onnx` at 1,047,691,646 bytes | PLaMo Community License |
 | PLaMo 3 Translate 0.8B (Q4_K_M) | llama.cpp WASM via `@wllama/wllama` 3.8.1 (`AT.localhost`) | `pfnet/plamo-3-translate-0.8b-GGUF`'s `plamo-3-translate-0.8b-Q4_K_M.gguf` at 573,125,952 bytes | PLaMo Community License |
 | PLaMo 3 Translate 0.8B (BF16) | same, once hosted | 1,783,495,808 bytes; `PLAMO_BF16_URL` is empty because PFN does not publish this GGUF — `npm run plamo:gguf` builds it locally | PLaMo Community License |
 
@@ -546,11 +547,13 @@ can exercise the real DOM engine without a model.
 
 **Nothing leaves the browser.** A page is translated without opening a socket: the model runs in
 this browser and no page text leaves it. The model file itself is a one-time download —
-1,781,996,033 bytes for the fp16 ONNX graph the extension offers by default (plus a few
-KB of tokenizer and config beside it; the weights are the released BF16 checkpoint in
-fp16, not a quantization), 705,701,446 for the q4f16 option, 573,125,952 for the GGUF
-quantization; until a model is there the popup says so and nothing is translated,
-because there is nowhere else to send the text.
+705,701,446 bytes for the q4f16 ONNX graph the extension offers by default (plus a few
+KB of tokenizer and config beside it), 1,781,996,033 for the unquantized fp16 export (the
+released BF16 checkpoint in fp16), 573,125,952 for the GGUF quantization; until a model is
+there the popup says so and nothing is translated, because there is nowhere else to send
+the text. Every ONNX card runs f16 activations, so a GPU without WebGPU's `shader-f16`
+feature cannot run them at all and the host says so instead of failing inside the first
+kernel.
 
 | Piece | Where it lives |
 | --- | --- |
@@ -563,7 +566,8 @@ because there is nowhere else to send the text.
 
 **Getting the model.** A gigabyte-class file has no business inside an extension zip, so the user
 supplies it once: the card `AT.local.defaultSource()` names — the ONNX export at
-`TeamFlaxia/plamo-3-translate-0.8b-onnx` (published, ungated) is the default; the GGUF cards stay
+`TeamFlaxia/plamo-3-translate-0.8b-onnx` (published, ungated) is the default, its q4f16 graph
+first; the GGUF cards stay
 for the llama.cpp host, and the BF16 one carries no url until somebody hosts it — a file copied
 in by hand, or a url typed into Options.
 
