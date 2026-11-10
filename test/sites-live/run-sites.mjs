@@ -46,11 +46,21 @@ const context = await chromium.launchPersistentContext(join(tmp, 'profile'), {
 });
 context.setDefaultTimeout(60000);
 context.on('page', (page) => page.on('pageerror', (error) => summary.errors.push({ url: page.url(), error: error.message })));
+// A headed window starts its worker lazily; give it a page to wake up for.
 let worker = context.serviceWorkers()[0];
 if (!worker) {
   const blank = await context.newPage();
   await blank.goto('about:blank').catch(() => {});
-  try { worker = await context.waitForEvent('serviceworker', { timeout: 20000 }); } catch { worker = context.serviceWorkers()[0]; }
+  try {
+    worker = await context.waitForEvent('serviceworker', { timeout: 20000 });
+  } catch {
+    worker = context.serviceWorkers()[0];
+  }
+  if (!worker) {
+    await blank.reload().catch(() => {});
+    worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker', { timeout: 30000 });
+  }
+  await blank.close().catch(() => {});
 }
 const extensionId = new URL(worker.url()).host;
 
