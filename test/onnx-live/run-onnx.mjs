@@ -142,7 +142,12 @@ while (Date.now() - started < PAGE_SECONDS) {
   translated = await page.evaluate(() => [...document.querySelectorAll('p')].filter((p) => /[\uAC00-\uD7AF]/.test(p.textContent ?? '')).length);
   if (translated === before.length) break;
   host = await options.evaluate(() => AT.sendMessage({ type: AT.C.MSG.LOCAL_GET_STATUS })).catch(() => null);
-  if (host?.status?.state === 'failed') break;
+  // What the content script itself thinks: a pass can finish while the page
+  // stays untouched, and only this says why.
+  const content = await options.evaluate(async (id) => AT.api.tabs.sendMessage(id, { type: AT.C.MSG.CONTENT_STATE }), tabId).catch(() => null);
+  summary.page ??= {};
+  summary.page.content = content ?? null;
+  if (host?.status?.state === 'failed' || content?.error) break;
   if (++tick % 10 === 0) console.log('[page]', Math.round((Date.now() - started) / 1000) + 's', translated + '/' + before.length, host?.status?.state ?? '?');
   await new Promise((done) => setTimeout(done, 1000));
 }

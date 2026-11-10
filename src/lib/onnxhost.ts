@@ -471,7 +471,8 @@ namespace AT.onnxhost {
     // per-row stop, so a batch decodes until its last row finishes - and every
     // answer is checked against its own source before it is trusted.
     const prompts = texts.map((text) => renderPrompt(target, text, hint));
-    const batched = await generateMany(prompts, Math.max(...texts.map((text, index) => tightCap(text, prompts[index] ?? ''))));
+    const batchCap = Math.max(...texts.map((text, index) => tightCap(text, prompts[index] ?? '')));
+    const batched = await generateMany(prompts, batchCap);
     if (batched.length === texts.length && batched.every((answer, index) => usable(answer.trim(), texts[index] ?? '', target))) {
       return batched.map((answer) => answer.trim());
     }
