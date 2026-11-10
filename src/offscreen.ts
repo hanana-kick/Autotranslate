@@ -24,8 +24,10 @@ namespace AT.offscreen {
   const handle = async (message: AT.Message): Promise<AT.localhost.HostReply | Record<string, never>> => {
     if (!addressed(message)) return {};
     const modelId = typeof (message as { modelId?: unknown }).modelId === 'string' ? String((message as { modelId?: unknown }).modelId) : '';
-    if (!modelId) return AT.localhost.handle(message);
-    const kind = await L.kindForHost(modelId);
+    // Status, unload and query name no model: they belong to whichever host
+    // answered last, or the offscreen document reports an ONNX run through the
+    // GGUF module's untouched state.
+    const kind = modelId ? await L.kindForHost(modelId) : L.lastKind();
     const host = kind === 'onnx' && typeof AT.onnxhost !== 'undefined' ? AT.onnxhost : AT.localhost;
     return host.handle(message);
   };

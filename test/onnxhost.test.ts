@@ -131,3 +131,24 @@ test('a cold record view still routes an ONNX id to the ONNX host', async () => 
     local.bindRecordLookup(() => null);
   }
 });
+
+test('a status query for an ONNX model goes to the host that answered last', async () => {
+  // Status, unload and query carry no model id. Before this, the offscreen
+  // dispatcher sent them to the GGUF host, which reported its own untouched
+  // state as if it were the running one.
+  local.bindRecordLookup(() => null);
+  const real = AT.modelstore.get;
+  AT.modelstore.get = async (id: string) =>
+    id === 'status-onnx'
+      ? { id, name: 'model_q4f16.onnx', size: 705701446, sourceUrl: 'https://x/onnx/model_q4f16.onnx', createdAt: 1 }
+      : null;
+  try {
+    await local.kindForHost('status-onnx');
+    assert.equal(local.lastKind(), 'onnx', 'the routed kind is remembered for id-less messages');
+    await local.kindForHost('some-gguf');
+    assert.equal(local.lastKind(), 'gguf', 'a later GGUF route replaces it');
+  } finally {
+    AT.modelstore.get = real;
+    local.bindRecordLookup(() => null);
+  }
+});

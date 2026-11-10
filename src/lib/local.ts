@@ -196,13 +196,29 @@ namespace AT.local {
    *  per model instead of one per message. */
   const routedKinds = new Map<string, ModelKind>();
 
+  /** The kind of the model this context routed most recently. Status, unload
+   *  and query carry no id of their own, and they belong to the host that
+   *  answered last: asking the GGUF host about an ONNX model reports the GGUF
+   *  module's untouched state ("unloaded", zero generations) as if it were the
+   *  running one. */
+  let lastRoutedKind: ModelKind = 'gguf';
+
+  export function lastKind(): ModelKind {
+    return lastRoutedKind;
+  }
+
   /** The kind of an installed model, reading the store once when this
    *  context's synchronous view has not seen the id yet. A document that never
    *  listed the records answers 'gguf' for everything; without this read the
    *  first ONNX load would be handed to the GGUF host and fail its file sniff. */
   export async function kindForHost(modelId: string): Promise<ModelKind> {
     const remembered = routedKinds.get(modelId);
-    if (remembered) return remembered;
+    const kind = remembered ?? (await resolveKind(modelId));
+    lastRoutedKind = kind;
+    return kind;
+  }
+
+  async function resolveKind(modelId: string): Promise<ModelKind> {
     const synchronous = modelKindFor(modelId);
     if (synchronous !== 'gguf') {
       routedKinds.set(modelId, synchronous);
