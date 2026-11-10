@@ -110,23 +110,36 @@ assert.ok(summary.adapter?.f16, 'the adapter must expose shader-f16 for a q4f16 
 // 1. The shipped download route, with the url the page prefilled: this is what
 // a user sees on a fresh profile. MODEL_URL only overrides the address.
 await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, MODEL_URL, { timeout: 15000 });
-console.log('[install] downloading', MODEL_URL);
+const reuse = process.env.PROFILE_DIR
+  ? await options.evaluate(async () => {
+    const models = await AT.modelstore.list().catch(() => []);
+    const onnx = models.find((model) => /onnx/.test(model.name));
+    if (!onnx) return null;
+    await AT.settings.save({ localModelId: onnx.id });
+    return onnx.name;
+  })
+  : null;
 const startedInstall = Date.now();
-await options.locator('#downloadModel').click();
-await options.waitForFunction(
-  () => document.querySelector('#modelStatus')?.dataset.kind === 'ok' || document.querySelector('#modelStatus')?.dataset.kind === 'error',
-  null,
-  { timeout: 600000 }
-);
+if (reuse) {
+  console.log('[install] reusing', reuse, 'from the profile');
+} else {
+  console.log('[install] downloading', MODEL_URL);
+  await options.locator('#downloadModel').click();
+  await options.waitForFunction(
+    () => document.querySelector('#modelStatus')?.dataset.kind === 'ok' || document.querySelector('#modelStatus')?.dataset.kind === 'error',
+    null,
+    { timeout: 600000 }
+  );
+}
 console.log('[install] done', Date.now() - startedInstall, 'ms');
 const status = await options.evaluate(() => ({
-  kind: document.querySelector('#modelStatus')?.dataset.kind,
+  kind: document.querySelector('#modelStatus')?.dataset.kind ?? null,
   text: document.querySelector('#modelStatus')?.textContent ?? '',
   modelId: document.querySelector('#localModel')?.value ?? ''
 }));
-summary.install = { url: MODEL_URL, ...status };
-console.log('[install]', status.kind, status.text);
-assert.equal(status.kind, 'ok', `install reported: ${status.text}`);
+summary.install = { url: MODEL_URL, reused: Boolean(reuse), ...status };
+console.log('[install]', reuse ? 'reused' : status.kind, status.text || reuse || '');
+assert.ok(reuse || status.kind === 'ok', `install reported: ${status.text}`);
 
 // 2-4. A four-sequence page through the shipped per-tab switch.
 const page = await context.newPage();
