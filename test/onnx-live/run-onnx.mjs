@@ -193,6 +193,7 @@ await page.goto(origin + '/', { waitUntil: 'load' });
 const before = await page.evaluate(() => [...document.querySelectorAll('p')].map((p) => p.textContent));
 const tabId = await tabIdFor(options, page);
 await setTabEnabledUI(options, tabId, true);
+console.log('[toggle]', Date.now());
 const started = Date.now();
 let translated = 0;
 let host = null;
