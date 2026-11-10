@@ -361,6 +361,7 @@ namespace AT.onnxhost {
   /** One generation, bounded by a wall clock like the GGUF host's. */
   async function generate(prompt: string, maxNewTokens: number): Promise<string> {
     if (!pipe) fail('not-loaded', 'no model is loaded');
+    const t0 = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
     try {
@@ -377,6 +378,7 @@ namespace AT.onnxhost {
       // not a suffix of the prompt string. What survives verbatim is the plain
       // text between them: the output element's `lang` value is the target
       // code, and everything after that is the translation.
+      console.log('[dbg] generate 1 prompt', prompt.length, 'chars cap', maxNewTokens, Date.now() - t0, 'ms');
       return answerOf(out?.[0]?.generated_text);
     } catch (error: unknown) {
       const message = String((error as { message?: unknown })?.message ?? error);
@@ -395,33 +397,6 @@ namespace AT.onnxhost {
    *  the last `ko` anywhere in the output, which a source line can contain. */
   function answerOf(generated: unknown): string {
     return typeof generated === 'string' ? generated : '';
-  }
-
-  /** Several prompts in one graph run. Measured on an M5: one step costs 46 ms
-   *  at batch 1 and 85 ms at batch 8, so eight sequences share the weights read
-   *  instead of paying it eight times. Answers come back padded, so every
-   *  caller validates its own before trusting it. */
-  async function generateMany(prompts: string[], maxNewTokens: number): Promise<string[]> {
-    if (!pipe) fail('not-loaded', 'no model is loaded');
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
-    try {
-      const out = await pipe(prompts, {
-        max_new_tokens: maxNewTokens,
-        do_sample: false,
-        return_full_text: false,
-        abort_signal: controller.signal
-      });
-      generations += 1;
-      touchIdleTimer();
-      const list = Array.isArray(out) ? out : [out];
-      return list.map((item) => answerOf(item?.generated_text));
-    } catch (error: unknown) {
-      const message = String((error as { message?: unknown })?.message ?? error);
-      fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
-    } finally {
-      clearTimeout(timer);
-    }
   }
 
   const SELF_SUFFICIENT_CHARS = 40;
@@ -445,24 +420,12 @@ namespace AT.onnxhost {
     return usable(retry, text, target) ? retry : '';
   }
 
-  /** How many sequences one run may carry: past this the padding of unequal
-   *  prompts costs more than the shared weight read saves. */
-  const MAX_BATCH = 8;
-
   async function translateChunk(target: string, texts: string[], hint: string | null): Promise<string[]> {
     if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', hint)];
-    // One graph run for the whole chunk. Every answer is checked against its
-    // own source before it is trusted: a padded batch can bleed a neighbour's
-    // text into a row, and a wrong translation is worse than a slow one.
-    if (texts.length <= MAX_BATCH) {
-      const prompts = texts.map((text) => renderPrompt(target, text, hint));
-      const cap = Math.max(...texts.map((text, index) => L.answerTokens(text, lastMaxTokens, prompts[index] ?? '')));
-      const answers = (await generateMany(prompts, cap)).map((answer) => answer.trim());
-      if (answers.length === texts.length && answers.every((answer, index) => usable(answer, texts[index] ?? '', target))) {
-        return answers;
-      }
-      AT.warn('on-device batch did not answer every segment, retrying as one numbered prompt', texts.length);
-    }
+    // One numbered prompt for the whole chunk. A batched run was measured on
+    // this graph and is slower here: rows are padded to the longest and the
+    // pipeline has no per-row stop, so every row decodes to max_new_tokens,
+    // while one sequence stops at its own end.
     const batch = texts.map((text, index) => `${index + 1}. ${P.sanitize(text).replace(/\s+/g, ' ').trim()}`).join('\n');
     const prompt = renderPrompt(target, batch, hint);
     const cap = L.answerTokens(texts, lastMaxTokens, prompt);

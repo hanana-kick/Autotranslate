@@ -73,6 +73,8 @@ context.setDefaultTimeout(30000);
 
 const console_ = [];
 context.on('page', (page) => page.on('pageerror', (error) => summary.errors.push({ url: page.url(), error: error.message })));
+// The offscreen document logs the host's own progress; VERBOSE=1 shows it.
+if (process.env.VERBOSE === '1') context.on('console', (message) => console.log('[ctx]', message.text().slice(0, 220)));
 
 let worker = context.serviceWorkers()[0];
 if (!worker) {

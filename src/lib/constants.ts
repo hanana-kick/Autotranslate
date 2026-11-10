@@ -46,6 +46,9 @@ namespace AT {
     BADGE_COLOR: string;
     DEFAULT_MAX_NODES: number;
     OBSERVER_BATCH_NODES: number;
+    /** Plain text nodes packed into one request. Eight is the batch the
+     *  on-device host answers in one graph run, so more would queue anyway. */
+    PACKED_TEXT_NODES: number;
     SENTENCE_MAX_CHARS: number;
     OBSERVER_DEBOUNCE_MS: number;
     IGNORE_SELECTOR: string;
@@ -66,6 +69,7 @@ namespace AT {
     DEFAULT_MAX_NODES: 600,
     // Ceiling for nodes translated by the MutationObserver in one tick.
     OBSERVER_BATCH_NODES: 16,
+    PACKED_TEXT_NODES: 8,
     // Longer texts are split into sentences before they are sent: about 50
     // Latin tokens, well inside a sentence's worth of meaning. Only a text
     // longer than this pays for the extra round trip.

@@ -395,11 +395,16 @@ namespace AT.dom {
       const write = (item: Item, answer: string, complete = true): void => {
         if (!cancelled() && apply(item, answer, complete)) wrote++;
       };
+      /** One segment's cache key. The pack and the single path must agree, or a
+       *  node answered in a pack is asked again the next time it stands alone. */
+      const textKey = (item: Item, parts: readonly string[], namespace = 'text'): string =>
+        keyFor(namespace, [item.core, ...parts]);
+
       const single = async (item: Item, namespace = 'text'): Promise<void> => {
         if (cancelled() || !owns(item)) return;
         const split = sentenceJob(item);
         const parts = split?.parts ?? [item.core];
-        const key = keyFor(namespace, [item.core, ...parts]);
+        const key = textKey(item, parts, namespace);
         let answers = cached(key);
         if (!answers) {
           answers = await ask(parts);
@@ -419,13 +424,81 @@ namespace AT.dom {
         write(item, parts.map((part, index) => answers[index] || part).join(split?.gap ?? ''), complete);
       };
 
-      for (const items of jobs) {
+      // Plain nodes are packed: one request answers several segments, so a page
+      // with two hundred separate text nodes costs twenty-five prompts instead
+      // of two hundred. Only items that need no sentence split are packed; the
+      // split path keeps its own per-item contract.
+      const PACK = AT.C.PACKED_TEXT_NODES;
+      const packable = (items: Item[]): boolean => items.length === 1 && !sentenceJob(items[0]!);
+      const singleMany = async (items: Item[]): Promise<void> => {
+        const live = items.filter((item) => owns(item));
+        if (!live.length) return;
+        const keys = live.map((item) => textKey(item, [item.core]));
+        const answers: string[] = new Array<string>(live.length).fill('');
+        const missing: number[] = [];
+        live.forEach((_item, index) => {
+          const hit = cached(keys[index]!);
+          if (hit && hit.length === 1 && hit[0]) answers[index] = hit[0]!;
+          else missing.push(index);
+        });
+        if (missing.length) {
+          // A sentence repeated across the page is one prompt, not one per copy.
+          const order: string[] = [];
+          const position = new Map<string, number>();
+          const slots: number[][] = [];
+          for (const slot of missing) {
+            const text = live[slot]!.core;
+            const at = position.get(text);
+            if (at === undefined) {
+              position.set(text, order.length);
+              order.push(text);
+              slots.push([slot]);
+            } else {
+              slots[at]!.push(slot);
+            }
+          }
+          const reply = await ask(order);
+          slots.forEach((group, at) => {
+            const value = (reply[at] ?? '').trim();
+            for (const slot of group) {
+              answers[slot] = value;
+              if (value) remember(keys[slot]!, [value]);
+            }
+          });
+        }
+        live.forEach((item, index) => {
+          if (!owns(item)) return;
+          const value = answers[index] ?? '';
+          if (!value) {
+            failed++;
+            error ??= 'empty translation segment';
+            firstError ??= new Error(error);
+            return;
+          }
+          write(item, value, true);
+        });
+      };
+
+      for (let job = 0; job < jobs.length; job += 1) {
         if (cancelled()) break;
+        const items = jobs[job]!;
         const first = items[0];
         if (!first || !items.every(owns)) continue;
         const before = wrote;
         try {
-          if (items.length === 1) {
+          if (packable(items)) {
+            const group: Item[] = [];
+            let next = job;
+            while (next < jobs.length && group.length < PACK) {
+              const candidate = jobs[next]!;
+              if (!packable(candidate) || !candidate.every(owns)) break;
+              group.push(candidate[0]!);
+              next += 1;
+            }
+            job = next - 1;
+            if (group.length > 1) await singleMany(group);
+            else await single(group[0]!);
+          } else if (items.length === 1) {
             await single(first);
           } else {
             const key = keyFor('run-numbered-v3', items.map((item) => item.source));

@@ -598,11 +598,12 @@ test('a translate decision translates every text and reports the count', async (
     error: null
   });
 
-  assert.equal(env.recorded.batch.length, 2, 'one request per text: the page fills in as answers land');
-  assert.deepEqual(env.recorded.batch.map((batch) => batch.texts), [['Hello there'], ['Good morning']]);
+  // Plain nodes are packed: two texts cost one request, not one request each.
+  assert.equal(env.recorded.batch.length, 1, 'plain text nodes share a request');
+  assert.deepEqual(env.recorded.batch.map((batch) => batch.texts), [['Hello there', 'Good morning']]);
   assert.deepEqual(env.recorded.batch[0], {
     type: 'at/batch',
-    texts: [DEFAULT_TEXTS[0]],
+    texts: [DEFAULT_TEXTS[0], DEFAULT_TEXTS[1]],
     targetLang: 'de',
     sourceLang: 'auto',
     url: 'https://example.com/article',
@@ -611,8 +612,9 @@ test('a translate decision translates every text and reports the count', async (
   });
 
   assert.deepEqual(pageTexts(env.page.documentElement), wrap(DEFAULT_TEXTS), 'every text node holds its translation');
+  // Packed answers land together, so the progress event already counts both.
   assert.deepEqual(env.recorded.state, [
-    { type: 'at/state-changed', status: 'translating', translated: 1, error: null },
+    { type: 'at/state-changed', status: 'translating', translated: 2, error: null },
     { type: 'at/state-changed', status: 'translated', translated: 2, error: null }
   ], 'a pass reports progress before it reports the result');
 
@@ -627,7 +629,7 @@ test('a repeated translate pass asks the provider nothing new', async () => {
   const env = environment();
   await env.send(translateMessage());
   const reply = await env.send(translateMessage());
-  assert.equal(env.recorded.batch.length, 2, 'already translated nodes are not sent again');
+  assert.equal(env.recorded.batch.length, 1, 'already translated nodes are not sent again');
   assert.deepEqual(reply, {
     ok: true,
     status: 'translated',
@@ -670,7 +672,7 @@ test('a rejected batch leaves the page untouched and reaches the background', as
   const reply = await env.send(translateMessage());
 
   assert.deepEqual(reply, { ok: false, error: 'provider exploded', code: 'rate_limited' });
-  assert.equal(env.recorded.batch.length, 2, 'both texts were attempted and both were refused');
+  assert.equal(env.recorded.batch.length, 1, 'both texts were attempted in one refused request');
   assert.deepEqual(pageTexts(env.page.documentElement), DEFAULT_TEXTS, 'a failure never edits the page');
   assert.deepEqual(
     env.recorded.state.filter((patch) => patch.status === 'translated'),
@@ -681,31 +683,30 @@ test('a rejected batch leaves the page untouched and reaches the background', as
 });
 
 test('a failed chunk keeps what already landed and says what failed', async () => {
-  // A run wider than the DOM layer's character budget (1200) is split into one
-  // request per paragraph here: chunks are written as their answers arrive, so a
-  // failure in the second one must not throw away the first.
-  const first = 'Hello there '.repeat(60).slice(0, 700);
-  const second = 'Good morning '.repeat(60).slice(0, 700);
-  const env = environment({ texts: [first, second], fail: { error: 'provider exploded', code: null, after: 1 } });
+  // Plain nodes are packed eight at a time, so nine of them make two requests:
+  // the first answers and lands, the second is refused, and what already landed
+  // must survive the failure.
+  const texts = Array.from({ length: 9 }, (_, index) => `Sentence number ${index} of the page`);
+  const env = environment({ texts, fail: { error: 'provider exploded', code: null, after: 1 } });
   const reply = await env.send(translateMessage());
 
-  assert.equal(env.recorded.batch.length, 2, 'the character budget really split the request');
-  assert.deepEqual(env.recorded.batch[0]?.texts, [first]);
-  assert.deepEqual(env.recorded.batch[1]?.texts, [second]);
+  assert.equal(env.recorded.batch.length, 2, 'the pack size really split the request');
+  assert.deepEqual(env.recorded.batch[0]?.texts, texts.slice(0, 8));
+  assert.deepEqual(env.recorded.batch[1]?.texts, texts.slice(8));
   assert.equal(reply.ok, true, 'a partial pass is not a failed pass');
   assert.equal(reply.failed, 1);
   assert.match(String(reply.error), /provider exploded/);
-  const [firstText, secondText] = pageTexts(env.page.documentElement);
-  assert.equal(firstText, wrap([first])[0], 'the answered chunk stays translated');
-  assert.equal(secondText, second, 'the failed one keeps its source text');
+  const shown = pageTexts(env.page.documentElement);
+  assert.deepEqual(shown.slice(0, 8), texts.slice(0, 8).map((text) => wrap([text])[0]!), 'the answered chunk stays translated');
+  assert.equal(shown[8], texts[8], 'the refused chunk keeps its source text');
 
   // The next pass asks only for what is left: the answered chunk is not paid for
   // twice, even though the fake provider refuses every later request too.
   const batchesBefore = env.recorded.batch.length;
   await env.send(translateMessage());
   assert.equal(env.recorded.batch.length, batchesBefore + 1, 'one request for the one missing text');
-  assert.deepEqual(env.recorded.batch.at(-1)?.texts, [second], 'only the failed text is retried');
-  assert.equal(pageTexts(env.page.documentElement)[0], wrap([first])[0], 'the translated text is still there');
+  assert.deepEqual(env.recorded.batch.at(-1)?.texts, [texts[8]], 'only the failed text is retried');
+  assert.equal(pageTexts(env.page.documentElement)[0], wrap([texts[0]!])[0], 'the translated text is still there');
 });
 
 // --- restore ----------------------------------------------------------------
@@ -921,7 +922,7 @@ test('an inserted region is translated on its own, not by re-reading the page', 
   const clock = installClock();
   try {
     await env.send(translateMessage());
-    assert.equal(env.recorded.batch.length, 2);
+    assert.equal(env.recorded.batch.length, 1, 'both paragraphs were packed into one request');
 
     // A widget appears: one subtree, one new sentence.
     const widget = env.page.make('div', {}, [env.page.make('p', {}, [t('Brand new widget')])]);
@@ -929,8 +930,8 @@ test('an inserted region is translated on its own, not by re-reading the page', 
     env.mutate([{ type: 'childList', target: env.page.body, addedNodes: [widget] }]);
     await clock.run();
 
-    assert.equal(env.recorded.batch.length, 3, 'the tick asked once');
-    assert.deepEqual(env.recorded.batch[2]?.texts, ['Brand new widget'], 'only the new region was read');
+    assert.equal(env.recorded.batch.length, 2, 'the tick asked once');
+    assert.deepEqual(env.recorded.batch[1]?.texts, ['Brand new widget'], 'only the new region was read');
     assert.deepEqual(pageTexts(widget), ['»Brand new widget«']);
     assert.deepEqual(pageTexts(env.page.documentElement).slice(0, 2), wrap(DEFAULT_TEXTS), 'the page is untouched');
   } finally {
@@ -950,8 +951,8 @@ test('a text the page rewrote is picked up from its record', async () => {
     env.mutate([{ type: 'characterData', target: first }]);
     await clock.run();
 
-    assert.equal(env.recorded.batch.length, 3);
-    assert.deepEqual(env.recorded.batch[2]?.texts, ['A different sentence']);
+    assert.equal(env.recorded.batch.length, 2);
+    assert.deepEqual(env.recorded.batch[1]?.texts, ['A different sentence']);
     assert.equal(first.nodeValue, '»A different sentence«');
   } finally {
     clock.restore();
@@ -963,7 +964,7 @@ test('changes with nothing to translate do not wake the translator', async () =>
   const clock = installClock();
   try {
     await env.send(translateMessage());
-    assert.equal(env.recorded.batch.length, 2);
+    assert.equal(env.recorded.batch.length, 1);
 
     // A removal leaves nothing to read.
     const gone = env.page.make('p', {}, [t('Going away')]);
@@ -982,7 +983,7 @@ test('changes with nothing to translate do not wake the translator', async () =>
     env.mutate([{ type: 'characterData', target: glyphs }]);
 
     assert.deepEqual(clock.pending, [], 'no tick was scheduled');
-    assert.equal(env.recorded.batch.length, 2, 'the provider was not asked again');
+    assert.equal(env.recorded.batch.length, 1, 'the provider was not asked again');
     assert.equal(translated.nodeValue, '»Hello there«', 'the translation is still there');
   } finally {
     clock.restore();
@@ -1045,7 +1046,7 @@ test('a mutation re-scans the page and translates the new text', async () => {
   const clock = installClock();
   try {
     await env.send(translateMessage());
-    assert.equal(env.recorded.batch.length, 2);
+    assert.equal(env.recorded.batch.length, 1);
     assert.equal(env.observers.length, 1);
     const observer = env.observers[0];
     assert.ok(observer);
@@ -1063,15 +1064,15 @@ test('a mutation re-scans the page and translates the new text', async () => {
     assert.equal(clock.pending.length, 1, 'the tick is debounced, not queued');
 
     await clock.run();
-    assert.equal(env.recorded.batch.length, 3, 'the tick asks the provider about the new node');
-    assert.deepEqual(env.recorded.batch[2]?.texts, ['Fresh content']);
+    assert.equal(env.recorded.batch.length, 2, 'the tick asks the provider about the new node');
+    assert.deepEqual(env.recorded.batch[1]?.texts, ['Fresh content']);
     assert.deepEqual(pageTexts(env.page.body), [...wrap(['Hello there', 'Good morning']), '»Fresh content«']);
     assert.deepEqual(env.recorded.state.at(-1), { type: 'at/state-changed', status: 'translated', translated: 3, error: null });
 
     // A tick that collects nothing must not bother the provider or the badge.
     env.mutate();
     await clock.run();
-    assert.equal(env.recorded.batch.length, 3);
+    assert.equal(env.recorded.batch.length, 2);
     assert.equal(env.states().length, 2);
   } finally {
     clock.restore();
@@ -1085,7 +1086,7 @@ test('a stopped observer ignores later mutations', async () => {
     await env.send(translateMessage());
     const observer = env.observers[0];
     assert.ok(observer);
-    assert.equal(env.recorded.batch.length, 2);
+    assert.equal(env.recorded.batch.length, 1);
 
     await env.send({ type: 'at/content-restore' });
     assert.equal(observer.disconnected, true, 'the restore path disconnects the observer');
@@ -1097,7 +1098,7 @@ test('a stopped observer ignores later mutations', async () => {
     assert.equal(clock.pending.length, 0, 'a disconnected observer never schedules a tick');
     await clock.run();
     await drain();
-    assert.equal(env.recorded.batch.length, 2, 'no provider call after a restore');
+    assert.equal(env.recorded.batch.length, 1, 'no provider call after a restore');
     assert.equal(env.states().length, 2);
     assert.deepEqual(pageTexts(env.page.body), [...DEFAULT_TEXTS, 'Late content']);
   } finally {

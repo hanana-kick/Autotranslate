@@ -164,8 +164,9 @@ test('a block element or a line break ends a run', async () => {
 
   await translator.translateRoot(body);
 
-  assert.deepEqual(calls, [['first half'], ['second half'], ['other paragraph']], 'each visual line is its own request');
-  assert.ok(!calls.some((keys) => keys.length > 1), 'paragraphs are never glued');
+  assert.deepEqual(calls.flat(), ['first half', 'second half', 'other paragraph'], 'each visual line is its own segment');
+  assert.ok(!calls.flat().includes('first halfsecond half'), 'paragraphs are never glued');
+  assert.ok(!calls.flat().includes('second halfother paragraph'), 'paragraphs are never glued');
   assert.equal(textContent(first), 'FIRST HALFSECOND HALF');
   assert.equal(textContent(second), 'OTHER PARAGRAPH');
 });
@@ -177,8 +178,8 @@ test('an ignored inline element is a protected boundary', async () => {
 
   await translator.translateRoot(body);
 
-  assert.deepEqual(calls, [['Run'], ['now']], 'do not merge around omitted code');
-  assert.ok(!calls[0]![0]!.includes('npm test'), 'the code text is never sent');
+  assert.deepEqual(calls.flat(), ['Run', 'now'], 'do not merge around omitted code');
+  assert.ok(!calls.flat().join(' ').includes('npm test'), 'the code text is never sent');
   assert.equal(textContent(code), 'npm test', 'code is untouched');
   assert.equal(textContent(paragraph), 'RUN npm test NOW');
 });
@@ -259,7 +260,8 @@ test('the same sentence is requested once and reused', async () => {
 
   await translator.translateRoot(body);
 
-  assert.equal(calls[0]!.length, 1, 'deduplicated by the cache');
+  assert.equal(calls.length, 1, 'deduplicated by the cache');
+  assert.equal(calls[0]!.length, 1, 'the repeated sentence is sent once');
   assert.equal(translator.stats().translated, 3);
 });
 
@@ -289,7 +291,7 @@ test('mergeInline can be turned off', async () => {
 
   await translator.translateRoot(body);
 
-  assert.deepEqual(calls, [['one'], ['two']], 'each text node asked separately');
+  assert.deepEqual(calls.flat(), ['one', 'two'], 'each text node is its own segment');
   assert.equal(translator.stats().runs, 0);
 });
 
