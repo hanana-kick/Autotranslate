@@ -9,7 +9,7 @@
 //
 // A site that blocks this machine is recorded as blocked, never worked around:
 // no user agent or cookie trickery, no account, no CAPTCHA bypass.
-import { chromium } from 'playwright';
+import { chromium, launchOptions } from '../browser/support.mjs';
 import { mkdir, mkdtemp, cp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,15 +33,17 @@ await cp(join(ROOT, 'build/chrome'), extension, { recursive: true });
 // A visible window on purpose: the sites answer a headed browser where they
 // refuse a headless one, and the run is meant to be looked at.
 const context = await chromium.launchPersistentContext(join(tmp, 'profile'), {
-  headless: process.env.HEADLESS === '1',
   // Branded Chrome refuses --load-extension since 137; Chrome for Testing
-  // accepts it and is still a real window.
-  channel: 'chromium',
-  ignoreDefaultArgs: ['--disable-extensions'],
-  args: ['--enable-unsafe-webgpu', ...(process.platform === 'darwin' ? ['--use-webgpu-adapter=apple'] : []),
+  // accepts it, and with HEADLESS unset this is still a real visible window.
+  ...launchOptions,
+  headless: process.env.HEADLESS === '1',
+  ignoreDefaultArgs: [...(launchOptions.ignoreDefaultArgs ?? []), '--disable-extensions', '--disable-gpu'],
+  args: [...launchOptions.args.filter((arg) => arg !== '--disable-gpu'),
+    '--enable-unsafe-webgpu', ...(process.platform === 'darwin' ? ['--use-webgpu-adapter=apple'] : []),
     `--disable-extensions-except=${extension}`, `--load-extension=${extension}`,
     '--no-first-run', '--no-default-browser-check'],
-  viewport: null,
+  // A concrete viewport: a window with none never starts the extension worker.
+  viewport: { width: 1280, height: 1000 },
   locale: 'ja-JP'
 });
 context.setDefaultTimeout(60000);
