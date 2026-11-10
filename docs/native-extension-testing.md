@@ -41,6 +41,27 @@ HEADED=1 YOUTUBE_QA=1 node test/dynamic-extension/run-dynamic.mjs
 HEADED=1 node test/firefox-native/webdriver.mjs
 ```
 
+## ONNX (q4f16) live check
+
+`test/onnx-live/run-onnx.mjs` covers the path the shipped default card takes: the
+published `TeamFlaxia/plamo-3-translate-0.8b-onnx` q4f16 graph, the options download
+route, the background/offscreen split, real WebGPU and a four-sequence page. It is not
+part of `npm test` or CI - it downloads 706 MB and needs an adapter with `shader-f16`,
+which SwiftShader does not provide.
+
+```sh
+npm run build
+npm run test:onnx            # writes test-results/browser/onnx-q4f16-live.json
+YOUTUBE=1 npm run test:onnx  # adds a paused public watch page
+```
+
+It asserts four things a passing unit suite cannot see: the graph installs through the
+shipped UI, the first load reaches `AT.onnxhost` (a misroute dies in the GGUF host's
+file sniff as `No model format matched`), the host answers `at/local-count` (otherwise
+every batch logs `the host did not count tokens`), and turning the tab off restores the
+exact original text. The YouTube leg pauses playback before translating and requires it
+to stay paused; it certifies one public watch page, not YouTube compatibility.
+
 On Linux, use the workflow's Xvfb command for headed browser tests. Do not bypass managed-browser extension policies.
 
 ## Live YouTube boundary
