@@ -512,16 +512,18 @@ nothing but the extension's own origin is ever fetched; the vendored runtime its
 (`vendor/onnxruntime/`, ~69 MB of wasm) is pre-converted to classic scripts by
 `npm run onnx:vendor` (`scripts/onnx-vendor.ts`) because this project ships no bundler.
 
-Chunks are packed by **tokens**, not characters: `AT.local.chunkByTokens` costs every text against
-per-script priors measured with this model's own tokenizer (`AT.local.PRIORS`) and leaves room for
-an answer of the same length, and a text too long to ever fit travels alone instead of being
-dropped. Hangul is worth 1.06 characters per token against Latin's 5.33, so a Korean page packs far
-tighter than an English one and one shared number would overfill every Korean batch. The packer
-never asks the host to count first — a count would mean loading the model before the first answer —
-because every generation reports the runtime's own prompt-token count back and the priors are
-recalibrated with it (`AT.local.setCalibration`, kept inside 0.4–2.5× of the published numbers). One
-chunk is one generation and is never retried — a repeat would spend another minute on the same model
-for the same answer.
+Chunks are packed by **tokens**, not characters. `AT.engines` first asks the host to count the batch
+with the model's own tokenizer (`at/local-count`: MediaPipe's `sizeInTokens` or the ONNX tokenizer)
+and packs with `AT.local.chunkByCounts` against the instruction's measured cost. When no host answers
+- an older document, a failed load - it falls back to `AT.local.chunkByTokens`, which costs every
+text against per-script priors measured with this model's own tokenizer (`AT.local.PRIORS`) and
+leaves room for an answer of the same length; a text too long to ever fit travels alone instead of
+being dropped. Hangul is worth 1.06 characters per token against Latin's 5.33, so a Korean page packs
+far tighter than an English one and one shared number would overfill every Korean batch. The priors
+are also recalibrated from the prompt-token count every generation reports
+(`AT.local.setCalibration`, kept inside 0.4-2.5x of the published numbers). One chunk is one
+generation and is never retried - a repeat would spend another minute on the same model for the same
+answer.
 
 PLaMo is asked as a **raw completion**, not a chat message. Its GGUF carries a Jinja chat template
 the bundled parser cannot read (`Unable to generate parser for this template`), so the host loads

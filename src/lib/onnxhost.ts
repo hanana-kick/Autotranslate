@@ -389,6 +389,40 @@ namespace AT.onnxhost {
     return out;
   }
 
+  /** The tokens a prompt string costs in the model's own tokenizer. */
+  function promptTokens(prompt: string): number {
+    if (!tokenizer) return L.estimateTokens(prompt);
+    return Array.from(tokenizer(prompt, { add_special_tokens: false }).input_ids.data as ArrayLike<number | bigint>).length;
+  }
+
+  /** The tokens one segment costs inside a prompt: sanitized and byte-expanded
+   *  exactly as `renderPrompt` writes it, and counted without specials so the
+   *  number is the text's own cost rather than the template's. */
+  function tokenCount(text: string): number {
+    if (!tokenizer) return L.estimateTokens(text);
+    return promptTokens(expandByteFallback(P.sanitize(text)));
+  }
+
+  type CountRequest = { modelId?: unknown; maxTokens?: unknown; texts?: unknown; target?: unknown };
+
+  /** Per-text costs and the empty instruction's own cost, so `engines` can pack
+   *  a batch against the model's real tokenizer instead of an estimate. */
+  async function countNow(request: CountRequest): Promise<AT.localhost.TokenCounts> {
+    const modelId = typeof request.modelId === 'string' ? request.modelId : '';
+    if (!modelId) fail('no-model', 'no model is selected');
+    const texts = Array.isArray(request.texts)
+      ? request.texts.filter((text): text is string => typeof text === 'string').slice(0, 200)
+      : [];
+    const askedTarget = typeof request.target === 'string' ? request.target : '';
+    const target = P.langFor(askedTarget) !== null ? askedTarget : 'ko';
+    await ensureLoaded(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS, target);
+    // The chat template refuses empty content, so the instruction's own cost is
+    // read from a one-character text with that character's count removed.
+    const MARKER = 'x';
+    const overhead = Math.max(0, promptTokens(renderPrompt(target, MARKER, null)) - promptTokens(MARKER));
+    return { counts: texts.map((text) => tokenCount(text)), overhead };
+  }
+
   async function translateNow(request: AT.localhost.TranslateRequest): Promise<AT.localhost.HostReply> {
     const texts = Array.isArray(request.texts)
       ? request.texts.filter((text): text is string => typeof text === 'string')
@@ -458,6 +492,10 @@ namespace AT.onnxhost {
       case C.MSG.LOCAL_UNLOAD:
         await enqueue(() => Promise.resolve());
         return { status: await unload('requested') };
+      case C.MSG.LOCAL_COUNT:
+        // Counting reads the tokenizer, which arrives with the model, so it
+        // queues behind a load like a generation does.
+        return await enqueue(() => countNow(message as CountRequest));
       case C.MSG.LOCAL_QUERY:
       case C.MSG.LOCAL_STATUS:
         return { status: await status() };
