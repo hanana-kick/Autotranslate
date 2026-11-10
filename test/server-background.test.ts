@@ -50,7 +50,7 @@ function serverBackground() {
     i18n: { getUILanguage: () => 'en', getMessage: (key: string) => key }
   };
   globals.self = {};
-  const AT = load('lib/constants.js', 'lib/browser.js', 'lib/gemma.js', 'lib/pagecontext.js', 'lib/targets.js', 'lib/rules.js', 'lib/local.js', 'lib/modelstore.js', 'lib/ui.js', 'lib/settings.js', 'lib/engines.js', 'lib/localhost.js', 'background.js');
+  const AT = load('lib/constants.js', 'lib/browser.js', 'lib/gemma.js', 'lib/plamo3.js', 'lib/pagecontext.js', 'lib/targets.js', 'lib/rules.js', 'lib/local.js', 'lib/modelstore.js', 'lib/ui.js', 'lib/settings.js', 'lib/engines.js', 'lib/localhost.js', 'background.js');
   AT.warn = () => undefined;
   return { AT, dispatch, native, tabs };
 }

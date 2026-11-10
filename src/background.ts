@@ -97,6 +97,7 @@ if (typeof self.importScripts === 'function') {
     'lib/constants.js',
     'lib/browser.js',
     'lib/gemma.js',
+    'lib/plamo3.js',
     'lib/pagecontext.js',
     'lib/targets.js',
     'lib/rules.js',

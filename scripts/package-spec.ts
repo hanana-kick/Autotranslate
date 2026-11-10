@@ -63,6 +63,7 @@ export const ENTRIES = [
   'vendor/browser-polyfill.js',
   'lib/constants.js',
   'lib/browser.js',
+  'lib/gemma.js',
   'lib/plamo3.js',
   'lib/pagecontext.js',
   'lib/targets.js',

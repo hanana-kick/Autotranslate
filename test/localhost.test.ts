@@ -30,7 +30,7 @@ function host(options: { warmupFails?: boolean; firstGenerationHangs?: boolean; 
     }
   };
   Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { gpu: { requestAdapter: async () => (options.software ? softwareAdapter : {}) } } });
-  const AT = load('lib/constants.js', 'lib/gemma.js', 'lib/local.js', 'lib/modelstore.js', 'lib/localhost.js');
+  const AT = load('lib/constants.js', 'lib/gemma.js', 'lib/plamo3.js', 'lib/local.js', 'lib/modelstore.js', 'lib/localhost.js');
   current = AT;
   const instances: ATNamespace[] = [];
   globals.__hostFixture = {

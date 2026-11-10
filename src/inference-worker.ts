@@ -9,7 +9,7 @@
     postMessage: (value: unknown) => void;
     onmessage: ((event: MessageEvent) => void) | null;
   };
-  scope.importScripts('lib/constants.js', 'lib/gemma.js', 'lib/local.js', 'lib/modelstore.js');
+  scope.importScripts('lib/constants.js', 'lib/gemma.js', 'lib/plamo3.js', 'lib/local.js', 'lib/modelstore.js');
   AT.getURL = (path: string): string => new URL(path, scope.location.href).href;
   scope.importScripts('lib/localhost.js');
   scope.onmessage = (event: MessageEvent) => {
