@@ -214,6 +214,7 @@ while (Date.now() - started < PAGE_SECONDS) {
 const after = await page.evaluate(() => [...document.querySelectorAll('p')].map((p) => p.textContent));
 summary.page = {
   tabId, sequences: before.length, translated, after,
+  body: await page.evaluate(() => document.body.innerText.slice(0, 240)),
   seconds: Math.round((Date.now() - started) / 1000),
   host: host?.status ?? null
 };
