@@ -309,14 +309,23 @@ namespace AT.onnxhost {
     }
   }
 
+  /** Build the shapes a page asks for before the user asks: one short prompt, one
+   *  of a realistic length, and one packed batch. WebGPU compiles its shaders on
+   *  the first run of a shape, and that cost was landing on the first page. */
   async function warmup(target: string): Promise<void> {
     if (!pipe || !tokenizer) return;
     const lang = P.langFor(target) ?? 'ko';
-    const prompt = tokenizer.apply_chat_template(
-      [{ role: 'user', content: expandByteFallback(P.sanitize('Good morning.')) }],
-      { target_lang: lang, add_generation_prompt: true, tokenize: false }
-    );
-    await pipe(prompt, { max_new_tokens: 8, do_sample: false });
+    const build = (text: string): string =>
+      tokenizer!.apply_chat_template(
+        [{ role: 'user', content: expandByteFallback(P.sanitize(text)) }],
+        { target_lang: lang, add_generation_prompt: true, tokenize: false }
+      );
+    const sample =
+      'The meeting was moved to Monday because the vendor could not finish the integration tests on time.';
+    await pipe(build('Good morning.'), { max_new_tokens: 4, do_sample: false });
+    await pipe(build(sample), { max_new_tokens: 4, do_sample: false });
+    const batch = [build(sample), build(sample), build(sample), build(sample)];
+    await pipe(batch, { max_new_tokens: 4, do_sample: false, return_full_text: false });
   }
 
   async function teardown(cause: string): Promise<void> {
@@ -391,6 +400,41 @@ namespace AT.onnxhost {
   /** The answer inside one generated text: the pipeline strips the prompt's
    *  special tokens, so the output element's `lang` value survives as the
    *  target code and everything after it is the translation. */
+  /** How long one answer may run when several prompts share a run. The estimate
+   *  is the published median (1.2x the source) with room for the long tail; a
+   *  row that needs more is caught by validation and retried on its own, which
+   *  costs less than holding every row to a generous cap. */
+  function tightCap(text: string, prompt: string): number {
+    const wanted = Math.ceil(L.estimateTokens(text) * 1.7) + 8;
+    return Math.max(16, Math.min(L.outputTokens(lastMaxTokens, prompt), wanted));
+  }
+
+  /** Several prompts in one graph run. A step carries every row, so this is the
+   *  only shape where the weight read is shared; the cap above keeps a single
+   *  long answer from holding the batch. */
+  async function generateMany(prompts: string[], maxNewTokens: number): Promise<string[]> {
+    if (!pipe) fail('not-loaded', 'no model is loaded');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
+    try {
+      const out = await pipe(prompts, {
+        max_new_tokens: maxNewTokens,
+        do_sample: false,
+        return_full_text: false,
+        abort_signal: controller.signal
+      });
+      generations += 1;
+      touchIdleTimer();
+      const list = Array.isArray(out) ? out : [out];
+      return list.map((item) => answerOf(item?.generated_text));
+    } catch (error: unknown) {
+      const message = String((error as { message?: unknown })?.message ?? error);
+      fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   /** The answer only: the pipeline is asked for `return_full_text: false`, so it
    *  slices the prompt off by token count and hands back the generation itself.
    *  Searching the text for the target code instead (the earlier shape) cuts at
@@ -422,10 +466,16 @@ namespace AT.onnxhost {
 
   async function translateChunk(target: string, texts: string[], hint: string | null): Promise<string[]> {
     if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', hint)];
-    // One numbered prompt for the whole chunk. A batched run was measured on
-    // this graph and is slower here: rows are padded to the longest and the
-    // pipeline has no per-row stop, so every row decodes to max_new_tokens,
-    // while one sequence stops at its own end.
+    // One run for the whole chunk: every row shares the weight read, which is
+    // where the time goes. The cap is tight on purpose - the pipeline has no
+    // per-row stop, so a batch decodes until its last row finishes - and every
+    // answer is checked against its own source before it is trusted.
+    const prompts = texts.map((text) => renderPrompt(target, text, hint));
+    const batched = await generateMany(prompts, Math.max(...texts.map((text, index) => tightCap(text, prompts[index] ?? ''))));
+    if (batched.length === texts.length && batched.every((answer, index) => usable(answer.trim(), texts[index] ?? '', target))) {
+      return batched.map((answer) => answer.trim());
+    }
+    AT.warn('on-device batch left segments unanswered, retrying as one numbered prompt', texts.length);
     const batch = texts.map((text, index) => `${index + 1}. ${P.sanitize(text).replace(/\s+/g, ' ').trim()}`).join('\n');
     const prompt = renderPrompt(target, batch, hint);
     const cap = L.answerTokens(texts, lastMaxTokens, prompt);
