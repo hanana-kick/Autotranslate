@@ -39,9 +39,10 @@
         <div class="row wrap">
           <button id="download" type="button" data-i18n="options_download"></button>
           <button id="cancel" type="button" class="secondary" data-i18n="options_cancel" hidden></button>
-          <input type="file" id="modelFile" accept=".task,application/octet-stream" hidden />
+          <input type="file" id="modelFile" accept=".onnx,.json,.jinja,application/json,application/octet-stream" multiple hidden />
           <button id="pick" type="button" class="secondary" data-i18n="welcome_haveFile"></button>
         </div>
+        <p class="hint" data-i18n="options_pickFileHint"></p>
 
         <progress id="progress" max="100" value="0" hidden></progress>
         <p class="status" id="status" role="status"></p>

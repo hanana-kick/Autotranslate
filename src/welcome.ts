@@ -148,14 +148,15 @@ namespace AT.welcome {
   }
 
   async function pickFile(): Promise<void> {
-    const file = el('modelFile').files?.[0];
-    if (!file) return;
+    const files = [...(el('modelFile').files ?? [])];
+    if (!files.length) return;
     inflight = new AbortController();
     setBusy(true);
-    el('progress').max = file.size > 0 ? file.size : 100;
-    showProgress(0, file.size > 0 ? file.size : null);
+    const total = files.reduce((sum, file) => sum + (file.size > 0 ? file.size : 0), 0);
+    el('progress').max = total > 0 ? total : 100;
+    showProgress(0, total > 0 ? total : null);
     try {
-      await settle(await AT.modelflow.installFromFile(file), 'file');
+      await settle(await AT.modelflow.installFromFiles(files), 'file');
     } catch (error: unknown) {
       inflight = null;
       setBusy(false);

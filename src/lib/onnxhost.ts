@@ -281,8 +281,7 @@ namespace AT.onnxhost {
       // file name, so the id's own directory prefix is irrelevant.
       const tok = await tf.AutoTokenizer.from_pretrained('onnx-model');
       const card = L.MODEL_SOURCES.find((source) => source.url === record.sourceUrl && source.kind === 'onnx');
-      const dtype = card?.dtype ?? 'fp16';
-      const gen = await tf.pipeline('text-generation', 'onnx-model', { dtype, device: 'webgpu' });
+      const gen = await tf.pipeline('text-generation', 'onnx-model', { dtype: card?.dtype ?? dtypeOf(record.name), device: 'webgpu' });
       tokenizer = tok;
       pipe = gen;
       loadedId = modelId;
@@ -439,6 +438,14 @@ namespace AT.onnxhost {
     const out: string[] = [];
     for (const text of texts) out.push(await translateOne(target, text, hint));
     return out;
+  }
+
+  /** The card names its graph after the dtype; a file the user picked from disk
+   *  carries the same name the export gave it, so read it off there instead of
+   *  asking the library for a file that does not exist. */
+  function dtypeOf(name: unknown): string {
+    const match = /model[_-](q4f16|q4|fp16|fp32|int8|q8)/i.exec(typeof name === 'string' ? name : '');
+    return match ? match[1]!.toLowerCase() : 'fp16';
   }
 
   /** The tokens a prompt string costs in the model's own tokenizer. */

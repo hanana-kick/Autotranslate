@@ -84,6 +84,9 @@
   "options_pickFile": {
     "message": "이미 받은 파일 사용"
   },
+  "options_pickFileHint": {
+    "message": ".onnx 그래프와 함께 같은 폴더의 tokenizer.json, tokenizer_config.json, config.json을 한 번에 선택하세요."
+  },
   "options_prepare": {
     "message": "지금 불러오기"
   },

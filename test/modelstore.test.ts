@@ -399,15 +399,53 @@ test('progress is throttled so a fast pipe is not rendered per chunk', async () 
 
 // --- local files ------------------------------------------------------------
 
-test('a picked file is stored like a download', async () => {
-  const result = await modelstore.importFile({ name: 'mine.task', size: 3_000_000, stream: () => streamOf(bytes(2_000_000), bytes(1_000_000)) });
-  assert.equal(result.ok, true);
+const graphFile = (name = 'model_q4f16.onnx', size = 3_000_000) => ({
+  name,
+  size,
+  stream: () => streamOf(bytes(size))
+});
+const partFile = (name: string) => ({ name, size: 64, stream: () => streamOf(bytes(64)) });
+
+test('a picked graph and its tokenizer are stored like a download', async () => {
+  const result = await modelstore.importOnnx({
+    graph: graphFile(),
+    parts: [partFile('tokenizer.json'), partFile('tokenizer_config.json'), partFile('config.json')]
+  });
+  assert.equal(result.ok, true, String(result.error));
   assert.equal(result.bytes, 3_000_000);
-  assert.equal((await modelstore.list())[0].sourceUrl, '', 'a local file has no source url');
+  const record = (await modelstore.list())[0];
+  assert.equal(record.name, 'model_q4f16.onnx', 'the graph names the model');
+  assert.equal(record.sourceUrl, '', 'a local file has no source url');
+  assert.equal(local.modelKind(record), 'onnx', 'so the host knows what it is');
+  for (const part of ['tokenizer.json', 'tokenizer_config.json', 'config.json']) {
+    assert.equal((await modelstore.readPart(record.id, part))?.size, 64, `${part} travels with the graph`);
+  }
 });
 
-test('a picked file without a name is refused', async () => {
-  assert.equal((await modelstore.importFile({ name: '', size: 1, stream: () => streamOf(bytes(1)) })).error, 'no-name');
+test('a picked selection without a tokenizer is refused before anything is written', async () => {
+  const result = await modelstore.importOnnx({ graph: graphFile(), parts: [partFile('config.json')] });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'missing-tokenizer');
+  const noTemplate = await modelstore.importOnnx({ graph: graphFile(), parts: [partFile('tokenizer.json')] });
+  assert.equal(noTemplate.error, 'missing-tokenizer_config', 'the chat template lives in the tokenizer config');
+  assert.deepEqual(await modelstore.list(), [], 'nothing is registered');
+  assert.equal(active.stored.size, 0, 'and a 706 MB copy was not written');
+});
+
+test('a picked file that is not a graph is refused', async () => {
+  assert.equal((await modelstore.importOnnx({ graph: graphFile('model.task') })).error, 'not-onnx');
+  assert.equal((await modelstore.importOnnx({ graph: graphFile('') })).error, 'no-name');
+});
+
+test('picked files are stored under their own names, not their folder', async () => {
+  const result = await modelstore.importOnnx({
+    graph: graphFile('onnx/model_q4f16.onnx'),
+    parts: [partFile('plamo/tokenizer.json'), partFile('plamo/tokenizer_config.json')]
+  });
+  assert.equal(result.ok, true, String(result.error));
+  const record = (await modelstore.list())[0];
+  assert.equal(record.name, 'model_q4f16.onnx');
+  assert.equal((await modelstore.readPart(record.id, 'tokenizer.json'))?.size, 64, 'the picker prefix is dropped');
 });
 
 // --- capacity ---------------------------------------------------------------

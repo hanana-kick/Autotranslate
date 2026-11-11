@@ -384,12 +384,12 @@ namespace AT.options {
   }
 
   async function importPickedFile(): Promise<void> {
-    const file = el('modelFile').files?.[0];
-    if (!file) return;
+    const files = [...(el('modelFile').files ?? [])];
+    if (!files.length) return;
     setBusy(true);
-    showProgress(0, file.size > 0 ? file.size : null);
+    showProgress(0, files.reduce((sum, file) => sum + (file.size > 0 ? file.size : 0), 0) || null);
     try {
-      await settle(await AT.modelflow.installFromFile(file));
+      await settle(await AT.modelflow.installFromFiles(files));
     } finally {
       el('modelFile').value = '';
     }

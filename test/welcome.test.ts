@@ -277,8 +277,8 @@ async function boot(options: BootOptions = {}) {
       }
       return options.urlOutcome ?? outcome();
     },
-    installFromFile: async (file: unknown) => {
-      calls.files.push(file);
+    installFromFiles: async (files: unknown[]) => {
+      calls.files.push(files);
       return options.fileOutcome ?? outcome();
     }
   };
@@ -457,7 +457,7 @@ test('picking a model file imports exactly the chosen file and arms start', asyn
   await fire(field('modelFile'), 'change');
 
   assert.equal(calls.files.length, 1);
-  assert.equal(calls.files[0], file);
+  assert.deepEqual(calls.files[0], [file]);
   assert.equal(field('modelFile').value, '');
   assert.equal(field('installed').textContent, msg('welcome_modelReady', [MODEL.name, '2.0 KiB']));
   assert.equal(field('start').disabled, false);

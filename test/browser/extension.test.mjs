@@ -131,10 +131,20 @@ check('native Fetch streams bytes into real OPFS and persists IndexedDB metadata
   await control.evaluate((id) => AT.modelstore.remove(id), result.id);
 });
 
+// The five files the card publishes beside its graph; the tokenizer is the one
+// the store insists on, because a graph without it answers nothing.
+const ONNX_PARTS = ['tokenizer.json', 'tokenizer_config.json', 'config.json', 'generation_config.json', 'chat_template.jinja'];
+const graphFile = (name = 'model_q4f16.onnx') => ({ name, mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024 * 1024, 17) });
+const partFiles = () => ONNX_PARTS.map((name) => ({ name, mimeType: 'application/octet-stream', buffer: Buffer.from('{}') }));
+
 check('file picker installs through the real UI and starts the extension', async () => {
   const page = await context.newPage(); await page.goto(`chrome-extension://${extensionId}/welcome.html`);
   await page.locator('#targetLang').selectOption('ko');
-  await page.locator('#modelFile').setInputFiles({ name: 'fixture.task', mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024 * 1024, 17) });
+  // `.onnx` must be selectable at all: the input's accept list is what the user
+  // hit, and the graph alone is not enough to load.
+  assert.match(await page.locator('#modelFile').getAttribute('accept'), /\.onnx/);
+  assert.equal(await page.locator('#modelFile').getAttribute('multiple'), '', 'the graph and its parts are one selection');
+  await page.locator('#modelFile').setInputFiles([graphFile(), ...partFiles()]);
   await page.waitForFunction(() => !document.querySelector('#start').disabled);
   await screenshot(page, 'model-ready');
   await page.locator('#start').click();
@@ -142,6 +152,12 @@ check('file picker installs through the real UI and starts the extension', async
   assert.equal((await control.evaluate(() => AT.settings.load())).enabled,false,'setup must not auto-enroll tabs');
   const settings = await control.evaluate(() => AT.settings.load());
   assert.equal(settings.targetLang, 'ko'); assert.ok(settings.localModelId);
+  const stored = await control.evaluate(async (id) => ({
+    name: (await AT.modelstore.list()).find((m) => m.id === id)?.name,
+    tokenizer: (await AT.modelstore.readPart(id, 'tokenizer.json'))?.size ?? null
+  }), settings.localModelId);
+  assert.equal(stored.name, 'model_q4f16.onnx', 'the graph is the model');
+  assert.equal(stored.tokenizer, 2, 'and its tokenizer travelled with it');
 });
 
 check('background to offscreen to content translates links safely then restores all nodes', async () => {
@@ -180,7 +196,10 @@ check('native MutationObserver catches content inserted during the initial infer
 check('failed replacement keeps the selected model and both native files recoverable', async () => {
   const before = await control.evaluate(() => AT.settings.load());
   await model({ failWarmup: true });
-  const outcome = await control.evaluate(async () => AT.modelflow.installFromFile(new File([new Uint8Array(1024 * 1024)], 'fixture.task')));
+  const outcome = await control.evaluate(async (parts) => AT.modelflow.installFromFiles([
+    new File([new Uint8Array(1024 * 1024)], 'model_q4f16.onnx'),
+    ...parts.map((name) => new File(['{}'], name))
+  ]), ONNX_PARTS);
   assert.equal(outcome.ok, false); assert.equal(outcome.stored, true);
   assert.match(outcome.error, /warmup rejected/);
   assert.equal((await control.evaluate(() => AT.settings.load())).localModelId, before.localModelId);

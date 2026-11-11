@@ -170,10 +170,17 @@ namespace AT.modelflow {
     return settle(result, started);
   }
 
-  export async function installFromFile(file: File): Promise<Outcome> {
+  /** Install from the files the user picked. A picker that has to offer the
+   *  graph *and* the tokenizer beside it cannot assume one file, so the whole
+   *  selection is what arrives here. */
+  export async function installFromFiles(files: File[]): Promise<Outcome> {
     const started = Date.now();
+    if (!files.length) {
+      return { ok: false, stored: false, modelId: '', name: '', bytes: 0, seconds: 1, error: 'no-file', retired: [] };
+    }
     await keepStorage();
-    const result = await AT.modelstore.importFile(file);
+    const graph = files.find((file) => /\.onnx$/i.test(file.name)) ?? files[0]!;
+    const result = await AT.modelstore.importOnnx({ graph, parts: files.filter((file) => file !== graph) });
     return settle(result, started);
   }
 

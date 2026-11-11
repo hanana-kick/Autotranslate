@@ -664,32 +664,79 @@ namespace AT.modelstore {
     return ingest({ name: fileName, sourceUrl: url, stream, expectedBytes: total ?? undefined });
   }
 
-  /** Stores a file the user picked locally: the way to use a gated model. */
-  export async function importFile(
-    file: { name: string; size: number; stream?: (() => ReadableStream<Uint8Array>) | undefined },
-    options: { onProgress?: ((received: number, total: number | null) => void) | undefined } = {}
+  /** A file the user picked, as the stream the store writes. */
+  function pickedStream(file: { name: string; size: number; stream?: (() => ReadableStream<Uint8Array>) | undefined }): ReadableStream<Uint8Array> {
+    return typeof file.stream === 'function'
+      ? file.stream()
+      : new ReadableStream<Uint8Array>({
+          async start(controller) {
+            const blob = (file as unknown as Blob) as Blob;
+            controller.enqueue(new Uint8Array(await blob.arrayBuffer()));
+            controller.close();
+          }
+        });
+  }
+
+  /** The name a picked file is stored under: the model asks for it by its own
+   *  trailing segment, so a directory prefix from the picker is dropped. */
+  function pickedName(name: unknown): string {
+    if (typeof name !== 'string') return '';
+    return (name.split('/').filter(Boolean).pop() ?? '').trim().slice(0, 120);
+  }
+
+  /** The tokenizer and the file that carries the chat template are what turn a
+   *  graph into a model that can be asked a question; without them the graph
+   *  loads and answers nothing, and a 706 MB copy that cannot work is worse than
+   *  being told which file is missing. */
+  const REQUIRED_PARTS = ['tokenizer.json', 'tokenizer_config.json'];
+
+  export type PickedFile = {
+    name: string;
+    size: number;
+    stream?: (() => ReadableStream<Uint8Array>) | undefined;
+  };
+
+  /** Stores a model the user picked from disk: the graph, plus the tokenizer and
+   *  config files that sit beside it in the same directory they downloaded. The
+   *  shape is the one the download route writes, so the host cannot tell them
+   *  apart — `read()` for the graph, `readPart()` for everything else.
+   *
+   *  The tokenizer and the file that carries its chat template are required
+   *  before anything is written: without them the graph loads and answers
+   *  nothing, and a 706 MB copy that cannot work is worse than being told which
+   *  file is missing. */
+  export async function importOnnx(
+    request: { graph: PickedFile; parts?: PickedFile[]; onProgress?: (received: number, total: number | null) => void }
   ): Promise<IngestResult> {
-    const name = typeof file?.name === 'string' ? file.name.trim().slice(0, 120) : '';
-    if (!name) return { ok: false, record: null, error: 'no-name', bytes: 0 };
-    const makeStream = () =>
-      typeof file.stream === 'function'
-        ? file.stream()
-        : new ReadableStream<Uint8Array>({
-            async start(controller) {
-              const blob = (file as unknown as Blob) as Blob;
-              controller.enqueue(new Uint8Array(await blob.arrayBuffer()));
-              controller.close();
-            }
-          });
+    const graphName = pickedName(request.graph?.name);
+    if (!graphName) return { ok: false, record: null, error: 'no-name', bytes: 0 };
+    if (!/\.onnx$/i.test(graphName)) return { ok: false, record: null, error: 'not-onnx', bytes: 0 };
+    const parts = (request.parts ?? [])
+      .map((part) => ({ file: part, name: pickedName(part?.name) }))
+      .filter((entry): entry is { file: PickedFile; name: string } => Boolean(entry.name) && !/\.onnx$/i.test(entry.name));
+    const missing = REQUIRED_PARTS.filter((name) => !parts.some((entry) => entry.name === name));
+    if (missing.length) {
+      return { ok: false, record: null, error: `missing-${missing[0]!.replace(/\.json$/, '')}`, bytes: 0 };
+    }
     let lastReport = 0;
-    const total = Number(file.size) > 0 ? Number(file.size) : null;
-    const stream = countingStream(makeStream(), (received) => {
+    const total = Number(request.graph.size) > 0 ? Number(request.graph.size) : null;
+    const stream = countingStream(pickedStream(request.graph), (received) => {
       const now = deps.now();
       if (now - lastReport < L.DOWNLOAD_PROGRESS_INTERVAL_MS && !(total !== null && received >= total)) return;
       lastReport = now;
-      options.onProgress?.(received, total);
+      request.onProgress?.(received, total);
     });
-    const result = await ingest({ name, sourceUrl: 'file://local', stream, expectedBytes: total ?? undefined });
+    const result = await ingest({ name: graphName, sourceUrl: 'file://local', stream, expectedBytes: total ?? undefined });
+    if (!result.ok || !result.record) return result;
+    try {
+      for (const entry of parts) {
+        await files().writePart(result.record.id, entry.name, pickedStream(entry.file));
+      }
+    } catch (error: unknown) {
+      await remove(result.record.id);
+      const rejection = error as { message?: unknown };
+      return { ok: false, record: null, error: String(rejection?.message ?? 'part-write-failed'), bytes: 0 };
+    }
     return result;
   }
 

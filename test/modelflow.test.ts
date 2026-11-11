@@ -13,7 +13,7 @@ function transaction(failure?: 'prepare' | 'save' | 'cleanup') {
   let selected = old.id;
   const files = new Set([old.id]);
   AT.modelstore.requestPersistence = async () => true;
-  AT.modelstore.importFile = async () => {
+  AT.modelstore.importOnnx = async () => {
     events.push('stage'); files.add(next.id);
     return { ok: true, record: next, bytes: next.size };
   };
@@ -35,7 +35,7 @@ function transaction(failure?: 'prepare' | 'save' | 'cleanup') {
     files.delete(old.id);
     return [old.id];
   };
-  return { events, files, selected: () => selected, install: () => AT.modelflow.installFromFile({ name: next.name }) };
+  return { events, files, selected: () => selected, install: () => AT.modelflow.installFromFiles([{ name: next.name, size: next.size }]) };
 }
 
 test('install: a rejected model leaves the working file and selection intact', async () => {

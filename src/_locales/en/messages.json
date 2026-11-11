@@ -84,6 +84,9 @@
   "options_pickFile": {
     "message": "Use a local file"
   },
+  "options_pickFileHint": {
+    "message": "Select the .onnx graph together with the files beside it in the same folder: tokenizer.json, tokenizer_config.json and config.json at least."
+  },
   "options_prepare": {
     "message": "Load now"
   },

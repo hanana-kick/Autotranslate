@@ -89,10 +89,11 @@
           <div class="row wrap">
             <button id="downloadModel" type="button" data-i18n="options_download"></button>
             <button id="cancelDownload" type="button" class="secondary" data-i18n="options_cancel" hidden></button>
-            <input type="file" id="modelFile" accept=".task,application/octet-stream" hidden />
+            <input type="file" id="modelFile" accept=".onnx,.json,.jinja,application/json,application/octet-stream" multiple hidden />
             <button id="pickModel" type="button" class="secondary" data-i18n="options_pickFile"></button>
             <button id="prepareModel" type="button" class="secondary" data-i18n="options_prepare"></button>
           </div>
+          <p class="hint" data-i18n="options_pickFileHint"></p>
           <progress id="modelProgress" max="100" value="0" hidden></progress>
           <p class="status" id="modelStatus" role="status"></p>
         </div>
