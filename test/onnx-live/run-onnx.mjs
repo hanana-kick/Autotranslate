@@ -94,6 +94,10 @@ console.log('[build] extension copied');
 
 const context = await chromium.launchPersistentContext(profile, {
   ...launchOptions,
+  // HEADED=1 opens a real window: a visible browser is the whole point when the
+  // question is "does this work in a browser", and headed is also what the sites
+  // run uses because some pages refuse a headless one.
+  headless: process.env.HEADED === '1' ? false : launchOptions.headless,
   // WebGPU needs the GPU process; the shared options disable it for the
   // deterministic suites, which never reach a real adapter.
   ignoreDefaultArgs: [...launchOptions.ignoreDefaultArgs ?? [], '--disable-extensions', '--disable-gpu'],
@@ -172,11 +176,19 @@ if (reuse) {
   await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, MODEL_URL, { timeout: 15000 });
   console.log('[install] downloading', MODEL_URL, localOrigin ? '(from ' + localOrigin + ')' : '');
   await options.locator('#downloadModel').click();
+  const installWatch = setInterval(() => {
+    void options.evaluate(() => ({
+      kind: document.querySelector('#modelStatus')?.dataset.kind ?? null,
+      text: (document.querySelector('#modelStatus')?.textContent ?? '').slice(0, 60),
+      progress: document.querySelector('#modelProgress')?.value ?? null
+    })).then((value) => console.log('[install] watching', JSON.stringify(value))).catch(() => {});
+  }, 5000);
   await options.waitForFunction(
     () => document.querySelector('#modelStatus')?.dataset.kind === 'ok' || document.querySelector('#modelStatus')?.dataset.kind === 'error',
     null,
     { timeout: 600000 }
   );
+  clearInterval(installWatch);
 }
 const status = await options.evaluate(() => ({
   kind: document.querySelector('#modelStatus')?.dataset.kind ?? null,
