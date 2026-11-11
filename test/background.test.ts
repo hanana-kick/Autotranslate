@@ -296,6 +296,11 @@ function environment({
     scripting: {
       executeScript: async (details: ATNamespace) => {
         recorded.injected.push(details);
+        // A real injection leaves a listener behind; a tab marked `deaf` is the
+        // document that navigated under it and lost the files.
+        const target = (details.target as ATNamespace | undefined)?.tabId as number | undefined;
+        const injected = ((target != null ? lookupTab(target) : null) ?? tab) as ATNamespace;
+        if (!injected.deaf) injected.ping = true;
         return [{ result: null }];
       }
     },
@@ -532,10 +537,27 @@ test('navigation injects the content script and asks it to translate', async () 
     },
     'the content script gets the bounded snapshot, never the stored blob'
   );
-  assert.deepEqual(types(), ['at/content-ping', 'at/content-translate']);
+  // The first ping says there is no listener, the injection runs, and the
+  // second ping confirms it: only then does the translate request go out.
+  assert.deepEqual(types(), ['at/content-ping', 'at/content-ping', 'at/content-translate']);
   assert.ok(
     recorded.badges.some((entry) => entry.text === AT.C.BADGE_TEXT),
     'the badge follows the reported count'
+  );
+});
+
+test('an injected script that never answers is reported, not silently dropped', async () => {
+  // executeScript can resolve while a navigation has already thrown the files
+  // away: the translate message that follows then goes nowhere and the page
+  // looks selected but never translates.
+  const tab = { id: 7, url: 'https://news.example.com/article', ping: false, deaf: true };
+  const { AT, events, recorded } = environment({ selectedTabs: [7], tab, settings: { enabled: true } });
+  await fire(events.updated, 7, { status: 'complete' }, tab);
+
+  assert.ok(recorded.injected.length >= 1, 'the script was injected');
+  assert.ok(
+    recorded.tabMessages.every((entry) => entry.message.type !== AT.C.MSG.CONTENT_TRANSLATE),
+    'no translate request is sent into a page that cannot answer'
   );
 });
 
