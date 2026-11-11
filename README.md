@@ -575,7 +575,13 @@ form has been submitted, and above that a separate agreement is required
 anything built from these weights.
 
 The download is an ordinary streamed `fetch` into OPFS, with progress and a cancel that really
-aborts it. The file-input route stays for anyone who would rather copy the bytes in by hand. A
+aborts it. The file-input route stays for anyone who would rather copy the bytes in by hand, and it
+takes the whole set: the `.onnx` graph together with `tokenizer.json`, `tokenizer_config.json`,
+`config.json` and whatever else sits beside them (the five files the card lists). The graph is
+stored as the model and the rest as its parts, in the same shape the download writes, so nothing
+downstream can tell them apart. The selection is refused before anything is written if the tokenizer
+or the file carrying its chat template is missing — a 706 MB copy that cannot answer is worse than
+a dialog that says which file is absent. A
 model becomes visible only after its whole stream is written and the byte
 count matches what the transfer promised: a short write is deleted and reported (`truncated`,
 `too-small`), and the copy it replaces is retired *after* the new one validates, so an
