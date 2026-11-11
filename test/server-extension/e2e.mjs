@@ -13,7 +13,9 @@ const out = resolve(process.env.SERVER_QA_DIR || 'test-results/server-extension'
 const extension = resolve('build/chrome');
 const upstream = process.env.SERVER_BASE_URL || 'http://127.0.0.1:11434/v1';
 const model = process.env.SERVER_MODEL || 'qwen2.5:1.5b';
-const summary = { version: '0.1.6', model, upstream, scope: 'Unmodified installed extension; real HTTP/model server; no on-device model or fabricated translations', passed: false, checks: [], errors: [] };
+// The version the manifest carries, not a number that goes stale under it.
+const version = JSON.parse(await readFile(join(extension, 'manifest.json'), 'utf8')).version;
+const summary = { version, model, upstream, scope: 'Unmodified installed extension; real HTTP/model server; no on-device model or fabricated translations', passed: false, checks: [], errors: [] };
 await mkdir(out, { recursive: true });
 async function hashes(dir, prefix = '') {
   const found = {};
