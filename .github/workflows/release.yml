@@ -4,8 +4,8 @@ name: Release (Chrome compatible server)
 # regressions, planner acceptance and reproducible builds. It does not relabel
 # historical native runs as validation of a changed archive.
 # The on-device engine ships the published ONNX export; fresh native-model and
-# local-speed certification are separate harnesses. Firefox issue #2 remains
-# unresolved.
+# local-speed certification are separate harnesses. No Firefox archive is
+# published, and its on-device path is unverified.
 on:
   push:
     branches: [main]
@@ -107,12 +107,23 @@ jobs:
           - Per-tab ON/OFF, source-bound side panel/separate options window, dynamic DOM translation and current-source restoration are retained.
           - This exact archive passed actual installed-extension QA against a real CPU Ollama/Qwen2.5:7B server. Authentication/rate-limit error cases use an explicitly labelled forwarding gateway; successful translations are not fabricated.
           - Type/unit/package, deterministic browser and planner gates also passed. SERVER_QA.json records the current server-mode evidence and exact archive SHA-256.
-          - The on-device engine is the published PLaMo 3 Translate ONNX export. This release does not claim a fresh native model run or a new local-inference speed benchmark. Existing native-startup limitations and Firefox issue #2 remain; no Firefox archive is published.
+          - The on-device engine is the published PLaMo 3 Translate ONNX export. This release does not claim a fresh native model run or a new local-inference speed benchmark. It publishes no Firefox archive, and the on-device path there is unverified.
 
           Verification run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           Setup: Options → OpenAI-compatible server → Base URL/model → Save → explicitly enable the intended tab.
           EOF
+          # Publishing the same version twice must be a no-op, not a red build:
+          # every push to main triggers this workflow, including a docs-only one.
+          # Different bytes under a version already out there is the case that
+          # must fail, and does.
           if gh release view "$tag" >/dev/null 2>&1; then
+            published="$(mktemp)"
+            gh release download "$tag" -p '*-chrome.zip' -O "$published" --clobber >/dev/null
+            shipped="$(cut -d' ' -f1 dist/SHA256SUMS.txt)"
+            if [ "$(shasum -a 256 "$published" | cut -d' ' -f1)" = "$shipped" ]; then
+              echo "v$version already publishes this exact archive ($shipped); nothing to do."
+              exit 0
+            fi
             echo 'An existing release is never silently overwritten.' >&2
             exit 1
           fi

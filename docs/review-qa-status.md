@@ -2,7 +2,9 @@
 
 The scope is the actual installed extension, its vendored `onnxruntime-web`/Transformers.js runtime and the published `plamo-3-translate-0.8b-onnx` graph. Unit doubles, planner identity responses, synthetic pages, live sites and actual model execution are separate evidence layers. This is not a certification of linguistic quality or every browser/GPU combination.
 
-**Integration is not release approval. Firefox original-model initialization remains a release blocker, tracked in [issue #2](https://github.com/hanana-kick/Autotranslate/issues/2).** The release workflow requires its native check in addition to Chrome, planner and deterministic regression checks. A failed or canceled job is not success.
+**Integration is not release approval.** The release workflow requires the browser, planner and real-server checks; a failed or canceled job is not success. Firefox ships no archive, so nothing about it is certified by a release.
+
+**Firefox on-device execution is unverified, and the earlier finding is closed as obsolete.** The "preparation channel closed" report was measured on the MediaPipe host and its inference worker, both deleted in 0.1.7; it cannot be reproduced against the ONNX host, and no run has tried. What is known is only what the host reports when the probe fails (`no-webgpu`), which is not evidence either way.
 
 | ID | Implementation / current disposition | Verification and boundary |
 | --- | --- | --- |
@@ -20,7 +22,7 @@ The scope is the actual installed extension, its vendored `onnxruntime-web`/Tran
 | T12 | Implemented: validated inline boundaries and scoped aligned-fragment fallback cache | No proportional word redistribution. Invalid alignment preserves element ownership; arbitrary prompt semantics are not certified. |
 | T13 | Tested public YouTube paths, with explicit external-access limits | Search title, actual scroll insertion, same-document watch navigation and public comment translation/restoration passed in a recorded run. A later run reached a sign-in/bot check and no visible comments; that run remains blocked/failed, not success. |
 | T14 | Implemented bounded multitab endurance | Two tabs; one profile has 25 mutation rounds, others five, each plus an initial round. Exact restoration is required after each round. This is not hours-long memory-soak certification. |
-| T15 | **Open: Firefox native compatibility** | Official Firefox 158.0.1 on Apple Silicon and 154.0 on Intel/14 GiB both receive the complete original model but lose the preparation channel. Native translation/restoration was not reached. See issue #2. |
+| T15 | **Closed as obsolete: Firefox on-device compatibility** | The MediaPipe/TranslateGemma finding (158.0.1 on Apple Silicon, 154.0 on Intel/14 GiB: model received, preparation channel closed, no generation) describes a host deleted in 0.1.7. The ONNX host on the Firefox background page has never been run end to end; `test/firefox-native/released.mjs` is the harness that would settle it, and a new issue should carry the adapter's `shader-f16` support, the `at/local-load` reply and `lastError`. |
 | T16 | Implemented source-provenanced performance baseline and workflow gates | Planner 15/15 and CPU budgets; native generation timings are kept separate from identity-response planner measurements. |
 
 ## Reproducible evidence

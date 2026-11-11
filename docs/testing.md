@@ -46,7 +46,7 @@ Public YouTube QA is separate from the deterministic YouTube-like fixture. It mu
 external sign-in/bot restrictions instead of logging in, bypassing controls or substituting pages.
 Public-site observations and third-party warnings are not generalized to all YouTube sessions.
 
-**Firefox native preparation remains a known failure, not merely an untested package.** Its official-runtime evidence and acceptance criteria are in [issue #2](https://github.com/hanana-kick/Autotranslate/issues/2). The separate native Firefox workflow is a release prerequisite. See [the T01–T16 ledger](review-qa-status.md) for the current distinctions.
+**Firefox on-device execution is unverified, not a known failure of this engine.** The older "preparation channel closed" report was measured on the MediaPipe host and its inference worker, both removed in 0.1.7, so it says nothing about the ONNX host that ships now. `test/firefox-native/released.mjs` installs the built add-on through Mozilla's GeckoDriver and records the adapter features, the host status and the browser error console; that is the run that would settle it. See [the T01–T16 ledger](review-qa-status.md) for the current distinctions.
 
 ## Release, evidence and limits
 

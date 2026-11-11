@@ -12,8 +12,8 @@ no API key and no account to set up (see [On-device translation](#on-device-tran
 picker offers English, Korean and Japanese — the languages that model was published with
 benchmark numbers for. One runtime ships: the ONNX export, run by Transformers.js over WebGPU.
 Chrome is the supported packaged target. Firefox builds are available for
-experimentation; its existing native model preparation failure is tracked in
-[issue #2](https://github.com/hanana-kick/Autotranslate/issues/2). Adding the server
+experimentation, but the on-device path has never been run end to end there — no
+Firefox archive is published. Adding the server
 adapter is not a claim that all Firefox paths have been validated.
 
 ## Use an existing compatible server
