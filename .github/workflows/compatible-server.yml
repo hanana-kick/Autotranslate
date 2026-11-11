@@ -31,9 +31,10 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - run: npm run build:chrome
       - name: Browser test driver
-        run: |
-          npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
-          npx playwright install --with-deps chromium
+        shell: bash
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
+      # See browser.yml: apt is not a dependency a gate can afford.
+      - uses: ./.github/actions/browser-provision
       - name: Verified official CPU-capable model server
         shell: bash
         run: |

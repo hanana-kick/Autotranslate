@@ -76,7 +76,10 @@ try {
   await listen(fixture);
   profile = await mkdtemp(join(tmpdir(), 'autotranslate-server-'));
   context = await chromium.launchPersistentContext(profile, {
-    channel: 'chromium', headless: true, viewport: { width: 1120, height: 900 }, locale: 'ko-KR',
+    // The runner's apt mirror is not something a release gate can depend on, so
+    // the browser comes from whichever source the caller provisioned.
+    ...(process.env.CHROMIUM_EXECUTABLE ? { executablePath: process.env.CHROMIUM_EXECUTABLE } : { channel: 'chromium' }),
+    headless: true, viewport: { width: 1120, height: 900 }, locale: 'ko-KR',
     args: ['--disable-gpu', '--disable-extensions-except=' + extension, '--load-extension=' + extension]
   });
   context.on('page', p => p.on('pageerror', error => summary.errors.push(clean(error.message))));

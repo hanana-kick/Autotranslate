@@ -1,0 +1,61 @@
+name: Provide a browser for the Playwright suites
+description: >-
+  Gets a Chromium the pinned driver can launch, without depending on the runner's
+  apt mirror. `playwright install --with-deps` runs apt-get, and that mirror has
+  answered "Temporary failure resolving 'azure.archive.ubuntu.com'" often enough
+  to fail a release before a single test started; a rerun is not a repair.
+
+  So: download the browser binary (no apt), prove it launches, and only if the
+  image is missing a library try the apt step — once. Exports CHROMIUM_EXECUTABLE
+  for the suites, empty when the bundled browser works, because every harness
+  reads it that way.
+inputs:
+  allow-system-chrome:
+    description: >-
+      Fall back to the Chrome the GitHub images ship. Only for suites that do not
+      install an unpacked extension: branded Chrome has refused
+      `--load-extension` since 137, so those suites would time out instead of
+      failing honestly.
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Download the Chromium binary
+      shell: bash
+      run: npx playwright install chromium
+
+    - name: Prove a browser launches, from the cheapest source that works
+      shell: bash
+      env:
+        ALLOW_SYSTEM_CHROME: ${{ inputs.allow-system-chrome }}
+      run: |
+        set -euo pipefail
+        probe() {
+          node --input-type=module -e "
+            import { chromium } from 'playwright';
+            const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+            await browser.close();
+          " >/dev/null 2>&1
+        }
+        if probe; then
+          echo "the downloaded Chromium launches without system packages"
+          echo "CHROMIUM_EXECUTABLE=" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        echo "the downloaded Chromium is missing libraries; trying the apt step once" >&2
+        if npx playwright install-deps chromium && probe; then
+          echo "CHROMIUM_EXECUTABLE=" >> "$GITHUB_ENV"
+          exit 0
+        fi
+        if [ "$ALLOW_SYSTEM_CHROME" = 'true' ]; then
+          for candidate in /usr/bin/google-chrome /usr/bin/google-chrome-stable /opt/google/chrome/chrome; do
+            if [ -x "$candidate" ] && CHROMIUM_EXECUTABLE="$candidate" probe; then
+              echo "using the image's own browser: $candidate"
+              echo "CHROMIUM_EXECUTABLE=$candidate" >> "$GITHUB_ENV"
+              exit 0
+            fi
+          done
+        fi
+        echo "no launchable browser for this suite: a branded Chrome cannot load an unpacked extension" >&2
+        exit 1

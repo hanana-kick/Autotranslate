@@ -28,7 +28,9 @@ jobs:
       # dependency set. --package-lock=false leaves the application lock intact.
       - name: Install pinned browser test tooling
         run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.57.0
-      - run: npx playwright install --with-deps chromium
+      # The browser comes from an action that does not need apt: the runner's
+      # mirror has failed a run before its first test.
+      - uses: ./.github/actions/browser-provision
       - name: Native DOM and real extension lifecycle (deterministic model double)
         shell: bash
         run: |
