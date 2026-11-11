@@ -330,3 +330,15 @@ test('a short paragraph is never split, and scripts without spaces stay tight', 
     'no invented spaces between CJK sentences'
   );
 });
+
+test('an answer identical to the source is an echo, never a translation', async () => {
+  // A failed request used to come back as the page's own words: the node was
+  // marked translated and the page never changed. The write must be refused.
+  const paragraph = el('p', {}, [t('Batteries keep the grid stable')]);
+  const { translator, body } = harness(el('div', {}, [paragraph]), (texts) => texts);
+
+  await translator.translateRoot(body);
+
+  assert.equal(translator.stats().translated, 0, 'an echo is not a translation');
+  assert.equal(textContent(paragraph), 'Batteries keep the grid stable');
+});

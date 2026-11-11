@@ -231,6 +231,11 @@ namespace AT.dom {
     function apply(item: Item, translated: string, complete = true): boolean {
       const body = translated.trim();
       if (!body || !owns(item)) return false;
+      // An answer identical to the source is an echo, not a translation. Writing
+      // it would mark the node done and hide a failed request behind the page's
+      // own words (measured: five English sentences "translated" into English,
+      // the pass reported translated, and the page never changed).
+      if (body === item.source.trim()) return false;
       const issue = AT.outputIssue(item.source, body);
       if (issue) throw new Error('invalid translation output: ' + issue);
       const next = item.lead + body + item.trail;
