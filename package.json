@@ -1,6 +1,6 @@
 {
   "name": "autotranslate",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "description": "Automatic page translation extension for Chrome and Firefox (Manifest V3).",
   "type": "module",
@@ -16,7 +16,7 @@
     "lint": "node scripts/build.ts --check",
     "verify": "node scripts/verify-package.ts",
     "pretest": "tsc -p tsconfig.json",
-    "test": "node --test test/*.test.ts test/native-extension/host-monitor.test.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.ts test/native-extension/host-monitor.test.mjs",
     "ci": "npm run typecheck && npm run lint && npm test && npm run build && npm run verify",
     "test:browser": "node --test --test-concurrency=1 test/browser/*.test.mjs",
     "test:browser:dom": "node --test test/browser/dom.test.mjs",

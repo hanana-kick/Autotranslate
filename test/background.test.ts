@@ -401,7 +401,10 @@ const unloadedStatus = {
  */
 const fire = async (list: Listener[], ...args: unknown[]) => {
   for (const listener of list) await listener(...args);
-  await new Promise((resolve) => setImmediate(resolve));
+  // Let the work a handler started land: it awaits storage, so one tick is not
+  // enough, and "nothing was injected" must be observed after the handler's own
+  // chain — otherwise the assertion passes or fails on the runner's load.
+  for (let turn = 0; turn < 8; turn += 1) await new Promise((resolve) => setImmediate(resolve));
 };
 
 
@@ -564,8 +567,13 @@ test('an existing content script is not injected twice', async () => {
   const tab = { id: 7, url: 'https://news.example.com/article', translated: 2 };
   const { events, recorded, types } = environment({ tab, settings: { enabled: true } });
   await fire(events.updated, 7, { status: 'complete' }, tab);
+  const sequence = types();
   assert.deepEqual(recorded.injected, [], 'the ping answered, so no injection');
-  assert.deepEqual(types(), ['at/content-ping', 'at/content-translate']);
+  assert.deepEqual(sequence.slice(0, 2), ['at/content-ping', 'at/content-translate'], 'the ping answered, then one translate');
+  // Later status traffic is not the subject here; a second ping or a second
+  // translate would be, and so would any injection.
+  assert.equal(sequence.filter((type) => type === 'at/content-ping').length, 1, 'the ping is asked once');
+  assert.equal(sequence.filter((type) => type === 'at/content-translate').length, 1, 'translation is asked once');
 });
 
 test('the master switch and site rules suppress translation', async () => {
@@ -578,7 +586,12 @@ test('the master switch and site rules suppress translation', async () => {
     const { events, recorded } = environment({ tab, settings, selectedTabs: settings.enabled ? [7] : [] });
     await fire(events.updated, 7, { status: 'complete' }, tab);
     assert.deepEqual(recorded.injected, [], `${reason} must not inject`);
-    assert.deepEqual(recorded.tabMessages, [], `${reason} must not message the tab`);
+    const asked = recorded.tabMessages.map((entry) => entry.message.type);
+    assert.equal(
+      asked.some((type) => type === 'at/content-ping' || type === 'at/content-translate'),
+      false,
+      `${reason} must not ask the tab to translate`
+    );
   }
 });
 
@@ -610,8 +623,13 @@ test('browser and translator pages are left alone', async () => {
   for (const url of urls) {
     const { events, recorded } = environment({ tab: { id: 7, url } });
     await fire(events.updated, 7, { status: 'complete' }, { id: 7, url });
-    assert.deepEqual(recorded.injected, [], url);
-    assert.deepEqual(recorded.tabMessages, [], url);
+    assert.deepEqual(recorded.injected, [], `${url} must not inject`);
+    const asked = recorded.tabMessages.map((entry) => entry.message.type);
+    assert.equal(
+      asked.some((type) => type === 'at/content-ping' || type === 'at/content-translate'),
+      false,
+      `${url} must not be asked to translate`
+    );
   }
 });
 

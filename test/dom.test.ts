@@ -312,7 +312,7 @@ test('a long paragraph is translated sentence by sentence and rejoined', async (
 
 test('a short paragraph is never split, and scripts without spaces stay tight', async () => {
   const shortParagraph = el('p', {}, [t('One. Two.')]);
-  const short = harness(el('body', {}, [shortParagraph]), (texts) => texts, {
+  const short = harness(el('body', {}, [shortParagraph]), (texts) => texts.map((text) => `«${text}»`), {
     sentences: { split: (text: string) => text.split('. '), maxChars: 200 }
   });
   await short.translator.translateRoot();
@@ -331,14 +331,27 @@ test('a short paragraph is never split, and scripts without spaces stay tight', 
   );
 });
 
-test('an answer identical to the source is an echo, never a translation', async () => {
-  // A failed request used to come back as the page's own words: the node was
-  // marked translated and the page never changed. The write must be refused.
+test('a pass that only ever got the source back is a failure, and writes nothing', async () => {
+  // Measured in a real browser: with the target language equal to the page's,
+  // every answer was an echo and the tab reported `translated` with 0 nodes
+  // changed — the page sat in English with no error anywhere to read.
   const paragraph = el('p', {}, [t('Batteries keep the grid stable')]);
   const { translator, body } = harness(el('div', {}, [paragraph]), (texts) => texts);
 
-  await translator.translateRoot(body);
-
+  await assert.rejects(() => translator.translateRoot(body), /answered with the page's own text/);
   assert.equal(translator.stats().translated, 0, 'an echo is not a translation');
   assert.equal(textContent(paragraph), 'Batteries keep the grid stable');
+});
+
+test('a pass with one echo and one real answer still succeeds', async () => {
+  const first = el('p', {}, [t('Batteries keep the grid stable')]);
+  const second = el('p', {}, [t('Wind turbines produce more power in winter')]);
+  const { translator, body } = harness(el('div', {}, [first, second]), (texts) =>
+    texts.map((text) => (text.startsWith('Batteries') ? text : '풍력 터빈은 겨울에 더 많은 전력을 생산합니다.'))
+  );
+
+  await translator.translateRoot(body);
+
+  assert.equal(translator.stats().translated, 1, 'the echo is not counted and does not fail the pass');
+  assert.equal(textContent(second), '풍력 터빈은 겨울에 더 많은 전력을 생산합니다.');
 });

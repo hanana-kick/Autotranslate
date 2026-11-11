@@ -149,6 +149,9 @@ namespace AT.dom {
     // A restore record and a completed translation are different states.
     const originals = new Map<Text, Original>();
     let completed = 0;
+    /** Answers written back unchanged: a real failure with no exception of its
+     *  own, counted so a pass that changed nothing cannot report success. */
+    let echoed = 0;
     const cache = new Map<string, { answers: string[]; bytes: number }>();
     let cacheBytes = 0;
     let generation = 0;
@@ -235,7 +238,10 @@ namespace AT.dom {
       // it would mark the node done and hide a failed request behind the page's
       // own words (measured: five English sentences "translated" into English,
       // the pass reported translated, and the page never changed).
-      if (body === item.source.trim()) return false;
+      if (body === item.source.trim()) {
+        echoed++;
+        return false;
+      }
       const issue = AT.outputIssue(item.source, body);
       if (issue) throw new Error('invalid translation output: ' + issue);
       const next = item.lead + body + item.trail;
@@ -378,6 +384,7 @@ namespace AT.dom {
       let error: string | null = null;
       let firstError: unknown = null;
       let wrote = 0;
+      const echoesBefore = echoed;
       mergedRuns = 0;
       const scope = cacheScope?.() ?? '';
       const keyFor = (kind: string, sources: string[]) => JSON.stringify([scope, kind, sources]);
@@ -550,7 +557,17 @@ namespace AT.dom {
         }
         if (wrote > before && !cancelled()) onApply?.(completed);
       }
-      if (!cancelled() && failed > 0 && wrote === 0) throw firstError ?? new Error(error ?? 'translation failed');
+      if (!cancelled() && wrote === 0) {
+        // Nothing was written: either a request threw, or every answer was the
+        // page's own text. Reporting that as "translated" is how a page sat in
+        // its source language with no error anywhere to read.
+        if (failed > 0) throw firstError ?? new Error(error ?? 'translation failed');
+        if (echoed > echoesBefore) {
+          throw new Error(
+            'the model answered with the page\'s own text — check that the target language differs from the page'
+          );
+        }
+      }
       return { requested, translated: stats().translated, runs: mergedRuns, failed, error };
     }
 
