@@ -23,7 +23,10 @@ async function run(name, html, options, accept, category='eligibility') {
     const requests=[];let firstMs=null; const start=performance.now();
     const pipeline=AT.pipeline.create({doc:document,settings:()=>({maxNodes:options.maxNodes||600}),translate:async batch=>{
       firstMs??=performance.now()-start;
-      requests.push({role:batch.role,texts:batch.texts});return batch.texts;
+      // One marker character, so the answer is not the source: the DOM refuses
+      // an echo as a failed request now, and this audit measures the planner,
+      // not the identity guard. Request count and DOM work are unchanged.
+      requests.push({role:batch.role,texts:batch.texts});return batch.texts.map(text=>'\u00b7'+text);
     }});
     const result=await pipeline.translate();const totalMs=performance.now()-start;
     const restoreStart=performance.now();pipeline.restore();const restoreMs=performance.now()-restoreStart;
