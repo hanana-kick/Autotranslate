@@ -1,9 +1,8 @@
-// The ONNX on-device host: the same host contract as `AT.localhost` (load,
-// unload, status, translate, handle), but the runtime is Transformers.js over
-// onnxruntime-web WebGPU, and the model is the ONNX export of PLaMo 3 Translate
-// stored in OPFS. Everything that is not the runtime - prompts, packing, the
-// script guard, the retry policy - is shared with the GGUF host through
-// `AT.local` and `AT.plamo3`, so a page cannot tell which runtime answers.
+// The on-device host: load, unload, status, translate and handle, over
+// Transformers.js on onnxruntime-web WebGPU, with the ONNX export of PLaMo 3
+// Translate stored in OPFS. Everything that is not the runtime - the prompt,
+// packing, the script guard, the token budget - is shared through `AT.local`
+// and `AT.plamo3`.
 //
 // The vendored runtime arrives as classic scripts that publish three globals
 // (`AT_ORT_COMMON`, `AT_ORT_WEBGPU`, `AT_TRANSFORMERS`); the model's own files
@@ -71,7 +70,6 @@ namespace AT.onnxhost {
     loadedBytes: 0,
     loadMs: null,
     generations: 0,
-    calibration: null,
     lastError: null
   };
 
@@ -83,7 +81,9 @@ namespace AT.onnxhost {
   export function install(place: 'offscreen' | 'background', report: (status: AT.local.LocalStatus) => void): AT.local.LocalStatus {
     state.target = place;
     reporter = report;
-    void checkSupport();
+    // A browser without WebGPU records its reason inside; nobody is waiting on
+    // the answer here, so the rejection must not escape as an unhandled one.
+    void checkSupport().catch(() => undefined);
     publish();
     return state;
   }
@@ -111,10 +111,7 @@ namespace AT.onnxhost {
     if (state.supported) return;
     if (typeof navigator === 'undefined' || !('gpu' in navigator)) {
       state.supported = false;
-      state.reason = 'no-webgpu';
-      state.state = state.state === 'unloaded' ? 'unloaded' : state.state;
-      publish();
-      throw new Error('this browser has no WebGPU');
+      fail('no-webgpu', 'this browser has no WebGPU');
     }
     // Every ONNX card here runs f16 activations, and a device without the
     // shader-f16 feature fails inside ORT's first kernel ("Gather requires f16
@@ -138,10 +135,7 @@ namespace AT.onnxhost {
     const features = (adapter as { features?: { has?: (name: string) => boolean } } | null)?.features;
     if (!features?.has?.('shader-f16')) {
       state.supported = false;
-      state.reason = 'no-webgpu';
-      state.state = state.state === 'unloaded' ? 'unloaded' : state.state;
-      publish();
-      throw new Error('this GPU has no f16 shader support, which every ONNX card here needs');
+      fail('no-webgpu', 'this GPU has no f16 shader support, which every ONNX card here needs');
     }
     state.supported = true;
     state.reason = null;
@@ -239,8 +233,7 @@ namespace AT.onnxhost {
   function renderPrompt(target: string, text: string, hint: string | null): string {
     // Pass the page text as a plain string, not a chat: the template is already
     // applied here, and a chat input would make the pipeline render it again.
-    // The prompt is asked for with `return_full_text: false`, so the pipeline
-    // slices it off by token count and only the generation comes back.
+    // The prompt comes back verbatim in `generated_text`; `answerOf` cuts it off.
     const safe = P.sanitize(text);
     const context = hint === null ? null : P.sanitize(hint);
     return tokenizer!.apply_chat_template(
@@ -309,9 +302,9 @@ namespace AT.onnxhost {
     }
   }
 
-  /** Build the shapes a page asks for before the user asks: one short prompt, one
-   *  of a realistic length, and one packed batch. WebGPU compiles its shaders on
-   *  the first run of a shape, and that cost was landing on the first page. */
+  /** Build the shapes a page asks for before the user asks: one short prompt and
+   *  one of a realistic length. WebGPU compiles its shaders on the first run of
+   *  a shape, and that cost was landing on the first page. */
   async function warmup(target: string): Promise<void> {
     if (!pipe || !tokenizer) return;
     const lang = P.langFor(target) ?? 'ko';
@@ -365,28 +358,22 @@ namespace AT.onnxhost {
     }
   }
 
-  /** One generation, bounded by a wall clock like the GGUF host's. */
-  async function generate(prompt: string, maxNewTokens: number): Promise<string> {
+  /** One generation, bounded by a wall clock like the GGUF host's. `source` is
+   *  the text the prompt asked about, used only to find where the answer
+   *  starts when the decoded prompt does not match the string we sent. */
+  async function generate(prompt: string, maxNewTokens: number, source: string): Promise<string> {
     if (!pipe) fail('not-loaded', 'no model is loaded');
-    const t0 = Date.now();
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
     try {
       const out = await pipe(prompt, {
         max_new_tokens: maxNewTokens,
         do_sample: false,
-        return_full_text: false,
         abort_signal: controller.signal
       });
       generations += 1;
       touchIdleTimer();
-      // The pipeline decodes with special tokens skipped, so the prompt's own
-      // `<|plamo:...|>` markers are stripped from the output and the answer is
-      // not a suffix of the prompt string. What survives verbatim is the plain
-      // text between them: the output element's `lang` value is the target
-      // code, and everything after that is the translation.
-      console.log('[dbg] generate 1 prompt', prompt.length, 'chars cap', maxNewTokens, Date.now() - t0, 'ms');
-      return answerOf(out?.[0]?.generated_text);
+      return answerOf(out?.[0]?.generated_text, prompt, source).trim();
     } catch (error: unknown) {
       const message = String((error as { message?: unknown })?.message ?? error);
       fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
@@ -395,15 +382,24 @@ namespace AT.onnxhost {
     }
   }
 
-  /** The answer inside one generated text: the pipeline strips the prompt's
-   *  special tokens, so the output element's `lang` value survives as the
-   *  target code and everything after it is the translation. */
-  /** The answer only: the pipeline is asked for `return_full_text: false`, so it
-   *  slices the prompt off by token count and hands back the generation itself.
-   *  Searching the text for the target code instead (the earlier shape) cuts at
-   *  the last `ko` anywhere in the output, which a source line can contain. */
-  function answerOf(generated: unknown): string {
-    return typeof generated === 'string' ? generated : '';
+  /** Every marker the chat template writes is a special token, so the decoded
+   *  text carries the prompt without them; this strips the same markers from
+   *  the prompt we sent. */
+  const PROMPT_MARKERS = /<\|[^|]*\|>/g;
+
+  /** The generation alone. The library's own cut needs a prompt length the
+   *  tokenizer and the padded batch do not agree on, which leaves the source
+   *  sentence in the answer. */
+  function answerOf(generated: unknown, prompt: string, source: string): string {
+    const text = typeof generated === 'string' ? generated : '';
+    if (!text) return '';
+    const bare = prompt.replace(PROMPT_MARKERS, '');
+    if (bare && text.startsWith(bare)) return text.slice(bare.length);
+    // A prompt the decoder renders differently still ends with the text we
+    // asked about; anchoring there cannot return text from earlier in the prompt.
+    const anchor = source.trim();
+    const at = anchor ? text.lastIndexOf(anchor) : -1;
+    return at >= 0 ? text.slice(at + anchor.length) : '';
   }
 
   const SELF_SUFFICIENT_CHARS = 40;
@@ -420,10 +416,10 @@ namespace AT.onnxhost {
     const leadIsPlain = hint === null || text.length >= SELF_SUFFICIENT_CHARS;
     const lead = leadIsPlain ? plain : framed;
     const cap = L.answerTokens(text, lastMaxTokens, lead);
-    const answer = (await generate(lead, cap)).trim();
+    const answer = await generate(lead, cap, text);
     if (usable(answer, text, target)) return answer;
     const follow = leadIsPlain ? framed : plain;
-    const retry = (await generate(follow, L.answerTokens(text, lastMaxTokens, follow))).trim();
+    const retry = await generate(follow, L.answerTokens(text, lastMaxTokens, follow), text);
     return usable(retry, text, target) ? retry : '';
   }
 
@@ -436,7 +432,7 @@ namespace AT.onnxhost {
     const batch = texts.map((text, index) => `${index + 1}. ${P.sanitize(text).replace(/\s+/g, ' ').trim()}`).join('\n');
     const prompt = renderPrompt(target, batch, hint);
     const cap = L.answerTokens(texts, lastMaxTokens, prompt);
-    const reply = (await generate(prompt, cap)).trim();
+    const reply = await generate(prompt, cap, batch);
     const parsed = L.parseNumbered(reply, texts.length);
     if (parsed) return parsed.map((answer) => answer.trim());
     AT.warn('on-device split mismatch, retrying per text', texts.length);
@@ -463,7 +459,7 @@ namespace AT.onnxhost {
 
   /** Per-text costs and the empty instruction's own cost, so `engines` can pack
    *  a batch against the model's real tokenizer instead of an estimate. */
-  async function countNow(request: CountRequest): Promise<AT.localhost.TokenCounts> {
+  async function countNow(request: CountRequest): Promise<AT.local.TokenCounts> {
     const modelId = typeof request.modelId === 'string' ? request.modelId : '';
     if (!modelId) fail('no-model', 'no model is selected');
     const texts = Array.isArray(request.texts)
@@ -479,7 +475,7 @@ namespace AT.onnxhost {
     return { counts: texts.map((text) => tokenCount(text)), overhead };
   }
 
-  async function translateNow(request: AT.localhost.TranslateRequest): Promise<AT.localhost.HostReply> {
+  async function translateNow(request: AT.local.TranslateRequest): Promise<AT.local.HostReply> {
     const texts = Array.isArray(request.texts)
       ? request.texts.filter((text): text is string => typeof text === 'string')
       : [];
@@ -527,14 +523,14 @@ namespace AT.onnxhost {
     return state;
   }
 
-  export async function translate(request: AT.localhost.TranslateRequest): Promise<AT.localhost.HostReply> {
+  export async function translate(request: AT.local.TranslateRequest): Promise<AT.local.HostReply> {
     return await enqueue(() => translateNow(request));
   }
 
-  export async function handle(message: AT.Message): Promise<AT.localhost.HostReply> {
+  export async function handle(message: AT.Message): Promise<AT.local.HostReply> {
     switch (message?.type) {
       case C.MSG.LOCAL_TRANSLATE:
-        return await translate(message as AT.localhost.TranslateRequest);
+        return await translate(message as AT.local.TranslateRequest);
       case C.MSG.LOCAL_LOAD: {
         const request = message as { modelId?: unknown; target?: unknown; maxTokens?: unknown };
         const modelId = typeof request.modelId === 'string' ? request.modelId : '';

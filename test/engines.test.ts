@@ -23,7 +23,6 @@ test.beforeEach(() => {
 const AT = load(
   'lib/constants.js',
   'lib/browser.js',
-  'lib/gemma.js',
   'lib/plamo3.js',
   'lib/pagecontext.js',
   'lib/targets.js',
@@ -47,7 +46,7 @@ const engineError = (thrown: unknown): EngineError => thrown as EngineError;
 // without loading a 4B model.
 
 const localModel = (overrides: ATNamespace = {}) =>
-  engines.translate({ target: 'ko', texts: ['hello'], localModelId: 'gemma-4b', ...overrides });
+  engines.translate({ target: 'ko', texts: ['hello'], localModelId: 'plamo-0.8b', ...overrides });
 
 let sent: ATNamespace[] = [];
 
@@ -82,7 +81,7 @@ test('local: the model is asked through the offscreen host, never fetched', asyn
   const first = translates()[0] as ATNamespace;
   assert.equal(first.type, AT.C.MSG.LOCAL_TRANSLATE);
   assert.equal(first.to, AT.local.TARGET_OFFSCREEN);
-  assert.equal(first.modelId, 'gemma-4b');
+  assert.equal(first.modelId, 'plamo-0.8b');
   assert.deepEqual(first.texts, ['hello']);
   assert.equal(first.source, '', 'no detector answer: the host is not told a source');
   assert.equal(first.target, 'ko');
@@ -91,12 +90,26 @@ test('local: the model is asked through the offscreen host, never fetched', asyn
 });
 
 test('local: the source comes from the browser detector when the setting says auto', async () => {
-  detector.answer = { isReliable: false, languages: [{ language: 'de-AT', percentage: 100 }] };
+  detector.answer = { isReliable: false, languages: [{ language: 'ja', percentage: 100 }] };
   stubSend(() => ({ ok: true, translations: ['안녕'] }));
   try {
     const result = await localModel({ source: 'auto', texts: ['Guten Morgen'] });
     assert.deepEqual(detector.calls, ['Guten Morgen'], 'the detector sees the text, not the settings');
-    assert.equal((translates()[0] as ATNamespace).source, 'de-AT', 'a table code goes through unchanged');
+    assert.equal((translates()[0] as ATNamespace).source, 'ja', 'a code the model names goes through unchanged');
+    assert.equal(result.detected, 'ja', 'and the picker is told what the page was in');
+  } finally {
+    detector.answer = null;
+  }
+});
+
+test('local: a detected language the model cannot name leaves the source unstated', async () => {
+  // The prompt only carries the five languages PLaMo was released with, so a
+  // German page is translated with the target named and no source claim.
+  detector.answer = { isReliable: false, languages: [{ language: 'de-AT', percentage: 100 }] };
+  stubSend(() => ({ ok: true, translations: ['안녕'] }));
+  try {
+    const result = await localModel({ source: 'auto', texts: ['Guten Morgen'] });
+    assert.equal((translates()[0] as ATNamespace).source, '', 'the model has no German to name');
     assert.equal(result.detected, null, 'a code the target picker does not offer is not reported as one');
   } finally {
     detector.answer = null;
@@ -167,8 +180,6 @@ test('local: a target outside the picker is refused before the host is woken', a
 test('local: a picker code the model cannot express fails as no-target', async () => {
   // Every code in C.LANGS currently exists in the model table; this guard is
   // for a picker entry the model revision drops, so simulate that gap.
-  const korean = AT.gemma.LANGS.ko;
-  delete AT.gemma.LANGS.ko;
   const plamoKorean = AT.plamo3.LANGS.ko;
   delete AT.plamo3.LANGS.ko;
   stubSend(() => ({ ok: true, translations: [''] }));
@@ -181,7 +192,6 @@ test('local: a picker code the model cannot express fails as no-target', async (
       }
     );
   } finally {
-    AT.gemma.LANGS.ko = korean;
     AT.plamo3.LANGS.ko = plamoKorean;
   }
   assert.equal(translates().length, 0, 'no generation is attempted');
@@ -320,7 +330,7 @@ test('local: an empty answer remains incomplete for the DOM layer', async () => 
 
 test('local: test() probes through the same host', async () => {
   stubSend(() => ({ ok: true, translations: ['확인'] }));
-  const result = await engines.test({ target: 'ko', localModelId: 'gemma-4b' });
+  const result = await engines.test({ target: 'ko', localModelId: 'plamo-0.8b' });
   assert.equal(result.output, '확인');
   assert.equal(result.detected, null);
   assert.ok(result.ms >= 0);

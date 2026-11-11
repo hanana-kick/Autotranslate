@@ -89,15 +89,15 @@ namespace AT.engines {
   async function resolveSource(
     setting: string | undefined,
     texts: string[]
-  ): Promise<{ lang: AT.gemma.GemmaLang | null; detected: string | null }> {
+  ): Promise<{ lang: AT.plamo3.Plamo3Lang | null; detected: string | null }> {
     if (setting && setting !== 'auto') {
-      return { lang: (AT.plamo3.langFor(setting) ?? AT.gemma.langFor(setting)) as AT.gemma.GemmaLang | null, detected: C.isSupportedLang(setting) ? setting : null };
+      return { lang: AT.plamo3.langFor(setting), detected: C.isSupportedLang(setting) ? setting : null };
     }
     const sample = texts.join(' ').slice(0, 400);
     const answer = await AT.detectLanguage(sample);
     if (!answer) return { lang: null, detected: null };
     return {
-      lang: (AT.plamo3.langFor(answer.code) ?? AT.gemma.langForDetected(answer.code)) as AT.gemma.GemmaLang | null,
+      lang: AT.plamo3.langFor(answer.code),
       detected: C.isSupportedLang(answer.code) ? answer.code : null
     };
   }
@@ -142,7 +142,7 @@ namespace AT.engines {
   async function translateChunk(
     args: TranslateRequest & { texts: string[]; target: string; localModelId: string; localMaxTokens: number }
   ): Promise<{ translations: string[]; detected: string | null }> {
-    const target = (AT.plamo3.langFor(args.target) ?? AT.gemma.langFor(args.target)) as AT.gemma.GemmaLang | null;
+    const target = AT.plamo3.langFor(args.target);
     if (!target) {
       throw new EngineError('config', `the on-device model does not translate into ${args.target || 'that language'}`, {
         detail: 'no-target'
@@ -355,8 +355,8 @@ namespace AT.engines {
       modelId: localModelId,
       maxTokens: localMaxTokens,
       texts: unique,
-      source: AT.gemma.isLang(source) ? source : '',
-      target: AT.gemma.isLang(target) ? target : '',
+      source: AT.plamo3.langFor(source) ?? '',
+      target: AT.plamo3.langFor(target) ?? '',
       context: AT.pagecontext.hint(request.context ?? null) ?? ''
     });
     const counts = Array.isArray(counted?.counts) ? counted.counts.map((value) => Number(value)) : null;

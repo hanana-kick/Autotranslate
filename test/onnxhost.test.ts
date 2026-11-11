@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { load } from './helpers.ts';
+import { load, type ATNamespace } from './helpers.ts';
 
 const AT = load('lib/constants.js', 'lib/plamo3.js', 'lib/local.js', 'lib/modelstore.js', 'lib/onnxhost.js');
 const { local, onnxhost } = AT;
@@ -60,16 +60,14 @@ test('expandByteFallback turns an out-of-vocab char into its UTF-8 byte tokens',
   assert.equal(fakeTokenizer.decode(ids), '안녕하세요', 'the expansion round-trips to the original text');
 });
 
-test('modelKind classifies gguf, onnx and unknown files', () => {
-  assert.equal(local.modelKind({ name: 'plamo-3-translate-0.8b-Q4_K_M.gguf' }), 'gguf');
+test('modelKind classifies onnx files and files the runtime must judge', () => {
   assert.equal(
     local.modelKind({ name: 'model_q4f16.onnx', sourceUrl: 'https://huggingface.co/x/y/resolve/main/onnx/model_q4f16.onnx' }),
     'onnx'
   );
   assert.equal(local.modelKind({ sourceUrl: 'https://huggingface.co/x/y/resolve/main/onnx/model_fp16.onnx' }), 'onnx');
-  assert.equal(local.modelKind({ name: 'other.gguf' }), 'unknown');
-  assert.equal(local.isPlamo3File({ name: 'plamo-3-translate-0.8b-Q4_K_M.gguf' }), true);
-  assert.equal(local.isPlamo3File({ name: 'model_q4f16.onnx' }), false);
+  assert.equal(local.modelKind({ name: 'other.bin' }), 'unknown');
+  assert.equal(local.modelKind({}), 'unknown');
 });
 
 test('the ONNX card is the default offer and carries its parts', () => {
@@ -83,72 +81,74 @@ test('the ONNX card is the default offer and carries its parts', () => {
   assert.equal(local.sourceFor(source.url)?.id, source.id);
 });
 
-test('callHost picks the ONNX host for an ONNX record in the background placement', async () => {
-  const seen: string[] = [];
-  local.bindRecordLookup((id: string) =>
-    id === 'onnx-model' ? { id, name: 'model_q4f16.onnx', size: 705701446, sourceUrl: 'https://x/onnx/model_q4f16.onnx', createdAt: 1 } : null
-  );
-  local.setHostPlacement('background');
-  const realSend = AT.sendMessage;
-  AT.sendMessage = async (message: unknown) => {
-    seen.push('msg:' + String((message as { type?: string }).type));
-    return { ok: true };
-  };
-  const original = AT.onnxhost.handle;
-  AT.onnxhost.handle = async (message: unknown) => {
-    seen.push(String((message as { type?: string }).type));
-    return {};
-  };
+test('the answer is the generation alone, not the prompt the pipeline echoes back', async () => {
+  // With `return_full_text` on, the pipeline hands back the decoded prompt
+  // followed by the generation; a cut that trusts the library's token-count
+  // slice left the page's own sentence at the head of the "translation".
+  const source = 'The meeting moved to Monday.';
+  const answer = '회의는 월요일로 변경되었습니다.';
+  const prompts: string[] = [];
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const globals = globalThis as ATNamespace;
+  const realRuntime = AT.runtime;
+  const realGet = AT.modelstore.get;
+  const realGetURL = AT.getURL;
+  AT.getURL = (path: string) => `ext://${path}`;
+  AT.modelstore.get = async (id: string) => ({
+    id,
+    name: 'model_q4f16.onnx',
+    size: 705701446,
+    sourceUrl: 'https://x/onnx/model_q4f16.onnx',
+    createdAt: 1
+  });
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { gpu: { requestAdapter: async () => ({ features: { has: () => true } }) } }
+  });
+  onnxhost.configure({
+    runtime: () => ({
+      env: { backends: { onnx: { wasm: {} } } },
+      AutoTokenizer: { from_pretrained: async () => fakeTokenizer },
+      pipeline: async () => async (prompt: string) => {
+        prompts.push(prompt);
+        return [{ generated_text: prompt + answer }];
+      }
+    })
+  });
   try {
-    await local.callHost({ type: 'at/local-status', modelId: 'onnx-model' });
-    assert.deepEqual(seen, ['at/local-status'], 'the ONNX host answered');
-    await local.callHost({ type: 'at/local-status', modelId: 'gguf-model' });
-    assert.deepEqual(seen, ['at/local-status', 'msg:at/local-status'], 'an unknown id falls back to the GGUF host');
+    const reply = await onnxhost.translate({
+      type: 'at/local-translate',
+      modelId: 'onnx-model',
+      texts: [source],
+      target: 'ko',
+      maxTokens: 512
+    });
+    assert.deepEqual(reply.translations, [answer]);
+    assert.ok(prompts.some((prompt) => prompt.startsWith('PROMPT:')), 'the fake pipeline saw the prompt');
+    assert.equal(reply.translations[0].includes('PROMPT:'), false, 'the prompt never comes back as the translation');
   } finally {
-    AT.sendMessage = realSend;
-    AT.onnxhost.handle = original;
-    local.setHostPlacement('offscreen');
-    local.bindRecordLookup(() => null);
+    await onnxhost.unload('requested');
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else delete globals.navigator;
+    AT.runtime = realRuntime;
+    AT.getURL = realGetURL;
+    AT.modelstore.get = realGet;
   }
 });
 
-test('a cold record view still routes an ONNX id to the ONNX host', async () => {
-  // A document that has never listed the records answers 'gguf' to every id
-  // synchronously; the first load must still reach the ONNX host, or the GGUF
-  // host's file sniff fails the model outright.
-  local.bindRecordLookup(() => null);
-  const real = AT.modelstore.get;
-  AT.modelstore.get = async (id: string) =>
-    id === 'cold-onnx'
-      ? { id, name: 'model_q4f16.onnx', size: 705701446, sourceUrl: 'https://x/onnx/model_q4f16.onnx', createdAt: 1 }
-      : null;
+test('a status query for an ONNX model is answered by the one host', async () => {
+  // Status, unload and query carry no model id: with a single host there is
+  // nothing to route, so the answer is that host's own state.
+  const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { gpu: { requestAdapter: async () => ({ features: { has: () => true } }) } }
+  });
   try {
-    assert.equal(local.modelKindFor('cold-onnx'), 'gguf', 'the synchronous view is cold');
-    assert.equal(await local.kindForHost('cold-onnx'), 'onnx');
-    assert.equal(await local.kindForHost('missing-id'), 'gguf', 'an id the store does not hold stays GGUF');
+    const status = await AT.onnxhost.status();
+    assert.equal(status.target, 'offscreen', 'the host installed by the offscreen document answers');
   } finally {
-    AT.modelstore.get = real;
-    local.bindRecordLookup(() => null);
-  }
-});
-
-test('a status query for an ONNX model goes to the host that answered last', async () => {
-  // Status, unload and query carry no model id. Before this, the offscreen
-  // dispatcher sent them to the GGUF host, which reported its own untouched
-  // state as if it were the running one.
-  local.bindRecordLookup(() => null);
-  const real = AT.modelstore.get;
-  AT.modelstore.get = async (id: string) =>
-    id === 'status-onnx'
-      ? { id, name: 'model_q4f16.onnx', size: 705701446, sourceUrl: 'https://x/onnx/model_q4f16.onnx', createdAt: 1 }
-      : null;
-  try {
-    await local.kindForHost('status-onnx');
-    assert.equal(local.lastKind(), 'onnx', 'the routed kind is remembered for id-less messages');
-    await local.kindForHost('some-gguf');
-    assert.equal(local.lastKind(), 'gguf', 'a later GGUF route replaces it');
-  } finally {
-    AT.modelstore.get = real;
-    local.bindRecordLookup(() => null);
+    if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor);
+    else delete (globalThis as ATNamespace).navigator;
   }
 });

@@ -9,7 +9,6 @@ import { SRC, load, resetGlobals, deferred, type ATNamespace } from './helpers.t
 const LIBS = [
   'lib/constants.js',
   'lib/browser.js',
-  'lib/gemma.js',
   'lib/plamo3.js',
   'lib/pagecontext.js',
   'lib/targets.js',
@@ -19,7 +18,7 @@ const LIBS = [
   'lib/ui.js',
   'lib/settings.js',
   'lib/engines.js',
-  'lib/localhost.js',
+  'lib/onnxhost.js',
   'lib/dom.js'
 ];
 const MENU_IDS = ['translate-page', 'restore-page', 'translate-selection', 'never-site', 'always-site'];
@@ -98,7 +97,7 @@ type EnvironmentOptions = {
   /** Install `chrome.offscreen`: the model runs in a document of its own. */
   withOffscreen?: boolean;
   /** Load the host module into the background page, as Firefox does: `real`
-   *  evaluates lib/localhost.js, `stub` installs a scripted stand-in. */
+   *  evaluates lib/onnxhost.js, `stub` installs a scripted stand-in. */
   inlineHost?: 'real' | 'stub';
   /** Which global carries the API: standard `browser` (default) or the
    *  Chrome-only `chrome` fallback that lib/browser.ts resolves. */
@@ -127,7 +126,7 @@ function tabReply(message: TabMessage, tab: Tab = {}) {
   }
 }
 
-/** Stands in for lib/localhost.js when the background page is the host. */
+/** Stands in for lib/onnxhost.js when the background page is the host. */
 function inlineHostStub(record: { place: string | null; handled: string[]; messages: ATNamespace[] }) {
   let state: ATNamespace = unloadedStatus;
   let report: ((status: ATNamespace) => void) | null = null;
@@ -359,7 +358,7 @@ function environment({
 
   // A Firefox background page is the host: the module is part of the page (it
   // is in the manifest's scripts) and the background calls it directly.
-  if (inlineHost === 'stub') AT.localhost = inlineHostStub(recorded.inline);
+  if (inlineHost === 'stub') AT.onnxhost = inlineHostStub(recorded.inline);
   const send = async (message: ATNamespace, sender?: ATNamespace) =>
     dispatch(message, sender ?? (message.type === 'at/batch' ? { tab: tab7 } : {}));
   const browser = surface;

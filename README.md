@@ -2,7 +2,7 @@
 
 A Manifest V3 TypeScript extension that translates explicitly selected browser
  tabs in place and restores their latest original text. The translation engine
-can be either **on-device TranslateGemma** or an **OpenAI-compatible server**.
+can be either **on-device PLaMo 3** or an **OpenAI-compatible server**.
 
 Pages are translated in place: text nodes are replaced, originals are kept so the page can
 be restored, and a `MutationObserver` keeps up with dynamically inserted content. Translation
@@ -10,8 +10,7 @@ is **on-device only**: PFN's PLaMo 3 Translate 0.8B runs in the browser, driven 
 extension's own host document, so no page text ever leaves the browser and there is no endpoint,
 no API key and no account to set up (see [On-device translation](#on-device-translation)). The
 picker offers English, Korean and Japanese — the languages that model was published with
-benchmark numbers for. Any GGUF file can still be installed from Options, and then the engine is
-whatever that file says it is.
+benchmark numbers for. One runtime ships: the ONNX export, run by Transformers.js over WebGPU.
 Chrome is the supported packaged target. Firefox builds are available for
 experimentation; its existing native model preparation failure is tracked in
 [issue #2](https://github.com/hanana-kick/Autotranslate/issues/2). Adding the server
@@ -24,8 +23,7 @@ adapter is not a claim that all Firefox paths have been validated.
 | Chrome | 121 | MV3 + the `background.scripts` fallback key must be ignored, not rejected |
 | Firefox | 121 | MV3 `scripting` API and `background.scripts` alongside `service_worker` |
 | Node | 24 | runs `tsc` and executes the `test/*.ts` suites directly (type stripping) |
-| WebGPU-capable GPU | — | required, not optional: every tensor goes to the GPU (`n_gpu_layers: -1`) and a browser without WebGPU gets no translation at all |
-| JSPI and MEMORY64 | — | wllama's own requirement for its default build; without them it falls back to a compatibility build whose glue script an extension page's CSP will not execute, and the host reports `runtime-load-failed` |
+| WebGPU with `shader-f16` | — | required, not optional: the model's weights and activations are fp16, and the host probes the adapter for the feature before it loads a graph |
 Open the extension popup on the page to translate, then **Options**. Options opens
 in that tab's side panel when supported, otherwise in a separate popup window.
 Select **OpenAI-compatible server**, set **Base URL**, optional **API key**, and
@@ -65,9 +63,10 @@ target. Setup and provider tests never opt a web tab in.
 
 ## Privacy and network behavior
 
-On-device mode uses the existing bundled MediaPipe/LiteRT runtime and the original
-TranslateGemma `.task` file, downloaded once or imported from disk. In that mode,
-page translation text does not leave the browser.
+On-device mode runs the published ONNX export of PLaMo 3 Translate 0.8B through the
+bundled Transformers.js/onnxruntime-web runtime; the graph and its tokenizer are
+downloaded once or imported from disk. In that mode, page translation text does not
+leave the browser.
 
 Server mode sends the selected tab's text and bounded page/region context to the
 configured server. An explicit provider test sends a fixed sample sentence.
@@ -82,7 +81,7 @@ redirects. There is no silent provider fallback or automatic paid-request retry.
 Node **24+** is required for the existing TypeScript test tooling.
 
 ```sh
-npm install          # typescript, @types/node, webextension-polyfill, @wllama/wllama
+npm install          # typescript, @types/node, webextension-polyfill, @huggingface/transformers
 npm run build        # compile + validate -> build/chrome, build/firefox, dist/*.zip
 ```
 
@@ -106,11 +105,10 @@ pick `build/firefox/manifest.json`. Unsigned add-ons can only be loaded temporar
 Either way the first thing that opens is the onboarding page (see [First run](#first-run)).
 
 Translation waits on one download the user makes once. The file is whatever
-`AT.local.defaultSource()` offers — PFN's own `plamo-3-translate-0.8b-Q4_K_M.gguf` at
-573,125,952 bytes; the BF16 file at 1,783,495,808 bytes is a card with no url until someone
-hosts it, because PFN publishes the weights as safetensors and not that GGUF (see
-[Getting the model](#getting-the-model)). A file from anywhere else — somebody's own conversion —
-is still installable from Options, and only the runtime's own verdict decides whether it loads.
+`AT.local.defaultSource()` offers — the q4f16 ONNX graph at
+`TeamFlaxia/plamo-3-translate-0.8b-onnx`, 705,701,446 bytes, with its tokenizer and
+config fetched beside it (see [Getting the model](#getting-the-model)). A url typed into
+Options is installable too, and only the runtime's own verdict decides whether it loads.
 The bytes live as a plain file in the origin's private file system and only the record describing
 them goes to IndexedDB, so they are fetched once and never again — and that transfer is the only
 thing in the extension that touches the network.
@@ -166,7 +164,6 @@ else lives in Options, which stays an ordinary settings page rather than part of
 | `npm run ci` | typecheck, lint, test, build, verify — the exact steps CI runs |
 | `npm run demo` | serve the sample page at `http://127.0.0.1:8732/demo/` |
 | `npm run icons` | regenerate `src/icons/*.png` from `scripts/make-icons.ts` |
-| `npm run plamo:gguf` | build the BF16 GGUF PFN does not distribute: fetch `pfnet/plamo-3-translate-0.8b`, convert it with a pinned llama.cpp, rewrite the tokenizer tag, verify the result (see [Getting the model](#getting-the-model)) |
 | `npm run onnx:vendor` | regenerate `vendor-src/onnxruntime/` (the classic-script ONNX runtime the build copies) from the installed `@huggingface/transformers` + `onnxruntime-web` |
 | `npm run model:bundle` | fill `weights/` with the published q4f16 graph and its parts, so the next build ships them inside the package (`--from <dir>` copies files already downloaded) |
 
@@ -195,12 +192,11 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
     modelstore.ts        model bytes in OPFS + metadata in IndexedDB (seams for tests)
     modelflow.ts         one install path (download or file) + prepare, shared by welcome and options
     ui.ts                where an extension page is shown: side panel when the browser has one, else a tab
-    plamo3.ts            PLaMo's language table, the PFML3 prompt, the GGUF tokenizer-tag rewrite, the script guard
+    plamo3.ts            PLaMo's language table, the PFML3 prompt, the script guard
     pagecontext.ts       what kind of page this is, from its own metadata (collect / analyze / hint)
     targets.ts           which region a text is in, how visible it is, and what to translate first
     pipeline.ts          the page translation engine: page context + plan + batches + write-back
-    localhost.ts         the GGUF host: one wllama instance, a serial queue, idle unload, placement-agnostic
-    onnxhost.ts          the ONNX host: same contract over Transformers.js/WebGPU, OPFS-served model files
+    onnxhost.ts          the on-device host: Transformers.js/WebGPU, OPFS-served model files, one queue
     rules.ts             site pattern matching and precedence
     settings.ts          defaults, validation, persistence, content snapshot
     engines.ts           the model call: chunking, language refusal, error codes
@@ -214,7 +210,6 @@ demo/                    offline sample page that drives the same AT.dom engine
   glossary.ts            offline phrase dictionary (a stub, not a model)
 scripts/
   build.ts               compile + per-target manifest + vendor copy + validation + zip
-  plamo-gguf.ts          HF safetensors → BF16 GGUF: download, pinned llama.cpp convert, tag rewrite, verify
   zip.ts                 dependency-free ZIP writer/reader
   package-spec.ts        targets, required entries per target, add-on id, archive name
   verify-package.ts      packaging gate: audits the archives in dist/
@@ -229,7 +224,7 @@ test/                    node:test suites in TypeScript, one file per feature:
   welcome, ui                    the onboarding flow, side panel versus tab
   i18n, messages                 catalogue substitutions, data-i18n apply, send/receive envelope
   glossary                       the offline sample dictionary
-  local, plamo3, modelstore    prompts, chunking, records, status; the PFML3 prompt and the GGUF rewrite; transfers and cleanup
+  local, plamo3, modelstore    prompts, chunking, records, status; the PFML3 prompt; transfers and cleanup
   build, zip, fresh-clone        validator, archive format, a build from a clean checkout
 build/                   generated: build/ts (tsc output), build/{chrome,firefox}
 dist/                    generated: one zip per target
@@ -241,7 +236,7 @@ code differently and MV3 content scripts cannot be ES modules. Types live in the
 owns the value, so `AT.settings.Settings` or `AT.dom.Translator` is the contract consumers
 compile against. Load order is fixed, and the background's `scripts` list in `manifest.json`
 is the authoritative copy of it: `constants → browser → plamo3 → pagecontext → targets → rules
-→ local → modelstore → ui → settings → engines → localhost → background`.
+→ local → modelstore → ui → settings → engines → onnxhost → background`.
 
 ## How a page gets translated
 
@@ -327,19 +322,23 @@ truncated payload still tells us what kind of page it is.
 Where it goes: the content script collects once per translation pass and sends the result
 with each `at/batch`; the background normalises it (nothing from a page is trusted) and the
 on-device engine renders **one line** of it into the prompt as a `context` element. The whole
-request is one PFML3 document, built by `AT.plamo3.buildPrompt` in the element order the card
-publishes (`dataset → context → history → glossary → input → output`):
+request is one PFML3 document in the element order the card publishes
+(`dataset → context → history → glossary → input → output`). The shipped host does not spell that
+document out: it calls the tokenizer's `apply_chat_template` with the text and the target code, and
+`chat_template.jinja` from the model directory writes it:
 
 ```
 <|plamo:tag|>dataset<|plamo:msg|>translation<|plamo:tag|>context<|plamo:msg|>This is a news article in the Politics section from Example News. It mentions Alice Smith, The Coalition and Bob Jones.<|plamo:tag|>input<|plamo:msg|>The headline<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ko<|plamo:msg|>
 ```
 
-Nothing is asked in prose: the element names are the instruction, which is why page text is
-scrubbed of `<|plamo:` markers on the way in (`AT.plamo3.sanitize`) — text carrying one could
-close the element and write the rest of the request. Several texts go out as one numbered
-`input` element instead (`AT.local.buildEngineBatch`), and the reply is split back by segment
-number (`AT.local.parseNumbered`) — a reply whose numbers cannot be trusted is redone one text
-at a time rather than mapped onto the wrong nodes.
+`AT.plamo3.buildPrompt` and `AT.local.buildEnginePrompt` / `buildEngineBatch` are the same
+document written in TypeScript, which is what the token-budget tests measure against without a
+tokenizer. Nothing is asked in prose: the element names are the instruction, which is why page text
+is scrubbed of `<|plamo:` markers on the way in (`AT.plamo3.sanitize`) — text carrying one could
+close the element and write the rest of the request. Several texts go out as one numbered `input`
+element instead (`AT.onnxhost.translateChunk`), and the reply is split back by segment number
+(`AT.local.parseNumbered`) — a reply whose numbers cannot be trusted is redone one text at a time
+rather than mapped onto the wrong nodes.
 
 Measured against real markup (the HTML five sites actually served, parsed the way a page is):
 
@@ -476,34 +475,30 @@ independently.
 
 ## The engines
 
-One model, PFN's PLaMo 3 Translate 0.8B, in two interchangeable runtimes; the installed
-file decides which answers. There is no endpoint to validate, no key to keep and no
-request to send: the engine layer (`AT.engines.translate`) turns a batch of texts into a
-prompt, asks the host, and writes the answer back. Identical strings are sent once,
-whitespace- and number-free nodes are never sent, an empty answer keeps the original text,
-and a failed generation surfaces in the popup with a code (`config`, `provider`, `format`,
-`timeout`) instead of leaving a half-translated page silently.
+One model, PFN's PLaMo 3 Translate 0.8B, in one runtime: the ONNX export, run by
+Transformers.js over onnxruntime-web with WebGPU. There is no endpoint to validate, no key
+to keep and no request to send: the engine layer (`AT.engines.translate`) turns a batch of
+texts into a prompt, asks the host, and writes the answer back. Identical strings are sent
+once, whitespace- and number-free nodes are never sent, an empty answer keeps the original
+text, and a failed generation surfaces in the popup with a code (`config`, `provider`,
+`format`, `timeout`) instead of leaving a half-translated page silently.
 
-| Card | Runtime | File | Licence |
-| --- | --- | --- | --- |
-| **PLaMo 3 Translate 0.8B (ONNX q4f16)** — the default | Transformers.js over onnxruntime-web WebGPU (`AT.onnxhost`) | `TeamFlaxia/plamo-3-translate-0.8b-onnx`: `onnx/model_q4f16.onnx` at 705,701,446 bytes (fp16 activations, int4 weights) plus `config.json`, `tokenizer.json`, `tokenizer_config.json`, `generation_config.json`, `chat_template.jinja`, fetched into OPFS together | PLaMo Community License |
-| PLaMo 3 Translate 0.8B (ONNX fp16), unquantized | same host | `onnx/model_fp16.onnx` at 1,781,996,033 bytes (an fp16 copy of the original BF16 checkpoint, weights untouched), fetched the same way | PLaMo Community License |
-| PLaMo 3 Translate 0.8B (ONNX q4), fp32 activations | same host | `onnx/model_q4.onnx` at 1,047,691,646 bytes | PLaMo Community License |
-| PLaMo 3 Translate 0.8B (Q4_K_M) | llama.cpp WASM via `@wllama/wllama` 3.8.1 (`AT.localhost`) | `pfnet/plamo-3-translate-0.8b-GGUF`'s `plamo-3-translate-0.8b-Q4_K_M.gguf` at 573,125,952 bytes | PLaMo Community License |
-| PLaMo 3 Translate 0.8B (BF16) | same, once hosted | 1,783,495,808 bytes; `PLAMO_BF16_URL` is empty because PFN does not publish this GGUF — `npm run plamo:gguf` builds it locally | PLaMo Community License |
+| Card | File | Licence |
+| --- | --- | --- |
+| **PLaMo 3 Translate 0.8B (ONNX q4f16)** — the default | `TeamFlaxia/plamo-3-translate-0.8b-onnx`: `onnx/model_q4f16.onnx` at 705,701,446 bytes (fp16 activations, int4 weights) plus `config.json`, `tokenizer.json`, `tokenizer_config.json`, `generation_config.json`, `chat_template.jinja`, fetched into OPFS together | PLaMo Community License |
+| PLaMo 3 Translate 0.8B (ONNX fp16), unquantized | `onnx/model_fp16.onnx` at 1,781,996,033 bytes (an fp16 copy of the original BF16 checkpoint, weights untouched), fetched the same way | PLaMo Community License |
 
 Both cards describe the same weights, so the languages are one set: the model card's
 53-language `target_lang` list, among them en, ja, ko, `zh-hans`, `zh-hant`; the picker
 offers en, ko, ja.
 
-**The installed file decides which host answers.** `AT.local.modelKind` reads the name and
-url the store holds off the record: an `.onnx` file routes to `AT.onnxhost`, anything PLaMo
-to `AT.localhost` (with the tokenizer-tag rewrite on ingest), and anything else to the
-GGUF host's own verdict. `AT.plamo3.langFor` folds the picker's code into the spelling the
-card uses — a `zh-CN` handed to it directly becomes `zh-hans` — and the host refuses a
-language the model was not released with: `config` / `no-target`, before a runtime is
-loaded or a generation spent. The catalogue is shared, so `AT.engines.translate` refuses
-any target outside en, ko and ja before the host is asked at all.
+**`AT.local.modelKind` reads the name and url the store holds off the record.** An `.onnx`
+file is the export this build runs; anything else is a file only the runtime's own verdict
+can judge. `AT.plamo3.langFor` folds the picker's code into the spelling the card uses — a
+`zh-CN` handed to it directly becomes `zh-hans` — and the host refuses a language the model
+was not released with: `config` / `no-target`, before a runtime is loaded or a generation
+spent. The catalogue is shared, so `AT.engines.translate` refuses any target outside en, ko
+and ja before the host is asked at all.
 
 **The ONNX host's two quirks are both tokenizer-side.** The JS Unigram implementation has
 no byte-fallback, so an out-of-vocab character (most Hangul syllables beyond the 467 in
@@ -515,29 +510,25 @@ nothing but the extension's own origin is ever fetched; the vendored runtime its
 `npm run onnx:vendor` (`scripts/onnx-vendor.ts`) because this project ships no bundler.
 
 Chunks are packed by **tokens**, not characters. `AT.engines` first asks the host to count the batch
-with the model's own tokenizer (`at/local-count`: MediaPipe's `sizeInTokens` or the ONNX tokenizer)
-and packs with `AT.local.chunkByCounts` against the instruction's measured cost. When no host answers
-- an older document, a failed load - it falls back to `AT.local.chunkByTokens`, which costs every
-text against per-script priors measured with this model's own tokenizer (`AT.local.PRIORS`) and
-leaves room for an answer of the same length; a text too long to ever fit travels alone instead of
-being dropped. Hangul is worth 1.06 characters per token against Latin's 5.33, so a Korean page packs
-far tighter than an English one and one shared number would overfill every Korean batch. The priors
-are also recalibrated from the prompt-token count every generation reports
-(`AT.local.setCalibration`, kept inside 0.4-2.5x of the published numbers). One chunk is one
-generation and is never retried - a repeat would spend another minute on the same model for the same
-answer.
+with the model's own tokenizer (`at/local-count`) and packs with `AT.local.chunkByCounts` against the
+instruction's measured cost. When no host answers - an older document, a failed load - it falls back
+to `AT.local.chunkByTokens`, which costs every text against per-script priors measured with this
+model's own tokenizer (`AT.local.PRIORS`) and leaves room for an answer of the same length; a text
+too long to ever fit travels alone instead of being dropped. Hangul is worth 1.06 characters per
+token against Latin's 5.33, so a Korean page packs far tighter than an English one and one shared
+number would overfill every Korean batch. One chunk is one generation and is never retried - a
+repeat would spend another second on the same model for the same answer.
 
-PLaMo is asked as a **raw completion**, not a chat message. Its GGUF carries a Jinja chat template
-the bundled parser cannot read (`Unable to generate parser for this template`), so the host loads
-the model with `chat_template: '{{ prompt }}'` (`AT.plamo3.PASS_THROUGH_TEMPLATE`) and sends the
-PFML3 document `AT.plamo3.buildPrompt` builds — the card's own element order
-`dataset → context → history → glossary → input → output` — to `createCompletion`, stopping on
-`<|plamo:tag|>` and `<|plamo:bos|>`. Page text is stripped of `<|plamo:` tokens on the way in
-(`AT.plamo3.sanitize`): measured against the real model, an input carrying
-`<|plamo:tag|>output…` made it answer with the text before the token and stop, silently losing the
-rest. An answer written in a script the target never writes is rejected rather than painted on the
-page (`AT.plamo3.checkScript`), because a small model sometimes hands the source back and length
-alone cannot tell that from a translation.
+The prompt is the card's own chat template. `AT.onnxhost` renders it through the tokenizer's
+`apply_chat_template` with `target_lang` set and `add_generation_prompt` on, which is why the
+special tokens line up with the graph: the card's PFML3 element order
+`dataset → context → history → glossary → input → output` comes from
+`chat_template.jinja`, and the host only supplies the text and the target code. Page text is
+stripped of `<|plamo:` tokens on the way in (`AT.plamo3.sanitize`): measured against the real
+model, an input carrying `<|plamo:tag|>output…` made it answer with the text before the token
+and stop, silently losing the rest. An answer written in a script the target never writes is
+rejected rather than painted on the page (`AT.plamo3.checkScript`), because a small model
+sometimes hands the source back and length alone cannot tell that from a translation.
 
 The model file is not shipped: it is the user's download (see below). `demo/glossary.ts`
 implements the same `(texts: string[]) => Promise<string[]>` shape, which is why the sample page
@@ -548,28 +539,25 @@ can exercise the real DOM engine without a model.
 **Nothing leaves the browser.** A page is translated without opening a socket: the model runs in
 this browser and no page text leaves it. The model file itself is a one-time download —
 705,701,446 bytes for the q4f16 ONNX graph the extension offers by default (plus a few
-KB of tokenizer and config beside it), 1,781,996,033 for the unquantized fp16 export (the
-released BF16 checkpoint in fp16), 573,125,952 for the GGUF quantization; until a model is
-there the popup says so and nothing is translated, because there is nowhere else to send
-the text. Every ONNX card runs f16 activations, so a GPU without WebGPU's `shader-f16`
-feature cannot run them at all and the host says so instead of failing inside the first
-kernel.
+KB of tokenizer and config beside it), or 1,781,996,033 for the unquantized fp16 export (the
+released BF16 checkpoint in fp16); until a model is there the popup says so and nothing is
+translated, because there is nowhere else to send the text. Both cards run f16 activations, so
+a GPU without WebGPU's `shader-f16` feature cannot run them at all and the host says so instead
+of failing inside the first kernel.
 
 | Piece | Where it lives |
 | --- | --- |
-| Runtime | `vendor/wllama/` (llama.cpp WASM) and `vendor/onnxruntime/` (Transformers.js + onnxruntime-web, pre-converted to classic scripts by `npm run onnx:vendor`), copied into both bundles by `scripts/build.ts`; which context executes it is decided at runtime |
+| Runtime | `vendor/onnxruntime/` (Transformers.js + onnxruntime-web, pre-converted to classic scripts by `npm run onnx:vendor`), copied into both bundles by `scripts/build.ts`; which context executes it is decided at runtime |
 | Model bytes | OPFS (`navigator.storage.getDirectory()`), one directory per model — the ONNX export stores its graph, tokenizer and config together; only metadata in IndexedDB (`autotranslate-models`) |
-| Inference | `lib/localhost.ts` (GGUF) or `lib/onnxhost.ts` (ONNX) — one instance, one generation at a time, in whichever context can hold it |
-| Prompt | `AT.local.buildEnginePrompt` / `buildEngineBatch`, which ask the one card: `AT.plamo3.buildPrompt` builds the PFML3 element document the model is asked for |
+| Inference | `lib/onnxhost.ts` — one pipeline, one generation at a time, in whichever context can hold it |
+| Prompt | the tokenizer's own chat template: `AT.onnxhost` calls `apply_chat_template` with the target code, and `chat_template.jinja` from the card supplies the PFML3 element order |
 | Languages | the picker offers en, ko and ja (`C.LANGS`); behind it one table, keyed so a prompt can only be built from a spelling the model lists: `AT.plamo3.LANGS` (5 — en, ja, ko, `zh-hans`, `zh-hant`, the spellings PFN's card publishes for this model out of the 53 its `target_lang` names). `AT.plamo3.langFor` folds the picker's code into that spelling, and a target outside the three never reaches a prompt |
-| Source language | the page's own text, detected with the browser's `i18n.detectLanguage` (CLD); an explicit `sourceLang` setting is reported as it stands. Either way the answer feeds only the popup's *detected* line — every prompt names the **target** and nothing else, because the card's prompts state no source language and a wrong claim about the source moves the translation |
+| Source language | the page's own text, detected with the browser's `i18n.detectLanguage` (CLD); an explicit `sourceLang` setting is reported as it stands. Either way the answer feeds only the popup's *detected* line — the prompt names the **target** and nothing else, because a wrong claim about the source moves the translation |
 
 **Getting the model.** A gigabyte-class file has no business inside an extension zip, so the user
 supplies it once: the card `AT.local.defaultSource()` names — the ONNX export at
-`TeamFlaxia/plamo-3-translate-0.8b-onnx` (published, ungated) is the default, its q4f16 graph
-first; the GGUF cards stay
-for the llama.cpp host, and the BF16 one carries no url until somebody hosts it — a file copied
-in by hand, or a url typed into Options.
+`TeamFlaxia/plamo-3-translate-0.8b-onnx` (published, ungated), its q4f16 graph first — or a url
+typed into Options.
 
 **Shipping the weights inside the bundle.** A build may carry the model instead of asking the
 user to download it: `npm run model:bundle` fills `weights/` with the published files and a
@@ -580,32 +568,11 @@ Both targets use the same code and the same manifest; whether a bundle can be *p
 distribution question, not a code one - Chrome accepts a package up to 2 GB, AMO's limit is 200 MB,
 so a 673 MiB q4f16 bundle is a Chrome-only or self-distributed Firefox build.
 
-PFN publishes `pfnet/plamo-3-translate-0.8b` as safetensors and distributes one GGUF:
-`plamo-3-translate-0.8b-Q4_K_M.gguf`, 573,125,952 bytes. Its card describes the BF16 conversion as
-"a reference value for comparison and is not distributed", so the extension cannot download the file
-it would rather run — and could not load it as released anyway: the runtime reads GGUF and nothing
-else, the string `safetensors` does not appear once in the 8,763,949 bytes of
-`vendor/wllama/wllama.wasm` the bundle ships, and its tensor types are GGUF's own quants, `fp8`
-nowhere. Quantisation is not free here (−0.18 on the Ja↔multi benchmark at Q4_K_M, −1.11 at Q4_0,
-and PFN forbids Q2_K outright). `PLAMO_BF16_URL` in `src/lib/local.ts`
-therefore names the BF16 file wherever someone has hosted it, and `npm run plamo:gguf` builds
-exactly that file: fetch the safetensors, `convert_hf_to_gguf.py --outtype bf16` from a pinned
-llama.cpp, rewrite the tokenizer tag, verify the header. It reports
-1,783,495,808 bytes and sha256
-`7e2cb2594cb75a4e2672dea42ef194bc55a09a0419a50828654e7f3b022b35e2`. While `PLAMO_BF16_URL` is
-empty, `AT.local.defaultSource()` is PFN's Q4_K_M, so a fresh profile is never offered a url that
-404s. PLaMo is under the **PLaMo Community License**: free for personal and non-commercial use,
+PLaMo is under the **PLaMo Community License**: free for personal and non-commercial use,
 free for commercial use while the licensee's annual revenue is ¥1B or below *and* PFN's registration
 form has been submitted, and above that a separate agreement is required
 ([translate.preferredai.jp](https://translate.preferredai.jp)). Read the card before redistributing
 anything built from these weights.
-
-A PLaMo file is rewritten on its way into storage. The wasm in `vendor/wllama/` recognises
-`general.architecture = plamo3` but registers no tokenizer under that tag, so `AT.modelstore` holds
-back the header while it streams, and `AT.plamo3.patchTokenizerTag` sets `tokenizer.ggml.model` to
-`plamo2`: six bytes in place, the same length, no copy of 1.78 GB, and `general.architecture` plus
-the `plamo3.*` tensor names left alone. The answers are unchanged — byte-identical to the unpatched
-file on every segment checked (4/4 single, 33/33 numbered-batch lines).
 
 The download is an ordinary streamed `fetch` into OPFS, with progress and a cancel that really
 aborts it. The file-input route stays for anyone who would rather copy the bytes in by hand. A
@@ -625,11 +592,11 @@ Both routes ask the browser to pin the storage before a transfer starts
 still be evicted, instead of letting the user find out after a reboot has thrown away a gigabyte.
 
 **Where it runs.** The model needs WebAssembly plus WebGPU for longer than a service worker
-lives, so `lib/localhost.ts` is a host module with two placements and one caller interface:
+lives, so `lib/onnxhost.ts` is a host module with two placements and one caller interface:
 
 | Browser | Placement | How the host is reached |
 | --- | --- | --- |
-| Chrome | `offscreen.html`, created with `chrome.offscreen` (reason `WORKERS`) | runtime messages: `at/local-load`, `at/local-unload`, `at/local-translate`, `at/local-status` |
+| Chrome | `offscreen.html`, created with `chrome.offscreen` (reason `WORKERS`) | runtime messages: `at/local-load`, `at/local-unload`, `at/local-translate`, `at/local-count`, `at/local-status` |
 | Firefox | the background page itself, which is already a document | direct calls — the module is part of the manifest's `background.scripts` |
 
 Both branches sit behind `AT.local.callHost`, which answers with the same `{ok, …}` shape either
@@ -637,20 +604,18 @@ way, so the engine layer, the popup and the Options page never ask which browser
 The placement is a runtime decision (`chrome.offscreen` present or not), not a build flag: both
 bundles carry the same files.
 
-One instance, one queue: generations are serialised, because llama.cpp allows a single generation
-at a time; the model is warmed right after loading with a sentence in the language the page is
-about to be translated into, so the first real sentence is not several times slower; and it is
-released ten minutes after the last page needed it — a resident model holds gigabytes, and
-`exit()` is what actually frees the WASM graph and the GPU buffers. `at/local-status` (or the
-reporter the background installs) is what the popup line and the Options status read.
+One pipeline, one queue: generations are serialised, because the graph answers one sequence at a
+time; the model is warmed right after loading with a short prompt and a realistic one, so WebGPU
+compiles its shaders on those instead of on the first real sentence; and it is released ten
+minutes after the last page needed it — a resident model holds the graph, the tokenizer and the
+GPU buffers, and dropping the pipeline is what frees them. `at/local-status` (or the reporter the
+background installs) is what the popup line and the Options status read.
 
-**One thread, on purpose.** Decoding asks for `n_threads: 1`. An extension page is not
-cross-origin isolated, so there is no `SharedArrayBuffer` for a multi-threaded build to work
-with; the WebGPU backend carries the weights (`n_gpu_layers: -1`, `flash_attn: true`) and the CPU
-only drives the loop. `n_ctx` is the `localMaxTokens` budget, never below 512 so an answer always
-has room, `n_batch` and `n_ubatch` are capped at 512, and prompt caching is on so a page's shared
-template is prefilled once. The weights arrive as a `Blob` read out of OPFS rather than as a URL,
-so a gigabyte is never copied into the JS heap or fetched again.
+**Nothing is fetched twice.** Transformers.js is loaded with remote models disabled and a custom
+cache that answers every file request from OPFS, so the graph, the tokenizer and the config are
+read from the origin's own storage; the wasm runtime is fetched from `vendor/onnxruntime/`, which
+ships in the package. The graph is handed over as one streamed response rather than as an array
+buffer, so a 706 MB model is never copied into the JS heap on its way to the GPU session.
 
 **Budgets.** The model is sized by the tokens one generation may spend, so texts are packed to
 `localMaxTokens` (128–8192, default 1024) counting input *and* expected output, and a text too
@@ -659,29 +624,24 @@ prompt; if the reply cannot be split back reliably, that chunk is re-run one tex
 A generation that stops answering is aborted for real at 180 s: the signal reaches the runtime's
 decode loop, so the next sentence does not queue behind a run that is still live.
 
-**The prompt is the model's, not ours.** The card publishes the PFML3 elements and this build quotes
-them: `AT.plamo3.buildPrompt` writes `dataset`, `context`, `input` and `output` in the card's own
-order and puts nothing else in the request — no instruction sentence, because in this template the
-shape of the prompt is the instruction. Measured against the real model, an ask that spelled out
-`Translate each numbered segment below into Japanese` translated its own instruction as line 1 of the
-list: 11 answers for 10 segments, and 254 prompt tokens where the bare numbered list costs 213 and
-answers 10 for 10. Language names are the card's spellings (`AT.plamo3.LANGS`, folded by
-`AT.plamo3.langFor`, which is also what turns our `zh-CN` into `zh-hans` and `zh-TW` into `zh-hant`), and a
-generation stops on the special ids the card lists (`AT.plamo3.STOP_TOKENS`). A language the model
-does not list never reaches a prompt: the engine refuses the target (`config`), and the host refuses
-it again (`no-target`) if it crosses a message boundary anyway.
+**The prompt is the card's own.** The ONNX export ships `chat_template.jinja`, and the host renders
+it through the tokenizer's `apply_chat_template` with `target_lang` set and `add_generation_prompt`
+on: the element order `dataset → context → input → output` is the card's, not a string this build
+composes, and the host only supplies the text and the target code. Language names are the card's
+spellings (`AT.plamo3.LANGS`, folded by `AT.plamo3.langFor`, which is also what turns our `zh-CN`
+into `zh-hans` and `zh-TW` into `zh-hant`). A language the model does not list never reaches a
+prompt: the engine refuses the target (`config`), and the host refuses it again (`no-target`) if it
+crosses a message boundary anyway.
 
-**Decoding settings.** The card publishes no sampling parameters at all — its
-`generation_config.json` names only the special token ids — so the table in `AT.local.SAMPLING`
-(`temp 0.7`, `top_p 0.8`, `top_k 20`, `repeat_penalty 1.05`, `seed 42`) is what every scored
-generation here has used, and the fixed seed is why a repeat of the same request answers
-identically. What the extension decides itself is the batch: the numbered shape stays greedy
-(`temp 0`, `top_k 1`, `seed 42`), because a sampled reply that loses the segment numbering costs the
-whole batch a second round of generations.
+**Decoding is greedy.** `generation_config.json` names only the special token ids, so the host asks
+for `do_sample: false` and a `max_new_tokens` cap computed from the source length
+(`AT.local.answerTokens`). The answer is what the model returns *after* the prompt: the pipeline is
+asked for the full text and `answerOf` cuts the decoded prompt off, because the library's own
+token-count cut is computed on a padded batch and leaves the page's own sentence behind.
 
-**Checked pairs.** `AT.local.VERIFIED_LANGS` is empty. No language pair has been reviewed by hand, so
-every pair reports itself as *not checked* (`AT.local.isVerifiedPair` answers false) rather than
-borrowing the confidence of an unreviewed one. All three languages the picker offers are in the
+**Checked pairs.** `AT.local.VERIFIED_LANGS` lists the five codes whose answers have been read by
+hand — en, ko, ja, `zh-CN` and `zh-TW` — so `AT.local.isVerifiedPair` answers true for the three the
+picker offers and false for a pair the options page cannot produce. All three languages are in the
 model's table, so the installed file answers en↔ja, en↔ko and ja↔ko, and a target outside those
 three is refused by the engine (`config`) before the host is asked. What is unverified is how good
 the answers are.
@@ -721,63 +681,43 @@ finished prompt is measured against the context the model was loaded with before
 chunk that still does not fit is halved rather than truncated. The estimate only guesses at the
 packing; the tokenizer decides.
 
-**What has been measured.** On one Apple-silicon Mac (Apple M5, ANGLE Metal), in Chromium 156 with
-`@wllama/wllama@3.8.1` and the same `vendor/wllama/` bytes the bundle ships. A text is asked once; if
-its answer is unusable it is asked once more without the page line and with `RETRY_SAMPLING`, whose
-firmer `penalty_repeat` is what makes the second ask a different question — `SAMPLING` carries a
-fixed seed, so a repeat of the same request answers identically (40 texts asked twice came back
-byte-identical). `isRunaway` is the guard against a model that misses its end token: an answer past
+**What has been measured.** On one Apple-silicon Mac (Apple M5, ANGLE Metal) in Chromium
+(143.0.7499.4), with the built bundle loaded unpacked and the published q4f16 graph installed
+through the shipped download route: a page of a heading and four paragraphs comes back in Korean
+in 12-19 s over five runs, four of four, in one numbered generation per chunk. A chunk of one short
+text answers in 0.66-0.76 s; a numbered chunk of four paragraphs in 8.5-8.6 s.
+
+Two knobs were measured against that page and both were rejected:
+
+| Variant | Page | Generations | Verdict |
+| --- | --- | --- | --- |
+| `answerTokens`, numbered chunk (shipped) | 12-19 s (five runs) | 1-2, one per chunk | kept |
+| one generation per text, up to 4 | 14 s | 1 per text | same wall time for the chunk, no prefill saving |
+| numbered answer capped at 96 tokens | 21 s | 5: the batch, then the per-text fallback | rejected |
+
+Smaller caps (80, 64) measured no faster. The mechanism is the one that matters, not the seconds:
+a cap below what the rows need truncates the reply, `parseNumbered` refuses a partial list, and the
+per-text fallback costs more than the cap saved — so the answer budget stays
+`AT.local.answerTokens`, capped only by the prompt's own share of the window, and nothing overrides
+it.
+
+`isRunaway` is the guard against a model that misses its end token: an answer past
 six times its source, over 600 characters, or carrying one glyph twenty times in a row is refused,
 and an answer still unusable after the retry comes back empty so the page keeps its own text. Whether
 texts are packed together depends on their length, and the split `lib/dom.ts` makes follows it: short
 interface strings go out as one numbered batch, prose of a sentence or more goes out one text at a
 time.
 
-The PLaMo artifact, measured in that same browser (Chromium 156.0.8078.80, ANGLE Metal,
-`--enable-unsafe-webgpu`): the 1,783,495,808-byte BF16 file (GGUF v3, 163 tensors,
-`general.file_type 32`) picked with the Options file input reached the origin private file system in
-4.3 s, and a second pick of the same file took 5.2 s, retiring the first record and leaving one model
-on disk with the origin holding 1,783,781,335 bytes. Read back out of that store the header still
-reads `general.architecture plamo3` and `general.file_type 32` while `tokenizer.ggml.model` reads
-`plamo2` and `tokenizer.ggml.pre` reads `default` — the ingest-time rewrite, at the same length, in
-the file the loader actually opens. The first load took 2.83 s and a load of the re-installed record
-5.51 s, both at `localMaxTokens: 512`, with `loadedBytes` equal to the file. Eight interface strings
-left as one host request and came back from one generation in 4.44 s, `parseNumbered` accepting eight
-rows of eight; the prompt the host built began `<|plamo:tag|>dataset<|plamo:msg|>translation`,
-`<|plamo:tag|>input<|plamo:msg|>1. …`, and warm a single text costs 393–683 ms, two Japanese-to-Korean
-texts 1.31 s. English, Korean and Japanese — every target this build's picker offers — answered, and
-so did `zh-CN` handed to the host directly (`zh-hans` at the model; the picker offers no Chinese
-target). `pt` was refused twice over without moving the generation counter: `config` with
-`no-target` in 1 ms at the engine, `the installed model has no language for pt` at the host. The
-session multiplier read 0.91 after the first batch and settled between 0.62 and 0.81 across a page
-run. A page pass: the 28-node sample page served from `http://127.0.0.1` came back in Korean in about
-20 s over 18 generations — one engine request per run, the shape `lib/dom.ts` chooses so a page fills
-in as answers land — with the badge set and `2.3.1`, `600`, `help@example.com`, `080-1234-5678`,
-`9:00~18:00` and `10%` still in the document, while the origin's own access log held nothing but the
-page's `GET`s. One merged run lost a space at an inline seam (`좌석당책정되며`), which is what merging
-a clause split across `<strong>` and `<em>` costs.
-
-The window the model is loaded with is not what a healthy generation costs. The same interface label
-came back in 88–255 ms and the same OPUS sentence in 831–1183 ms at `n_ctx` 512, 1024 and 2048 alike.
-What the window does price is the tail: one sentence whose answer missed its end token was refused
-twice, and the two refused generations cost 23.0 + 25.6 s at 512, 57.0 + 58.9 s at 1024 and
-63.7 + 60.9 s at 2048 — the decode is linear in the tokens an ask may spend, and an ask that never
-sees its end token spends every one of them. So the answer is bounded rather than the window.
 `answerTokens` gives an ask three times its own source tokens per text, plus `PRIORS.answerRow` for
 each row it has to number, plus `ANSWER_TOKEN_MARGIN`, never under `MIN_OUTPUT_TOKENS` and never over
-what `outputTokens` leaves. The multiplier is this model's own: across 82 generations over the four
-en/ja/ko directions the widest healthy answer was 3× its source at p95 and 6× on a source of one
-token, which the margin absorbs. A numbered row pays `answerRow` because the `N: ` marker and the
-break cost tokens the words do not account for. Healthy asks are untouched by the cap, and what the
-cap buys is the worst case: the generation that used to spend 58 s of a 954-token allowance now
-spends about a tenth of it.
+what `outputTokens` leaves. Healthy asks stop at the model's own end token far below the cap, and
+what the cap buys is the worst case: a generation that never sees its end token stops at the bound
+instead of spending the whole window.
 
-Text long enough to say what it is about is asked without the page line. The same three sentences of
-a real post, sent through the shipped host with a page line as the card's background block, took 4.76,
-4.05 and 4.50 s when the framed ask led; asked plainly first they took 2.89, 1.80 and 1.96 s, one
-generation each. The threshold is `SELF_SUFFICIENT_CHARS` (40): a label keeps the frame, because
-`Save changes` and `Save` are the same two words with no page to sit on, and prose falls back to the
-frame when the plain ask comes back empty or run away.
+Text long enough to say what it is about is asked without the page line. The threshold is
+`SELF_SUFFICIENT_CHARS` (40): a label keeps the frame, because `Save changes` and `Save` are the
+same two words with no page to sit on, and prose falls back to the frame when the plain ask comes
+back empty or run away.
 
 What is translated first is now decided by what the page is for. `plan` ranks content ahead of
 furniture and only then by position: `isImportant` is a content role, or an unlabelled stretch of 40
@@ -796,14 +736,12 @@ back after every label on the page. With content ranked first the posts came bac
 no such API) and the host runs in the background page, so a browser that idles that page drops the
 model and the next translation reloads it. The larger unknown is the runtime. The whole Chromium
 path has been run from the built bundle, loaded unpacked: download, load, translate and unload in
-the offscreen document. On a browser where wllama falls back to its compatibility mode —
-Firefox and Safari — that mode pulls its worker and wasm from a CDN this extension does not ship,
-while the bundle's own CSP (`script-src 'self' 'wasm-unsafe-eval'`) would not permit the fetch
-anyway. So on Firefox the model may fail to load: the host reports `no-webgpu` when the WebGPU
-probe finds no adapter and `runtime-load-failed` when the runtime itself cannot be reached, and
-the popup and Options say plainly that this browser cannot run the model — before a user spends the
-1.78 GB fp16 download the extension offers, or the 573 MB GGUF / 706 MB q4f16 options, since both pages probe
-support when they open. The Firefox path is **unverified**, not
+the offscreen document, on a GPU whose adapter exposes `shader-f16`. Firefox has to provide WebGPU
+with that feature and load the same wasm, and neither has been observed here: the host reports
+`no-webgpu` when the WebGPU probe finds no adapter or no f16 support, and `runtime-load-failed`
+when the runtime itself cannot be reached, and the popup and Options say plainly that this browser
+cannot run the model — before a user spends the 1.78 GB fp16 download or the 706 MB q4f16 one,
+since both pages probe support when they open. The Firefox path is **unverified**, not
 promised: it has never been run end to end.
 
 ## Sample page
@@ -870,9 +808,9 @@ path prefix length. A tie resolves to `never`, so `example.com → always` plus
 - Merged runs are only merged when the whole run is being translated in that pass; a
   partial (observer-driven) pass sends its nodes separately, which costs word order but
   keeps a half-observed sentence from being glued together.
-- The engine runs only on bytes the user supplied: the card in `AT.local.MODEL_SOURCES`
-  (573,125,952 bytes), the BF16 conversion of it (1,783,495,808), or a file or url they bring
-  themselves — held in OPFS until they delete it in Options.
+- The engine runs only on bytes the user supplied: a card in `AT.local.MODEL_SOURCES` (the q4f16
+  graph at 705,701,446 bytes or its fp16 export at 1,781,996,033), or a url they bring themselves —
+  held in OPFS until they delete it in Options.
   Nothing in the repository or the archives is a model — the archives carry the runtime, not the
   weights — and each file's licence travels with the release that publishes it, not with this
   repository.
@@ -928,8 +866,9 @@ the browser UI, and the target/source languages can be changed in Options.
 - `compatible-server.yml`: installs the unmodified extension and uses an actual
   CPU model server. Successful generations come from that server. Only deliberate
   HTTP error cases and authentication checks are supplied by a forwarding gateway.
-- Existing on-device native QA remains separate; neither an HTTP fixture nor a
-  different server model proves the native TranslateGemma runtime works.
+- Native on-device evidence is separate: `npm run test:onnx` installs the built
+  extension, loads the published graph and translates a real page in Chromium with
+  WebGPU. Neither an HTTP fixture nor a different server model proves that path works.
 
 The tested server model is identified in the run artifacts. A compatible API does
 not guarantee every model will obey translation/JSON formatting instructions.

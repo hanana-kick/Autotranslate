@@ -8,10 +8,9 @@ import { resolve, join, relative } from 'node:path';
 import { createHash } from 'node:crypto';
 import { firefox } from 'playwright';
 const out = resolve('test-results/firefox-webdriver'); await mkdir(out, { recursive: true });
-const token = process.env.HF_TOKEN || '';
-const clean = s => token ? String(s).split(token).join('[REDACTED]') : String(s);
+const clean = s => String(s);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const summary = { commit: execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(), driver:'geckodriver 0.37.1', model:'translategemma-4b-it-int8-web.task', inferenceDouble:false, passed:false, checks:[], stage:'start-driver' };
+const summary = { commit: execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim(), driver:'geckodriver 0.37.1', model:'plamo-3-translate-0.8b-onnx (q4f16)', inferenceDouble:false, passed:false, checks:[], stage:'start-driver' };
 const save = () => writeFile(join(out,'summary.json'),clean(JSON.stringify(summary,null,2)));
 async function step(name, detail={}) { summary.stage=name; summary.checks.push({name,...detail}); console.log(clean(JSON.stringify({stage:name,...detail}))); await save(); }
 async function inventory(dir) { const files={}; async function walk(p) { for(const e of await readdir(p,{withFileTypes:true})) { const f=join(p,e.name);if(e.isDirectory())await walk(f);else files[relative(dir,f)]=createHash('sha256').update(await readFile(f)).digest('hex'); } } await walk(dir);return files; }
@@ -47,11 +46,10 @@ try {
   assert.ok(summary.adapter,'Firefox must expose a genuine WebGPU adapter');
   await click('#targetLang option[value="ko"]');await snapshot('01-onboarding');await step('onboarding-and-adapter',{adapter:summary.adapter});
   await step('original-model-download');
-  if(token)await fill('#modelToken',token);await click('#download');
-  await fill('#modelToken','');
+  await click('#download');
   const begin=Date.now();
   await wait(async()=>{const ui=await js('return {ready:!document.querySelector("#start").disabled,kind:document.querySelector("#status").dataset.kind,status:document.querySelector("#status").textContent,received:document.querySelector("#progress").value,total:document.querySelector("#progress").max}');summary.lastUI=ui;await save();if(ui.kind==='error')throw Error(ui.status);return ui.ready;},'original model preparation',20*60000);
-  await fill('#modelToken','');await snapshot('02-model-ready');await step('original-model-ready',{elapsedMs:Date.now()-begin});
+  await snapshot('02-model-ready');await step('original-model-ready',{elapsedMs:Date.now()-begin});
   const options=await newTab(origin+'/options.html');
   await wait(()=>js('return document.querySelector("#localModel")?.value && document.querySelector("#targetLang")?.value==="ko"'),'options settings');
   await click('#sourceLang option[value="en"]');await click('#save');await wait(()=>js('return document.querySelector("#saveStatus").dataset.kind==="ok"'),'source saved');
@@ -71,7 +69,7 @@ try {
   assert.ok(Object.values(summary.restoration).every(Boolean));await click('#event');assert.equal(await js('return window.clicks'),1);await snapshot('06-restored');
   await step('latest-source-restored-and-events-preserved',summary.restoration);summary.passed=true;
 } catch(error) {summary.failure={stage:summary.stage,message:clean(error.message)};console.error(JSON.stringify(summary.failure));process.exitCode=1;
-  if(session) { await fill('#modelToken','').catch(()=>{}); await snapshot('FAIL-current-page').catch(()=>{}); }
+  if(session) { await snapshot('FAIL-current-page').catch(()=>{}); }
 }
 finally {
   summary.installedFilesUnchanged=JSON.stringify(before)===JSON.stringify(await inventory('build/firefox'));

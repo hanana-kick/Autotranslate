@@ -8,36 +8,19 @@ namespace AT.local {
   /** Guard against a hostile content-length. */
   export const MAX_MODEL_BYTES = 4 * 1024 * 1024 * 1024;
 
-
-  /** Files `scripts/build.ts` copies out of @mediapipe/tasks-genai. */
-  export const VENDOR = {
-    bundle: 'vendor/mediapipe/genai_bundle.js',
-    wasmDir: 'vendor/mediapipe/wasm',
-    module: 'vendor/wllama/index.js',
-    wasm: 'vendor/wllama/wllama.wasm'
-  };
-
   /** Model bytes live in OPFS; only metadata goes to IndexedDB. */
   export const STORE = {
     dbName: 'autotranslate-models',
     dbVersion: 1,
     metaStore: 'models',
     blobStore: 'blobs',
-    settingsKey: 'settings',
     filesDir: 'models'
   };
-
-  /** How far the session's measured/estimated ratio may move the priors. */
-  export const CALIBRATION_MIN = 0.4;
-  export const CALIBRATION_MAX = 2.5;
 
   /** The budget the settings page sets; it counts input plus output. */
   export const MIN_MAX_TOKENS = 128;
   export const MAX_MAX_TOKENS = 8192;
   export const DEFAULT_MAX_TOKENS = 1024;
-  /** llama.cpp refuses a context smaller than this, and a generation needs
-   *  room for the answer on top of the prompt. */
-  export const MIN_CONTEXT_TOKENS = 512;
   /** Never promise the model less than this for its answer. */
   export const MIN_OUTPUT_TOKENS = 64;
 
@@ -45,43 +28,8 @@ namespace AT.local {
   export const IDLE_UNLOAD_MS = 10 * 60 * 1000;
   /** One generation is bounded; the host aborts the run rather than wait. */
   export const GENERATION_TIMEOUT_MS = 180000;
-  /** First-token budget for a generation: the decode has not produced anything
-   *  yet, so the user should not wait the whole window to learn it failed. */
-  export const FIRST_OUTPUT_TIMEOUT_MS = 60000;
-  /** Real software WebGPU is much slower; do not repeatedly discard valid work. */
-  export const SOFTWARE_GENERATION_TIMEOUT_MS = 15 * 60 * 1000;
   /** Progress is forwarded to the background at most this often. */
   export const DOWNLOAD_PROGRESS_INTERVAL_MS = 500;
-
-  /** The card publishes no sampling parameters for this model, so the decoder
-   *  runs on the settings every scored generation here used: a little
-   *  temperature with top-p and top-k, a light repeat penalty, and a fixed seed
-   *  so the same request answers the same way twice. */
-  export const SAMPLING = {
-    temp: 0.7,
-    topP: 0.8,
-    topK: 20,
-    repeatPenalty: 1.05,
-    seed: 42
-  };
-
-  /** The numbered batch answer has a format to hold. A sampled reply drops the
-   *  segment numbers often enough that the whole batch has to be redone one text
-   *  at a time, so the shape that carries several texts stays greedy and
-   *  reproducible. */
-  export const BATCH_SAMPLING = {
-    temp: 0,
-    topK: 1,
-    repeatPenalty: 1,
-    seed: 42
-  };
-
-  /** The settings for the second ask about a text whose first answer was
-   *  unusable. The card's own decoding with a firmer hand on repetition:
-   *  `SAMPLING.seed` makes a repeat of the same request answer identically
-   *  (measured: 40 of 40 texts asked twice came back byte-identical), so a
-   *  retry that only changed the prompt would be a second chance on paper. */
-  export const RETRY_SAMPLING = { ...SAMPLING, repeatPenalty: 1.2 };
 
   /** How far past its source an answer may run before it is a runaway rather
    *  than a translation, and the floor under that: a short UI string may
@@ -145,15 +93,36 @@ namespace AT.local {
     return placement;
   }
 
+  /** at/local-translate as the background sends it. */
+  export type TranslateRequest = {
+    modelId?: unknown;
+    texts?: unknown;
+    source?: unknown;
+    target?: unknown;
+    maxTokens?: unknown;
+    /** One line of page context, already rendered and bounded by the engine. */
+    context?: unknown;
+  };
+
+  /** The answer at/local-count gives: per-text counts and the instruction. */
+  export type TokenCounts = { counts: number[]; overhead: number };
+
+  /** What one host call answers with; `callHost` adds `ok` around it. */
+  export type HostReply = {
+    status?: LocalStatus;
+    translations?: string[];
+    engine?: string;
+    counts?: number[];
+    overhead?: number;
+  };
+
   /**
-   * The one way to reach the host, so no caller has to know the browser or
-   * which runtime the installed file drives. `background` placement calls the
-   * host module in place; `offscreen` reaches it over runtime messages. The
-   * host module is chosen by the installed model's kind, so callers never
-   * branch on it.
+   * The one way to reach the host, so no caller has to know the browser.
+   * `background` placement calls the host module in place; `offscreen`
+   * reaches it over runtime messages.
    */
   export async function callHost(message: AT.Message): Promise<AT.Response> {
-    const host = placement === 'background' ? await hostModule(message) : undefined;
+    const host = placement === 'background' ? AT.onnxhost : undefined;
     if (!host) return AT.sendMessage(Object.assign({}, message, { to: TARGET_OFFSCREEN }));
     try {
       const reply = (await host.handle(message)) as Record<string, unknown>;
@@ -166,68 +135,6 @@ namespace AT.local {
         code: typeof rejection?.code === 'string' ? rejection.code : null
       };
     }
-  }
-
-  /** The host module for the model a message names, or the GGUF host. */
-  async function hostModule(message: AT.Message): Promise<{ handle: (m: AT.Message) => Promise<unknown> }> {
-    const modelId = typeof (message as { modelId?: unknown }).modelId === 'string' ? String((message as { modelId?: unknown }).modelId) : '';
-    if (!modelId) return AT.localhost;
-    const kind = await kindForHost(modelId);
-    if (kind === 'onnx' && typeof AT.onnxhost !== 'undefined') return AT.onnxhost;
-    return AT.localhost;
-  }
-
-  /** The record the store last handed out, for `hostModule` to read the kind
-   *  off without an await; the store refreshes it on every list/get. */
-  let lastKnownRecord: ((modelId: string) => ModelRecord | null) | null = null;
-  export function bindRecordLookup(lookup: (modelId: string) => ModelRecord | null): void {
-    lastKnownRecord = lookup;
-  }
-
-  /** The kind of an installed model, synchronously, for dispatchers that
-   *  already hold the record list (the offscreen document's message pump).
-   *  Answers 'gguf' for an unknown id so the GGUF host stays the default. */
-  export function modelKindFor(modelId: string): ModelKind {
-    const record = lastKnownRecord ? lastKnownRecord(modelId) : null;
-    return record ? modelKind(record) : 'gguf';
-  }
-
-  /** Kinds this context has already resolved, so routing costs one store read
-   *  per model instead of one per message. */
-  const routedKinds = new Map<string, ModelKind>();
-
-  /** The kind of the model this context routed most recently. Status, unload
-   *  and query carry no id of their own, and they belong to the host that
-   *  answered last: asking the GGUF host about an ONNX model reports the GGUF
-   *  module's untouched state ("unloaded", zero generations) as if it were the
-   *  running one. */
-  let lastRoutedKind: ModelKind = 'gguf';
-
-  export function lastKind(): ModelKind {
-    return lastRoutedKind;
-  }
-
-  /** The kind of an installed model, reading the store once when this
-   *  context's synchronous view has not seen the id yet. A document that never
-   *  listed the records answers 'gguf' for everything; without this read the
-   *  first ONNX load would be handed to the GGUF host and fail its file sniff. */
-  export async function kindForHost(modelId: string): Promise<ModelKind> {
-    const remembered = routedKinds.get(modelId);
-    const kind = remembered ?? (await resolveKind(modelId));
-    lastRoutedKind = kind;
-    return kind;
-  }
-
-  async function resolveKind(modelId: string): Promise<ModelKind> {
-    const synchronous = modelKindFor(modelId);
-    if (synchronous !== 'gguf') {
-      routedKinds.set(modelId, synchronous);
-      return synchronous;
-    }
-    const record = typeof AT.modelstore?.get === 'function' ? await AT.modelstore.get(modelId).catch(() => null) : null;
-    const kind = record ? modelKind(record) : 'gguf';
-    routedKinds.set(modelId, kind);
-    return kind;
   }
 
   /** Current native operation, reported before entering synchronous WASM. */
@@ -262,9 +169,6 @@ namespace AT.local {
     loadedBytes: number;
     loadMs: number | null;
     generations: number;
-    /** Tokens per character the last generations really produced, as a
-     *  multiplier on the published priors; null until one has been measured. */
-    calibration: number | null;
     lastError: string | null;
     phase?: ModelPhase | null;
     /** Detected from the actual browser adapter, not a testing override. */
@@ -290,22 +194,12 @@ namespace AT.local {
     url: string;
     size: number;
     license: string;
-    gated: boolean;
     kind?: ModelKind;
     /** For `onnx`: the Transformers.js dtype that names the graph file. */
     dtype?: string;
     /** For `onnx`: the files beside the graph, relative to the repo root. */
     parts?: string[];
   };
-
-  /** Where the TranslateGemma web build is published. Login is required:
-   *  the repository is gated, so a Hugging Face token is usually needed. */
-  /** Where this build gets the BF16 PLaMo GGUF. Empty until it is hosted:
-   *  PFN publishes the quantizations of this model only, and its card says the
-   *  BF16 file "is a reference value for comparison and is not distributed", so
-   *  the BF16 GGUF has to be converted locally (`npm run plamo:gguf`) and put
-   *  somewhere the extension may fetch it from. */
-  export const PLAMO_BF16_URL = '';
 
   export const MODEL_SOURCES: ModelSource[] = [
     {
@@ -314,7 +208,6 @@ namespace AT.local {
       url: 'https://huggingface.co/TeamFlaxia/plamo-3-translate-0.8b-onnx/resolve/main/onnx/model_fp16.onnx',
       size: 1781996033,
       license: 'PLaMo Community License',
-      gated: false,
       kind: 'onnx',
       dtype: 'fp16',
       parts: ['config.json', 'generation_config.json', 'tokenizer.json', 'tokenizer_config.json', 'chat_template.jinja']
@@ -325,36 +218,9 @@ namespace AT.local {
       url: 'https://huggingface.co/TeamFlaxia/plamo-3-translate-0.8b-onnx/resolve/main/onnx/model_q4f16.onnx',
       size: 705701446,
       license: 'PLaMo Community License',
-      gated: false,
       kind: 'onnx',
       dtype: 'q4f16',
       parts: ['config.json', 'generation_config.json', 'tokenizer.json', 'tokenizer_config.json', 'chat_template.jinja']
-    },
-    {
-      id: 'plamo-3-translate-0.8b-q4_k_m',
-      label: 'PLaMo 3 Translate 0.8B (GGUF Q4_K_M)',
-      url: 'https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/main/plamo-3-translate-0.8b-Q4_K_M.gguf',
-      size: 573125952,
-      license: 'PLaMo Community License',
-      gated: false,
-      kind: 'gguf'
-    },
-    {
-      id: 'plamo-3-translate-0.8b-bf16',
-      label: 'PLaMo 3 Translate 0.8B (BF16 GGUF)',
-      url: PLAMO_BF16_URL,
-      size: 1783495808,
-      license: 'PLaMo Community License',
-      gated: false,
-      kind: 'gguf'
-    },
-    {
-      id: 'translategemma-4b-it-int8-web',
-      label: 'TranslateGemma 4B IT (int8, web)',
-      url: 'https://huggingface.co/litert-community/TranslateGemma-4B-IT/resolve/main/translategemma-4b-it-int8-web.task',
-      size: 3896377344,
-      license: 'Google Gemma Terms',
-      gated: true
     }
   ];
 
@@ -366,49 +232,27 @@ namespace AT.local {
     return MODEL_SOURCES.find((source) => source.url !== '' && source.url === url) ?? null;
   }
 
-  const OPEN = '<start_of_turn>user\n';
-  const CLOSE = '\n<end_of_turn>\n<start_of_turn>model\n';
-
-  /** Wraps a instruction block the way the Gemma chat template expects. A
-   *  prompt without these markers makes the model answer with a bare newline. */
-  export function wrapChatPrompt(body: string): string {
-    return `${OPEN}${body}${CLOSE}`;
-  }
-
-  /** The card to offer. The ONNX export is what this build runs by default:
-   *  it is published, ungated, and needs no locally built GGUF. The GGUF cards
-   *  stay for the llama.cpp host - the BF16 one carries no url until someone
-   *  hosts the converted file, and a card with an empty `url` is no download
-   *  at all: the caller hears that back as `bad-url`. */
+  /** The card to offer: the smallest published ONNX export, which is what this
+   *  build runs. The unquantized export stays a card the user can pick. */
   export function defaultSource(): ModelSource {
     // q4f16 first: 706 MB instead of 1.78 GB for the same weights at four bits
     // per block, and the graph the batch and step measurements were taken on.
-    // The unquantized export stays a card the user can pick.
     return (
       MODEL_SOURCES.find((source) => source.url !== '' && source.kind === 'onnx' && source.dtype === 'q4f16') ??
       MODEL_SOURCES.find((source) => source.url !== '' && source.kind === 'onnx') ??
-      MODEL_SOURCES.find((source) => source.url !== '') ??
       MODEL_SOURCES[0]!
     );
   }
 
   /** What an installed file is, read off its own name and the address it came
    *  from - the only identity that survives download, import and a hand-typed
-   *  URL alike. `gguf` drives the tokenizer-tag rewrite on the way into
-   *  storage; `onnx` is the Transformers.js export and is stored as a set of
-   *  files; anything else is a file only the runtime's own verdict can judge. */
-  export type ModelKind = 'gguf' | 'onnx' | 'unknown';
+   *  URL alike. `onnx` is the Transformers.js export and is stored as a set of
+   *  files; anything else is a file the runtime's own verdict can judge. */
+  export type ModelKind = 'onnx' | 'unknown';
   export function modelKind(record: { name?: unknown; sourceUrl?: unknown }): ModelKind {
     const text = `${String(record?.name ?? '')} ${String(record?.sourceUrl ?? '')}`.toLowerCase();
     if (/\.onnx\b|[-/]onnx[-/]|model_(q4f16|q4|fp16)\.onnx/.test(text)) return 'onnx';
-    if (/plamo[- ]?3|plamo3/.test(text)) return 'gguf';
     return 'unknown';
-  }
-
-  /** Whether an installed file is this model's GGUF, kept for the tokenizer
-   *  rewrite's single caller. */
-  export function isPlamo3File(record: { name?: unknown; sourceUrl?: unknown }): boolean {
-    return modelKind(record) === 'gguf';
   }
 
   /** Page text before it reaches a prompt. PLaMo's template raises on a
@@ -524,16 +368,7 @@ namespace AT.local {
     return out;
   }
 
-  // The host measures the real prompt token count of every generation and
-  // folds the measured/estimated ratio into this multiplier, so the priors in
-  // this file track the model actually loaded rather than the published average.
-  let calibration = 1;
-
-  export function setCalibration(ratio: number): void {
-    calibration = Number.isFinite(ratio) ? Math.min(CALIBRATION_MAX, Math.max(CALIBRATION_MIN, ratio)) : 1;
-  }
-
-  /** The uncalibrated cost of a string, in tokens, under one engine's priors. */
+  /** The cost of a string, in tokens, under the published priors. */
   function rawTokens(text: string, priors: Priors): number {
     if (typeof text !== 'string' || !text) return 0;
     let latin = 0;
@@ -592,23 +427,12 @@ namespace AT.local {
    *  how many texts fit in one generation; the host's context window is the
    *  bound that decides. */
   export function estimateTokens(text: string): number {
-    return Math.ceil(rawTokens(text, PRIORS) * calibration);
-  }
-
-  /** The prompt's own cost, without the calibration an answer would carry. */
-  function promptTokens(prompt: string): number {
-    return Math.ceil(rawTokens(prompt, PRIORS) * calibration);
-  }
-
-  /** The published priors alone, with none of this session's calibration: the
-   *  host compares this against the runtime's own count to learn the ratio. */
-  export function rawEstimateTokens(text: string): number {
     return Math.ceil(rawTokens(text, PRIORS));
   }
 
-  /** The multiplier currently in effect, for the status the UI reads. */
-  export function calibrationValue(): number {
-    return calibration;
+  /** The prompt's own cost, counted with the same priors. */
+  function promptTokens(prompt: string): number {
+    return Math.ceil(rawTokens(prompt, PRIORS));
   }
 
   /**
@@ -643,12 +467,6 @@ namespace AT.local {
     const value = Number(maxTokens);
     const asked = Number.isFinite(value) && value > 0 ? Math.round(value) : DEFAULT_MAX_TOKENS;
     return Math.min(MAX_MAX_TOKENS, Math.max(MIN_MAX_TOKENS, asked));
-  }
-
-  /** The context window the host asks the runtime for: the budget, never below
-   *  what a generation needs to answer at all. */
-  export function contextTokens(maxTokens: number): number {
-    return Math.max(MIN_CONTEXT_TOKENS, clampTokens(maxTokens));
   }
 
   /** How much of the budget the answer may use once the prompt is paid for. */
@@ -713,96 +531,6 @@ namespace AT.local {
     answerRow: 8
   };
 
-  /**
-   * One text, in the shape the model was tuned on: the professional translator
-   * preamble, two blank lines, then the text. Both codes are TranslateGemma's
-   * own (`AT.gemma.GemmaLang`), and the names come from its language table, so
-   * the prompt cannot drift from what the model accepts.
-   */
-  export function buildTranslatePrompt(source: AT.gemma.GemmaLang, target: AT.gemma.GemmaLang, text: string): string {
-    const from = AT.gemma.nameOf(source);
-    const to = AT.gemma.nameOf(target);
-    return wrapChatPrompt(
-      [
-        professional(from, source, to, target),
-        `Produce only the ${to} translation, without any additional explanations or commentary. ` +
-          `Please translate the following ${from} text into ${to}:`,
-        '',
-        '',
-        text
-      ].join('\n')
-    );
-  }
-
-  /**
-   * The template always carries a source code. When the browser's detector
-   * cannot name one, ask for the target alone and admit the source is unknown
-   * rather than inventing a code the model never saw.
-   */
-  export function buildAutoPrompt(target: AT.gemma.GemmaLang, text: string): string {
-    const to = AT.gemma.nameOf(target);
-    return wrapChatPrompt(
-      [
-        `You are a professional translator. Translate the following text into ${to} (${target}). ` +
-          `Produce only the ${to} translation, without any additional explanations or commentary:`,
-        '',
-        '',
-        text
-      ].join('\n')
-    );
-  }
-
-  /**
-   * Page context, marked as background. Measured against the real extension: a
-   * bare sentence before the text was translated along with it — the model has
-   * no way to tell a fact about the page from the page's own words.
-   */
-  const CONTEXT_MARKER = 'Background, do not translate: ';
-
-  function contextLine(hint: string): string {
-    return hint.startsWith(CONTEXT_MARKER) ? hint : `${CONTEXT_MARKER}${hint}`;
-  }
-
-  /** The sentence the model was trained to read. */
-  function professional(from: string, fromCode: string, to: string, toCode: string): string {
-    return (
-      `You are a professional ${from} (${fromCode}) to ${to} (${toCode}) translator. ` +
-      `Your goal is to accurately convey the meaning and nuances of the original ${from} text ` +
-      `while adhering to ${to} grammar, vocabulary, and cultural sensitivities.`
-    );
-  }
-
-  /** Several texts in one generation. The reply is parsed by `parseNumbered`. */
-  export function buildBatchPrompt(
-    source: AT.gemma.GemmaLang | null,
-    target: AT.gemma.GemmaLang,
-    texts: string[],
-    hint?: string | null
-  ): string {
-    const first = texts[0] ?? '';
-    if (texts.length === 1) {
-      return source ? buildTranslatePrompt(source, target, first) : buildAutoPrompt(target, first);
-    }
-    const to = AT.gemma.nameOf(target);
-    const lines = texts.map((text, index) => `${index + 1}. ${text.replace(/\s+/g, ' ').trim()}`);
-    return wrapChatPrompt(
-      [
-        source ? professional(AT.gemma.nameOf(source), source, to, target) : `You are a translator producing ${to} (${target}) text.`,
-        '',
-        `Produce only the ${to} translation, without any additional explanations or commentary. ` +
-          `Translate every numbered segment below into ${to}, keep the numbering and the order, ` +
-          `and answer with exactly one block per segment in the form "N: <translation>".`,
-        ...(hint ? [contextLine(hint)] : []),
-        '',
-        'Segments:',
-        ...lines
-      ].join('\n')
-    );
-  }
-
-
-  /** Groups texts so one generation stays inside the token budget. Mirrors
-   *  engines.chunkByChars but counts tokens, not characters. */
   /**
    * Groups texts by counts the model's tokenizer produced, not by an estimate.
    * `overhead` is the measured cost of the instruction; each text pays for its
@@ -934,7 +662,6 @@ namespace AT.local {
     const state = STATES[String(input.state)] ?? 'unloaded';
     const loadMs = Number(input.loadMs);
     const generations = Number(input.generations);
-    const calibration = Number(input.calibration);
     return {
       target: typeof input.target === 'string' ? input.target : TARGET_OFFSCREEN,
       supported: input.supported === true,
@@ -945,10 +672,6 @@ namespace AT.local {
       loadedBytes: Number.isFinite(size) && size >= 0 ? Math.round(size) : 0,
       loadMs: Number.isFinite(loadMs) && loadMs >= 0 ? Math.round(loadMs) : null,
       generations: Number.isFinite(generations) && generations >= 0 ? Math.round(generations) : 0,
-      calibration:
-        Number.isFinite(calibration) && calibration >= CALIBRATION_MIN && calibration <= CALIBRATION_MAX
-          ? calibration
-          : null,
       ...(input.phase === null || ['runtime', 'model-read', 'model-create', 'warmup', 'count', 'generate'].includes(String(input.phase))
         ? { phase: input.phase as ModelPhase | null }
         : {}),

@@ -2,9 +2,10 @@ name: Release (Chrome compatible server)
 
 # This feature release requires current real SERVER-mode extension QA, browser
 # regressions, planner acceptance and reproducible builds. It does not relabel
-# historical native TranslateGemma runs as validation of a changed archive.
-# The native model/worker implementation is retained; fresh native-model and
-# local-speed certification are separate. Firefox issue #2 remains unresolved.
+# historical native runs as validation of a changed archive.
+# The on-device engine ships the published ONNX export; fresh native-model and
+# local-speed certification are separate harnesses. Firefox issue #2 remains
+# unresolved.
 on:
   push:
     branches: [main]
@@ -80,7 +81,7 @@ jobs:
             const bytes=execFileSync('unzip',['-p',archive,name],{maxBuffer:64*1024*1024});
             assert.equal(hash(bytes),installed[name],'installed file differs: '+name);
           }
-          const result={version,sourceCommit:process.env.GITHUB_SHA,workflowRun:process.env.GITHUB_RUN_ID,sha256:sha,browser:report.browser,backend,model:model.models.find(m=>m.name===report.model),checks:report.checks,installedFiles:names.length,scope:'Actual installed Chrome extension with real HTTP model responses; local native runtime is retained but not newly certified by this server-mode run.'};
+          const result={version,sourceCommit:process.env.GITHUB_SHA,workflowRun:process.env.GITHUB_RUN_ID,sha256:sha,browser:report.browser,backend,model:model.models.find(m=>m.name===report.model),checks:report.checks,installedFiles:names.length,scope:'Actual installed Chrome extension with real HTTP model responses; the on-device ONNX path is not newly certified by this server-mode run.'};
           fs.writeFileSync('dist/SERVER_QA.json',JSON.stringify(result,null,2));
           fs.writeFileSync('dist/SHA256SUMS.txt',sha+'  '+path.basename(archive)+'\n');
           console.log(JSON.stringify({version,sha256:sha,checks:expected.length,installedFiles:names.length}));
@@ -102,7 +103,7 @@ jobs:
           - Per-tab ON/OFF, source-bound side panel/separate options window, dynamic DOM translation and current-source restoration are retained.
           - This exact archive passed actual installed-extension QA against a real CPU Ollama/Qwen2.5:7B server. Authentication/rate-limit error cases use an explicitly labelled forwarding gateway; successful translations are not fabricated.
           - Type/unit/package, deterministic browser and planner gates also passed. SERVER_QA.json records the current server-mode evidence and exact archive SHA-256.
-          - The original local inference SDK/model/worker are retained. This release does not claim a fresh native TranslateGemma model run or a new local-inference speed benchmark. Existing native-startup limitations and Firefox issue #2 remain; no Firefox archive is published.
+          - The on-device engine is the published PLaMo 3 Translate ONNX export. This release does not claim a fresh native model run or a new local-inference speed benchmark. Existing native-startup limitations and Firefox issue #2 remain; no Firefox archive is published.
 
           Verification run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           Setup: Options → OpenAI-compatible server → Base URL/model → Save → explicitly enable the intended tab.

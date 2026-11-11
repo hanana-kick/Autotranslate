@@ -11,6 +11,11 @@ The identified 0.1.3 scheduling regressions were outside the locked inference SD
 
 Version 0.1.4 retains `@mediapipe/tasks-genai@0.10.30`, the original TranslateGemma `.task`, output validation, Worker isolation and bounded recovery. The native host code is unchanged. These changes do not establish that upstream native stalls, model startup or all possible devices have become faster.
 
+> **Superseded since 0.1.7.** The MediaPipe/TranslateGemma engine, its Worker and its speed
+> harnesses were removed; the shipped on-device engine is now the published PLaMo 3 Translate ONNX
+> export run by Transformers.js over WebGPU. The 0.1.4 numbers and the native-SDK statements below
+> describe the engine that was current then, not the one in this tree.
+
 ## Deterministic regression checks
 
 The exact production candidate passed Node 24 CI: **447 tests, zero failures/skips**, type checks and both package builds ([run 41291877433](https://github.com/hanana-kick/Autotranslate/actions/runs/41291877433)). New tests require:
@@ -53,6 +58,12 @@ The host/runtime initialization path was not modified in this performance change
 
 ## Automated release requirements
 
-`test/speed/run-native.mjs` uses the real installed extension and original model. `test/speed/native-benchmark.mjs` observes rendered DOM and uses shipped Options controls; it does not inject production modules or mock translation. `test/speed/compare.mjs` requires both sets of nine samples, exact restoration, zero unread candidate writes and at least 10% median improvement in each targeted workload.
+`npm run test:onnx` (`test/onnx-live/run-onnx.mjs`) installs the built extension and translates a
+real page with the published graph and real WebGPU; it observes the rendered DOM and uses the
+shipped Options controls, and injects no production module. It is a correctness gate, not a
+matched-speed benchmark: there is no paired native benchmark in this repository any more, because
+the runtime it compared against no longer ships.
 
-The Release workflow calls the paired native benchmark as well as five-profile original-model static/dynamic/multitab QA, deterministic browser regressions, planner acceptance and reproducible packaging. Failure in any required check blocks publication. A successful contract test or planner-only identity-response benchmark is not substituted for the native speed comparison.
+The Release workflow runs the deterministic browser regressions, the planner acceptance and
+reproducible packaging. Failure in any required check blocks publication. A successful contract
+test or planner-only identity-response benchmark is not substituted for live on-device evidence.

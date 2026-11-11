@@ -1,10 +1,10 @@
 // The Chrome placement of the on-device host. A service worker is too
 // short-lived and cannot host WebAssembly plus WebGPU, so the background
 // creates this document and talks to it over runtime messages. The host
-// itself lives in lib/localhost.js, which runs unchanged in a Firefox
+// itself lives in lib/onnxhost.js, which runs unchanged in a Firefox
 // background page: this file is only the message plumbing.
 // Load after lib/constants.js, lib/browser.js, lib/local.js,
-// lib/modelstore.js and lib/localhost.js.
+// lib/modelstore.js and lib/onnxhost.js.
 namespace AT.offscreen {
   const C = AT.C;
   const L = AT.local;
@@ -13,23 +13,16 @@ namespace AT.offscreen {
     // The background keeps the copy the popup reads; nobody answers here.
     void AT.sendMessage({ type: C.MSG.LOCAL_STATUS, status });
   };
-  AT.localhost.install('offscreen', report);
-  if (typeof AT.onnxhost !== 'undefined') AT.onnxhost.install('offscreen', report);
+  AT.onnxhost.install('offscreen', report);
 
   /** Only messages the background addressed to this document are ours. */
   const addressed = (message: AT.Message): boolean => (message as { to?: unknown }).to === L.TARGET_OFFSCREEN;
 
   /** The host answers with the same payload the background would have got
    *  back over the message boundary, so one dispatcher serves both. */
-  const handle = async (message: AT.Message): Promise<AT.localhost.HostReply | Record<string, never>> => {
+  const handle = async (message: AT.Message): Promise<AT.local.HostReply | Record<string, never>> => {
     if (!addressed(message)) return {};
-    const modelId = typeof (message as { modelId?: unknown }).modelId === 'string' ? String((message as { modelId?: unknown }).modelId) : '';
-    // Status, unload and query name no model: they belong to whichever host
-    // answered last, or the offscreen document reports an ONNX run through the
-    // GGUF module's untouched state.
-    const kind = modelId ? await L.kindForHost(modelId) : L.lastKind();
-    const host = kind === 'onnx' && typeof AT.onnxhost !== 'undefined' ? AT.onnxhost : AT.localhost;
-    return host.handle(message);
+    return AT.onnxhost.handle(message);
   };
 
   AT.onMessage({

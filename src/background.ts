@@ -96,7 +96,6 @@ if (typeof self.importScripts === 'function') {
     'vendor/browser-polyfill.js',
     'lib/constants.js',
     'lib/browser.js',
-    'lib/gemma.js',
     'lib/plamo3.js',
     'lib/pagecontext.js',
     'lib/targets.js',
@@ -109,7 +108,6 @@ if (typeof self.importScripts === 'function') {
     'lib/ui.js',
     'lib/settings.js',
     'lib/engines.js',
-    'lib/localhost.js',
     'lib/onnxhost.js'
   );
 }
@@ -585,9 +583,9 @@ if (typeof self.importScripts === 'function') {
 
   // Chrome's service worker cannot hold WebAssembly plus WebGPU, so the model
   // runs in an offscreen document there. A Firefox background page is a
-  // document already, so the same host module (lib/localhost.js) runs in place.
-  // Everything below reaches the host through `AT.local.callHost` and never
-  // branches on the browser.
+  // document already, so the host module runs in place. Everything below
+  // reaches the host through `AT.local.callHost` and never branches on the
+  // browser.
   const HOST_PLACEMENT: AT.local.HostPlacement = AT.supportsOffscreen() ? 'offscreen' : 'background';
   AT.local.setHostPlacement(HOST_PLACEMENT);
 
@@ -610,7 +608,7 @@ if (typeof self.importScripts === 'function') {
   /** The host module is loaded here already (manifest scripts); in this
    *  placement it only needs somewhere to report what the UI reads. */
   async function installInlineHost(): Promise<void> {
-    AT.localhost.install('background', (status) => {
+    AT.onnxhost.install('background', (status) => {
       hostStatus = AT.local.normalizeStatus(status);
     });
   }

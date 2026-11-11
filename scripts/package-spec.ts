@@ -12,21 +12,6 @@ export const GECKO_ID = 'autotranslate@hanana-kick';
 export const GECKO_MIN_VERSION = '121.0';
 
 /**
- * The MediaPipe runtime (the default on-device host on origin/main) plus the
- * llama.cpp runtime, both copied out of their installed packages by the build.
- * `local.ts` resolves the paths relative to the extension root.
- */
-export const RUNTIME_ENTRIES = [
-  'vendor/mediapipe/genai_bundle.js',
-  'vendor/mediapipe/wasm/genai_wasm_internal.js',
-  'vendor/mediapipe/wasm/genai_wasm_internal.wasm',
-  'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.js',
-  'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.wasm',
-  'vendor/wllama/index.js',
-  'vendor/wllama/wllama.wasm'
-];
-
-/**
  * The Transformers.js/ONNX Runtime Web runtime for the ONNX model export,
  * pre-converted to classic scripts (no bundler, `module: none`) by
  * `scripts/onnx-vendor.ts` from the installed devDependencies. The wasm files
@@ -63,7 +48,6 @@ export const ENTRIES = [
   'vendor/browser-polyfill.js',
   'lib/constants.js',
   'lib/browser.js',
-  'lib/gemma.js',
   'lib/plamo3.js',
   'lib/pagecontext.js',
   'lib/targets.js',
@@ -76,19 +60,16 @@ export const ENTRIES = [
   'lib/modelstore.js',
   'lib/modelflow.js',
   'lib/ui.js',
-  'lib/localhost.js',
   'lib/onnxhost.js',
   ...ONNX_RUNTIME_ENTRIES,
   'offscreen.html',
   'offscreen.js',
-  'inference-worker.js',
   'icons/icon-16.png',
   'icons/icon-32.png',
   'icons/icon-48.png',
   'icons/icon-128.png',
   '_locales/en/messages.json',
-  '_locales/ko/messages.json',
-  ...RUNTIME_ENTRIES
+  '_locales/ko/messages.json'
 ];
 
 /** Where a bundle that carries its own weights keeps them, and the manifest

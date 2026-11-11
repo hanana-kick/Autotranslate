@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [fix/review-hardening-20261031]
-    paths: ['src/**', 'test/native-extension/**', 'test/firefox-native/**', 'test/dynamic-extension/**', '.github/actions/released-chromium/**', '.github/workflows/extended-qa.yml']
+    paths: ['src/**', 'test/native-extension/**', 'test/firefox-native/**', '.github/actions/released-chromium/**', '.github/workflows/extended-qa.yml']
 permissions:
   contents: read
 concurrency:
@@ -11,11 +11,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   native:
-    name: Actual extension / ${{ matrix.target }}
+    name: Actual extension / firefox
     strategy:
       fail-fast: false
-      matrix:
-        target: [firefox, youtube]
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
@@ -28,10 +26,7 @@ jobs:
       - run: npm ci --no-audit --no-fund && npm run build
       - run: npm install --no-save --package-lock=false --ignore-scripts playwright@1.64.1
       - run: npx playwright install --with-deps chromium firefox
-      - uses: ./.github/actions/released-chromium
-        if: matrix.target == 'youtube'
       - name: Official Firefox and pinned Mozilla WebDriver
-        if: matrix.target == 'firefox'
         run: |
           set -euo pipefail
           binary='/Applications/Firefox.app/Contents/MacOS/firefox'
@@ -51,17 +46,11 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HEADED: '1'
           GECKODRIVER: ${{ runner.temp }}/geckodriver
-          TARGET: ${{ matrix.target }}
-          YOUTUBE_QA: ${{ matrix.target == 'youtube' && '1' || '0' }}
         run: |
           set -euo pipefail
-          mkdir -p test-results/native-extension test-results/firefox-webdriver
-          if [ "$TARGET" = firefox ]; then
-            node --check test/firefox-native/released.mjs
-            node test/firefox-native/released.mjs 2>&1 | tee test-results/firefox-webdriver/execution.log
-          else
-            node test/dynamic-extension/run-dynamic.mjs 2>&1 | tee test-results/native-extension/execution.log
-          fi
+          mkdir -p test-results/firefox-webdriver
+          node --check test/firefox-native/released.mjs
+          node test/firefox-native/released.mjs 2>&1 | tee test-results/firefox-webdriver/execution.log
       - name: Verify unchanged production bundle and safe evidence
         id: evidence
         if: always()
@@ -72,13 +61,12 @@ jobs:
           node --input-type=module <<'JS'
           import fs from 'node:fs';import path from 'node:path';
           function check(dir){if(!fs.existsSync(dir))return;for(const entry of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,entry.name);if(entry.isDirectory())check(file);else if(/\.(json|log|html|txt)$/.test(file)){const s=fs.readFileSync(file,'utf8');if((process.env.HF_TOKEN&&s.includes(process.env.HF_TOKEN))||/hf_[A-Za-z0-9]{20,}/.test(s)){fs.rmSync(file);throw Error('credential-bearing evidence refused');}}}}
-          check('test-results/native-extension');check('test-results/firefox-webdriver');
+          check('test-results/firefox-webdriver');
           JS
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() && steps.evidence.outcome == 'success' }}
         with:
-          name: native-${{ matrix.target }}-${{ github.run_id }}
+          name: native-firefox-${{ github.run_id }}
           path: |
-            test-results/native-extension/
             test-results/firefox-webdriver/
           retention-days: 7

@@ -1,6 +1,6 @@
 # OpenAI-compatible server (0.1.6)
 
-The extension can use either its existing on-device TranslateGemma model or an
+The extension can use either its existing on-device PLaMo 3 Translate model or an
 explicitly configured **OpenAI-compatible Chat Completions server**. These are
 independent paths. Selecting a server does not download or initialize a local
 model, use the on-device tokenizer, or require WebGPU.

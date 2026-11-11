@@ -280,13 +280,14 @@ test('the offscreen placement reports its status through the abstraction', async
   const AT = load(
     'lib/constants.js',
     'lib/browser.js',
+    'lib/plamo3.js',
     'lib/local.js',
     'lib/modelstore.js',
-    'lib/localhost.js',
+    'lib/onnxhost.js',
     'offscreen.js'
   );
 
-  const status = await AT.localhost.status();
+  const status = await AT.onnxhost.status();
   assert.equal(status.target, 'offscreen', 'the host knows it is the Chrome placement');
   const pushes = sent.filter((entry) => entry.type === AT.C.MSG.LOCAL_STATUS);
   assert.ok(pushes.length >= 1, 'a status change leaves the document');

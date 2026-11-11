@@ -17,7 +17,7 @@ import { execFileSync } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { createReadStream } from 'node:fs';
-import { mkdir, mkdtemp, cp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, cp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { chromium, launchOptions, ROOT, OUTPUT } from '../browser/support.mjs';
@@ -50,13 +50,18 @@ const origin = `http://127.0.0.1:${site.address().port}`;
 await mkdir(OUTPUT, { recursive: true });
 const report = join(OUTPUT, 'onnx-q4f16-live.json');
 const console_ = [];
-process.on('uncaughtException', (error) => {
+/** Evidence first, then a non-zero exit: a run that fails must not hang here
+ *  holding a browser and two listeners open. */
+function abort(error) {
   summary.failure = String(error?.message ?? error);
   summary.consoleTail = console_.slice(-20);
-  void writeFile(report, JSON.stringify(summary, null, 2));
-});
+  void writeFile(report, JSON.stringify(summary, null, 2)).finally(() => process.exit(1));
+}
+process.on('uncaughtException', abort);
+process.on('unhandledRejection', abort);
 
-/** Serves a model directory over https with a throwaway certificate. */
+/** Serves a model directory over https with a throwaway certificate. The caller
+ *  closes it: an open listener keeps this process alive long after the run. */
 async function serveModelDirectory(dir, work) {
   const key = join(work, 'key.pem');
   const cert = join(work, 'cert.pem');
@@ -79,18 +84,29 @@ async function serveModelDirectory(dir, work) {
   await new Promise((done) => server.listen(0, '127.0.0.1', done));
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
-  return `https://127.0.0.1:${port}`;
+  return {
+    origin: `https://127.0.0.1:${port}`,
+    close: () => new Promise((done) => {
+      server.closeAllConnections?.();
+      server.close(() => done(undefined));
+    })
+  };
 }
 
 const temporary = await mkdtemp(join(tmpdir(), 'onnx-live-'));
 const profile = PROFILE_DIR || join(temporary, 'profile');
 await mkdir(profile, { recursive: true });
-const localOrigin = MODEL_DIR ? await serveModelDirectory(MODEL_DIR, temporary) : '';
+const modelServer = MODEL_DIR ? await serveModelDirectory(MODEL_DIR, temporary) : null;
+const localOrigin = modelServer?.origin ?? '';
 if (localOrigin) console.log('[model] serving', MODEL_DIR, 'at', localOrigin);
 
-const extension = join(temporary, 'extension');
+// An unpacked extension's id comes from its own path, and so does the origin the
+// model is stored under: a reused profile has to keep the extension where it
+// was, or every run looks like a fresh install with an empty store.
+const extension = PROFILE_DIR ? join(profile, 'extension') : join(temporary, 'extension');
+await rm(extension, { recursive: true, force: true });
 await cp(join(ROOT, 'build/chrome'), extension, { recursive: true });
-console.log('[build] extension copied');
+console.log('[build] extension copied', PROFILE_DIR ? '(stable path for reuse)' : '');
 
 const context = await chromium.launchPersistentContext(profile, {
   ...launchOptions,
@@ -200,6 +216,11 @@ console.log('[install]', reuse ? 'reused' : status.kind, status.text || reuse ||
 assert.ok(reuse || status.kind === 'ok', `install reported: ${status.text}`);
 
 // 2-4. A four-sequence page through the shipped per-tab switch.
+// The shipped default target follows the browser's UI language, which a driver
+// cannot depend on, so the page's target is chosen here: the page is English.
+const target = 'ko';
+await options.evaluate((code) => AT.settings.save({ targetLang: code, sourceLang: 'en' }), target);
+summary.target = target;
 const page = await context.newPage();
 await page.goto(origin + '/', { waitUntil: 'load' });
 const before = await page.evaluate(() => [...document.querySelectorAll('p')].map((p) => p.textContent));
@@ -232,7 +253,7 @@ summary.page = {
   host: host?.status ?? null
 };
 console.log('[page] finished', translated + '/' + before.length, 'after', summary.page.seconds + 's');
-assert.equal(translated, before.length, 'every paragraph must be translated');
+if (translated !== before.length) summary.page.failure = 'not every paragraph came back translated';
 
 await setTabEnabledUI(options, tabId, false);
 await page.waitForFunction((originals) => [...document.querySelectorAll('p')].every((p, index) => p.textContent === originals[index]), before, { timeout: 30000 });
@@ -266,13 +287,17 @@ if (process.env.YOUTUBE === '1') {
   assert.equal(summary.youtube.paused, true, 'playback stays stopped');
 }
 
-summary.misroutes = console_.filter((line) => line.includes('No model format matched')).length;
 summary.countWarnings = console_.filter((line) => line.includes('the host did not count tokens')).length;
+summary.emptySegments = console_.filter((line) => line.includes('empty translation segment')).length;
 summary.consoleTail = console_.slice(-20);
 await writeFile(report, JSON.stringify(summary, null, 2));
-console.log(JSON.stringify({ report, ...summary }, null, 2));
+// Everything the run opened is released before anything is asserted: a failed
+// run must not leave a window holding the profile, and an open listener must
+// not keep this process alive after a passing one.
 await context.close().catch(() => {});
 site.close();
-assert.equal(summary.misroutes, 0, 'the first load must not reach the GGUF host');
+await modelServer?.close();
+console.log(JSON.stringify({ report, target: summary.target, seconds: summary.page.seconds, translated: summary.page.translated, generations: summary.page.host.generations }, null, 2));
+assert.equal(summary.page.translated, summary.page.sequences, 'every paragraph must come back translated');
 assert.equal(summary.countWarnings, 0, 'the ONNX host must answer at/local-count');
 assert.deepEqual(summary.errors, [], 'no page errors');

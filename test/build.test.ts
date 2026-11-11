@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildZip, listZip, readZipEntry } from '../scripts/zip.ts';
 import { ROOT } from './helpers.ts';
-import { ENTRIES, GECKO_ID, GECKO_MIN_VERSION, RUNTIME_ENTRIES, TARGETS, archiveName, stripComments } from '../scripts/package-spec.ts';
+import { ENTRIES, GECKO_ID, GECKO_MIN_VERSION, ONNX_RUNTIME_ENTRIES, TARGETS, archiveName, stripComments } from '../scripts/package-spec.ts';
 
 const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
 const readJson = (path: string) => JSON.parse(readFileSync(join(ROOT, path), 'utf8'));
@@ -21,19 +21,7 @@ const walk = (dir: string, prefix = ''): string[] =>
 /** The one policy the extension pages may ship with: WebAssembly needs its own quoted source. */
 const CSP = "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'";
 
-const GENAI = join(ROOT, 'node_modules', '@mediapipe', 'tasks-genai');
-const WLLAMA = join(ROOT, 'node_modules', '@wllama', 'wllama', 'esm');
-
-/** The on-device runtime `scripts/build.ts` copies out of the installed package. */
-const VENDOR_FILES: { from: string; to: string }[] = [
-  { from: 'genai_bundle.mjs', to: 'vendor/mediapipe/genai_bundle.js' },
-  { from: 'wasm/genai_wasm_internal.js', to: 'vendor/mediapipe/wasm/genai_wasm_internal.js' },
-  { from: 'wasm/genai_wasm_internal.wasm', to: 'vendor/mediapipe/wasm/genai_wasm_internal.wasm' },
-  { from: 'wasm/genai_wasm_nosimd_internal.js', to: 'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.js' },
-  { from: 'wasm/genai_wasm_nosimd_internal.wasm', to: 'vendor/mediapipe/wasm/genai_wasm_nosimd_internal.wasm' },
-  { from: 'index.js', to: 'vendor/wllama/index.js' },
-  { from: 'wasm/wllama.wasm', to: 'vendor/wllama/wllama.wasm' }
-];
+const ONNX_VENDOR = join(ROOT, 'vendor-src', 'onnxruntime');
 
 
 function build(args: string[]) {
@@ -170,15 +158,17 @@ test('the source manifest is wired for the on-device host', () => {
     scripts.includes('lib/modelstore.js'),
     'a Firefox background page is the host, so it opens the model store itself'
   );
-  assert.ok(scripts.includes('lib/localhost.js'), 'the host module is part of the background script set');
+  assert.ok(scripts.includes('lib/onnxhost.js'), 'the host module is part of the background script set');
   assert.ok(
-    scripts.indexOf('lib/localhost.js') < scripts.indexOf('background.js'),
+    scripts.indexOf('lib/onnxhost.js') < scripts.indexOf('background.js'),
     'the background installs the host, so the module has to exist first'
   );
   assert.ok(
-    scripts.indexOf('lib/modelstore.js') < scripts.indexOf('lib/localhost.js'),
+    scripts.indexOf('lib/modelstore.js') < scripts.indexOf('lib/onnxhost.js'),
     'the host reads the model store, so it has to load after it'
   );
+  assert.equal(scripts.includes('lib/localhost.js'), false, 'the retired GGUF host is gone');
+  assert.equal(scripts.includes('lib/gemma.js'), false, 'the retired chat-template module is gone');
 
   // The host is opened by URL, so nothing in the manifest points at it: only
   // the validator knows to look for the pair.
@@ -186,30 +176,36 @@ test('the source manifest is wired for the on-device host', () => {
   assert.ok(existsSync(join(ROOT, 'src', 'offscreen.ts')), 'offscreen.ts is reachable but unlisted');
 });
 
-test('both bundles ship the on-device runtime byte for byte from the installed package', () => {
+test('both bundles ship the ONNX runtime byte for byte from the converted vendor tree', () => {
   // The runtime is part of every bundle: whether a context can execute it is a
   // runtime question (an offscreen document on Chrome, the background page on
   // Firefox, WebGPU either way), decided by the support probe, not by the zip.
   assert.equal(build([]).status, 0);
-  assert.deepEqual(
-    VENDOR_FILES.map((file) => file.to),
-    RUNTIME_ENTRIES,
-    'the runtime the build copies and the runtime the contract names must be one list'
-  );
 
   for (const target of TARGETS) {
     const archive = listZip(readFileSync(join(ROOT, 'dist', archiveName(pkg, target)))).map((entry) => entry.name);
-    for (const entry of VENDOR_FILES) {
-      const shipped = join(ROOT, 'build', target, entry.to);
-      const pkg = entry.to.startsWith('vendor/mediapipe/') ? GENAI : WLLAMA;
-      assert.ok(existsSync(shipped), `${target}/${entry.to} was not copied out of its package`);
-      assert.deepEqual(
-        readFileSync(shipped),
-        readFileSync(join(pkg, entry.from)),
-        `${target}/${entry.to} is not the bytes that were installed`
-      );
-      assert.ok(archive.includes(entry.to), `${target}: ${entry.to} is missing from the zip`);
+    for (const entry of ONNX_RUNTIME_ENTRIES) {
+      const shipped = join(ROOT, 'build', target, entry);
+      const source = join(ONNX_VENDOR, entry.slice('vendor/onnxruntime/'.length));
+      assert.ok(existsSync(shipped), `${target}/${entry} was not copied out of the vendor tree`);
+      assert.deepEqual(readFileSync(shipped), readFileSync(source), `${target}/${entry} is not the converted bytes`);
+      assert.ok(archive.includes(entry), `${target}: ${entry} is missing from the zip`);
     }
+  }
+});
+
+test('the retired runtimes are gone from both bundles', () => {
+  assert.equal(build([]).status, 0);
+  for (const target of TARGETS) {
+    const archive = listZip(readFileSync(join(ROOT, 'dist', archiveName(pkg, target)))).map((entry) => entry.name);
+    for (const gone of ['lib/localhost.js', 'lib/gemma.js', 'inference-worker.js']) {
+      assert.equal(archive.includes(gone), false, `${target}: ${gone} still ships`);
+    }
+    assert.equal(
+      archive.some((name) => name.startsWith('vendor/mediapipe/') || name.startsWith('vendor/wllama/')),
+      false,
+      `${target}: a retired runtime still ships`
+    );
   }
 });
 
@@ -284,24 +280,24 @@ test('the packaging gate ties the offscreen permission to the target', () => {
   assert.match(mute.output, /the offscreen permission must be present for chrome and absent for firefox/);
 });
 
-test('the packaging gate refuses a bundle that lost the on-device runtime', () => {
+test('the packaging gate refuses a bundle that lost the ONNX runtime', () => {
   for (const target of TARGETS) {
     assert.equal(build([`--target=${target}`]).status, 0);
     const entries = walk(join('build', target))
-      .filter((name) => !name.startsWith('vendor/mediapipe/') && !name.startsWith('vendor/wllama/'))
+      .filter((name) => !name.startsWith('vendor/onnxruntime/'))
       .map((name) => ({ name, data: readFileSync(join(ROOT, 'build', target, name)) }));
     writeFileSync(join(ROOT, 'dist', archiveName(pkg, target)), buildZip(entries));
     const result = verify([target]);
     assert.equal(result.status, 1, `${target}: a bundle without the runtime must be refused`);
-    for (const file of VENDOR_FILES) {
-      assert.match(result.output, new RegExp(`the archive is missing ${file.to.replace(/[/.]/g, '\\$&')}`));
+    for (const file of ONNX_RUNTIME_ENTRIES) {
+      assert.match(result.output, new RegExp(`the archive is missing ${file.replace(/[/.]/g, '\\$&')}`));
     }
   }
 });
 
-test('the validator refuses a tree without the on-device runtime', () => {
-  // A scratch checkout whose node_modules lacks @mediapipe: the gate has to
-  // name the missing dependency instead of emitting an offline-incapable zip.
+test('the validator refuses a tree without the vendor tree', () => {
+  // A scratch checkout with no converted runtime: the gate has to name what is
+  // missing instead of emitting an offline-incapable zip.
   const dir = mkdtempSync(join(tmpdir(), 'autotranslate-vendor-'));
   try {
     for (const name of ['package.json', 'tsconfig.json', 'tsconfig.tools.json', 'src', 'scripts']) {
@@ -320,16 +316,26 @@ test('the validator refuses a tree without the on-device runtime', () => {
     const armed = run(['--check']);
     assert.equal(armed.status, 0, `the scratch tree itself must validate: ${armed.output}`);
 
-    rmSync(join(dir, 'node_modules', '@mediapipe'), { recursive: true, force: true });
+    // The converted tree is symlinked from the real checkout, so take the
+    // contract's first entry away and let the gate notice.
+    const first = ONNX_RUNTIME_ENTRIES[0]!;
+    const relative = first.slice('vendor/onnxruntime/'.length);
+    const scratch = join(dir, 'vendor-src');
+    rmSync(scratch);
+    cpSync(join(ROOT, 'vendor-src'), scratch, { recursive: true });
+    rmSync(join(scratch, 'onnxruntime', relative));
     const missing = run(['--check']);
     assert.equal(missing.status, 1);
-    assert.match(missing.output, /vendor: @mediapipe\/tasks-genai is not installed \(run npm install\)/);
-    assert.match(missing.output, /vendor: genai_bundle\.mjs is missing from .*@mediapipe\/tasks-genai/);
+    assert.match(
+      missing.output,
+      new RegExp(`vendor: ${first.replace(/[/.]/g, '\\$&')} is missing from vendor-src/onnxruntime`)
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
-    // The scratch tree only ever holds symlinks; the installed package the
-    // other tests measure against has to survive the unlink untouched.
-    assert.ok(existsSync(join(GENAI, 'genai_bundle.mjs')), 'the scratch test must not touch the real install');
+    assert.ok(
+      existsSync(join(ONNX_VENDOR, ONNX_RUNTIME_ENTRIES[0]!.slice('vendor/onnxruntime/'.length))),
+      'the scratch test must not touch the real vendor tree'
+    );
   }
 });
 

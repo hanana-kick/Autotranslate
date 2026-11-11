@@ -9,7 +9,6 @@ namespace AT.modelflow {
 
   export type Install = {
     url?: string;
-    token?: string;
     signal?: AbortSignal;
     onProgress?: Progress;
   };
@@ -164,7 +163,6 @@ namespace AT.modelflow {
           })
         : await AT.modelstore.download({
             url,
-            token: install.token ?? '',
             expectedSize: expected,
             signal: install.signal,
             onProgress: install.onProgress

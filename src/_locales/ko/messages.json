@@ -75,12 +75,6 @@
   "options_modelUrl": {
     "message": "모델 URL"
   },
-  "options_modelToken": {
-    "message": "Hugging Face 토큰 (선택)"
-  },
-  "options_modelTokenHint": {
-    "message": "TranslateGemma는 접근 제한 저장소에 있습니다. huggingface.co에 로그인해 약관에 동의하고 읽기 토큰을 붙여넣거나, .task 파일을 직접 내려받아 아래 파일 선택기로 지정하세요."
-  },
   "options_download": {
     "message": "모델 다운로드"
   },
@@ -146,9 +140,6 @@
   },
   "options_cancelled": {
     "message": "다운로드를 취소했습니다"
-  },
-  "options_needsToken": {
-    "message": "서버가 요청을 거부했습니다. 접근 제한 저장소는 유효한 토큰이 필요합니다."
   },
   "options_downloadFailed": {
     "message": "다운로드 실패"
@@ -230,7 +221,7 @@
   "tab_enabledHint": { "message": "이 탭만 번역합니다. 새로 삽입되는 내용도 처리합니다." },
   "tab_disabledHint": { "message": "이 탭에서는 번역하지 않습니다. 다른 탭의 선택은 바뀌지 않습니다." },
   "server_engine": {"message":"번역 엔진"},
-  "server_local": {"message":"기기 내 TranslateGemma"},
+  "server_local": {"message":"기기 내 PLaMo 3"},
   "server_openai": {"message":"OpenAI 호환 서버"},
   "server_privacy": {"message":"명시적으로 켠 탭의 텍스트만 이 서버로 전송합니다. API 키는 이 브라우저에 저장하며 페이지 스크립트에 전달하지 않습니다. HTTP는 암호화되지 않으므로 신뢰할 수 있는 네트워크 외에서는 HTTPS를 사용하십시오."},
   "server_baseUrl": {"message":"서버 Base URL"},

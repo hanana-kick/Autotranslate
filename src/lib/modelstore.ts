@@ -278,26 +278,12 @@ namespace AT.modelstore {
 
   // ------------------------------------------------------------------ records
 
-  // The engine's `callHost` picks the host module by the installed model's
-  // kind without awaiting, so the store hands it a synchronous view of the
-  // records it holds; `list()` and `get()` refresh that view.
-  let known: ModelRecord[] = [];
-  L.bindRecordLookup((modelId: string) => known.find((record) => record.id === modelId) ?? null);
-
   export async function list(): Promise<ModelRecord[]> {
-    const raw = await driver().all(S.metaStore);
-    known = L.normalizeModels(raw);
-    return known;
+    return L.normalizeModels(await driver().all(S.metaStore));
   }
 
   export async function get(id: string): Promise<ModelRecord | null> {
-    const record = L.normalizeModel(await driver().get(S.metaStore, id));
-    if (record) {
-      const existing = known.findIndex((entry) => entry.id === record.id);
-      if (existing >= 0) known[existing] = record;
-      else known.push(record);
-    }
-    return record;
+    return L.normalizeModel(await driver().get(S.metaStore, id));
   }
 
   export async function find(nameOrId: string): Promise<ModelRecord | null> {
@@ -414,47 +400,6 @@ namespace AT.modelstore {
    * Streams a model into storage. Only a complete file is registered, so an
    * aborted or failed transfer never leaves a half model behind.
    */
-  /** Rewrites `tokenizer.ggml.model` from `plamo3` to `plamo2` in place: the
-   *  runtime registers no `plamo2`... it registers `plamo2` and not `plamo3`, so a
-   *  PLaMo GGUF needs the tag the loader knows. Same length, no copy. */
-  function tokenizerPatch(source: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
-    let buffer = new Uint8Array(0);
-    let patched = false;
-    const reader = source.getReader();
-    return new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          if (buffer.length) controller.enqueue(buffer);
-          controller.close();
-          return;
-        }
-        const value = chunk.value as Uint8Array;
-        if (!patched && buffer.length + value.byteLength >= 4096) {
-          const head = new Uint8Array(buffer.length + value.byteLength);
-          head.set(buffer, 0);
-          head.set(value, buffer.length);
-          const { bytes, patched: did } = AT.plamo3.patchTokenizerTag(head);
-          patched = did;
-          controller.enqueue(bytes);
-          buffer = new Uint8Array(0);
-          return;
-        }
-        const merged = new Uint8Array(buffer.length + value.byteLength);
-        merged.set(buffer, 0);
-        merged.set(value, buffer.length);
-        buffer = merged;
-        if (buffer.length >= 4096) {
-          controller.enqueue(buffer);
-          buffer = new Uint8Array(0);
-        }
-      },
-      cancel(reason: unknown) {
-        return reader.cancel(reason);
-      }
-    });
-  }
-
   export async function ingest(request: IngestRequest): Promise<IngestResult> {
     const url = L.normalizeDownloadUrl(request.sourceUrl) ?? '';
     const name = typeof request.name === 'string' ? request.name.trim().slice(0, 120) : '';
@@ -462,11 +407,7 @@ namespace AT.modelstore {
     if (!name) return { ok: false, record: null, error: 'no-name', bytes: 0 };
 
     const id = L.makeModelId(name, url, deps.now());
-    // The tokenizer rewrite is the one thing that may change the bytes on their
-    // way to storage, and it happens only to the file that needs it.
-    const stream = L.isPlamo3File({ name, sourceUrl: url })
-      ? tokenizerPatch(request.stream)
-      : request.stream;
+    const stream = request.stream;
     let bytes = 0;
     try {
       bytes = await files().write(id, stream);
@@ -666,7 +607,6 @@ namespace AT.modelstore {
   export type DownloadRequest = {
     url: string;
     name?: string | undefined;
-    token?: string | undefined;
     expectedSize?: number | undefined;
     signal?: AbortSignal | undefined;
     onProgress?: ((received: number, total: number | null) => void) | undefined;
@@ -680,13 +620,6 @@ namespace AT.modelstore {
     if (typeof doFetch !== 'function') return { ok: false, record: null, error: 'no-fetch', bytes: 0 };
 
     const headers: Record<string, string> = { Accept: 'application/octet-stream' };
-    const token = typeof request.token === 'string' ? request.token.trim() : '';
-    // The token is the user's Hugging Face credential: it rides on requests to
-    // that host only, never on whatever URL happens to be in the field.
-    const host = new URL(url).hostname.toLowerCase();
-    const trusted = host === 'huggingface.co' || host.endsWith('.huggingface.co');
-    if (token && trusted) headers.Authorization = token.startsWith('Bearer ') ? token : `Bearer ${token}`;
-
     let response: StreamResponse;
     try {
       response = await doFetch(url, { headers, signal: request.signal ?? null });
@@ -804,20 +737,5 @@ namespace AT.modelstore {
 
   export async function requestPersistence(): Promise<boolean> {
     return files().persist();
-  }
-
-  // -------------------------------------------------------------------- token
-
-  /** The Hugging Face token is stored apart from the settings blob so it never
-   *  travels with a settings snapshot. */
-  export async function getToken(): Promise<string> {
-    const blob = await driver().get(S.blobStore, S.settingsKey);
-    const value = blob as { hfToken?: unknown } | undefined;
-    return typeof value?.hfToken === 'string' ? value.hfToken : '';
-  }
-
-  export async function setToken(token: string): Promise<void> {
-    const value = typeof token === 'string' ? token.trim().slice(0, 512) : '';
-    await driver().put(S.blobStore, S.settingsKey, { hfToken: value });
   }
 }

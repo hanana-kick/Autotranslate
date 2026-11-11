@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SRC, load, resetGlobals, deferred, ggufHead, type ATNamespace } from './helpers.ts';
+import { SRC, load, resetGlobals, deferred, modelHead, type ATNamespace } from './helpers.ts';
 
 // The options page is a plain script page: constants + browser + rules +
 // local + modelstore + modelflow + settings first (the order options.html
@@ -192,7 +192,6 @@ const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['serverTimeoutMs', 'input'],
   ['serverSection', 'div'],
   ['localSection', 'div'],
-  ['modelToken', 'input'],
   ['serverStatus', 'p'],
   ['loadServerModels', 'button'],
   ['testEngine', 'button', 'options_test'],
@@ -360,7 +359,7 @@ function fakeModelstore(AT: ATNamespace, fixtures: ModelFixtures, onBytes: (writ
   // and rewrites, so the head is real. Everything after it is only ever
   // measured, and nobody allocates a gigabyte to watch a progress bar move.
   const parts = new Map<string, number>();
-  const head = ggufHead();
+  const head = modelHead();
   const bytes = fixtures.bytes ?? MODEL_BYTES;
   const chunks = fixtures.chunks ?? [Math.max(0, bytes - head.length)];
   const total = head.length + chunks.reduce((sum, size) => sum + size, 0);
@@ -1281,7 +1280,7 @@ test('downloading the ONNX card fetches the graph and its parts, then registers 
   assert.deepEqual(
     env.progress.map((tick) => [tick.value, tick.max, tick.hidden]),
     [
-      [ggufHead().length, bytes, false],
+      [modelHead().length, bytes, false],
       [bytes, bytes, false]
     ],
     'the first chunk arrives and the body fills the bar'

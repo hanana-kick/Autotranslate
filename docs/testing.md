@@ -11,9 +11,9 @@ npm run ci
 
 This type-checks extension/tooling, validates assets and API boundaries, runs compiled production-module and host-monitor regressions, builds both packages and checks ZIP contents. The shared CI action also rebuilds and compares archive checksums.
 
-Storage tests use native `Response` and `ReadableStream`. Host tests deliberately use a deterministic MediaPipe API double. They establish platform contracts and lifecycle behavior, not original-model inference or performance.
+Storage tests use native `Response` and `ReadableStream`. Host tests deliberately use a deterministic tokenizer and pipeline double. They establish platform contracts and lifecycle behavior, not original-model inference or performance.
 
-Regression invariants cover Fetch/OPFS/IndexedDB failure cleanup; activation before retirement; epoch and source ownership; current-source restoration; strict inline alignment; partial completion; context-budget changes; invalid generated output; worker termination and bounded recovery; bounded caches and detached-node cleanup; tab discovery after background restart; standard Promise/raw Chrome callback messaging; and bounded Firefox preparation channels. A passing message-contract test does not establish Firefox native compatibility.
+Regression invariants cover Fetch/OPFS/IndexedDB failure cleanup; activation before retirement; epoch and source ownership; current-source restoration; strict inline alignment; partial completion; context-budget changes; invalid generated output; bounded caches and detached-node cleanup; tab discovery after background restart; standard Promise/raw Chrome callback messaging; and bounded Firefox preparation channels. A passing message-contract test does not establish Firefox native compatibility.
 
 ## Actual browser / deterministic inference layer
 
@@ -35,11 +35,16 @@ For an existing Chromium executable, use `CHROMIUM_EXECUTABLE=/path/to/chromium 
 
 ## Original-model installed-extension layer
 
-`test/dynamic-extension/run-dynamic.mjs` extends the native installation/onboarding driver with dynamic DOM and multitab scenarios. It does not replace the application's inference engine, model, capability detection or extension messaging. The real SDK/model and installed-file/package hashes are checked. On macOS the released Chrome for Testing distribution is pinned and verified by the repository action; Firefox uses its official distribution and Mozilla WebDriver separately.
+`npm run test:onnx` (`test/onnx-live/run-onnx.mjs`) installs the built extension, loads the
+published q4f16 graph through the shipped download route and translates a real page in a real
+Chromium with WebGPU. It replaces nothing: the service worker, the offscreen document, the host,
+the messaging and the DOM layer are the production ones, and only the graph's origin is redirected
+when `MODEL_DIR` supplies it from disk. See [actual installed-extension
+verification](native-extension-testing.md) for the boundaries and the flags.
 
-The reusable `native-extension.yml` requires five fresh hardware profiles. Static cases, dynamic changes, in-flight edits, restoration and bounded multitab endurance must all pass. One profile performs 25 repeated update rounds; the others perform five. A canceled/blocked/failed run cannot be counted as a pass.
-
-Public YouTube QA is separate from the deterministic YouTube-like fixture. It must preserve external sign-in/bot restrictions instead of logging in, bypassing controls or substituting pages. Public-site observations and third-party warnings are not generalized to all YouTube sessions.
+Public YouTube QA is separate from the deterministic YouTube-like fixture. It must preserve
+external sign-in/bot restrictions instead of logging in, bypassing controls or substituting pages.
+Public-site observations and third-party warnings are not generalized to all YouTube sessions.
 
 **Firefox native preparation remains a known failure, not merely an untested package.** Its official-runtime evidence and acceptance criteria are in [issue #2](https://github.com/hanana-kick/Autotranslate/issues/2). The separate native Firefox workflow is a release prerequisite. See [the T01–T16 ledger](review-qa-status.md) for the current distinctions.
 

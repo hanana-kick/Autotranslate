@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { load, ggufHead, GGUF_PROBE_BYTES } from './helpers.ts';
+import { load } from './helpers.ts';
 
 const AT = load('lib/constants.js', 'lib/local.js', 'lib/plamo3.js', 'lib/modelstore.js');
 const { modelstore, local } = AT;
@@ -280,103 +280,6 @@ test('a failed re-download leaves the working model alone', async () => {
   assert.equal(active.stored.has(kept.record.id), true, 'a half file must not replace working bytes');
 });
 
-// --- the tokenizer tag ------------------------------------------------------
-// PLaMo's tokenizer tag is rewritten on the way *into* storage: the file has to
-// arrive in OPFS already carrying the tag the vendored runtime has a tokenizer
-// for, because the alternative is reading a 1.78 GB file out of storage on
-// every start. The gate is `AT.local.isPlamo3File`, so these three cases are
-// the whole contract: one byte changed in a file that reads as this model,
-// nothing changed in one that does not, and a file that is not a GGUF is
-// refused instead of stored under a name it does not deserve.
-
-/** Above the ingest floor and above the head the store holds back, so the patch
- *  is proven against a stream and not an array. */
-const MODEL_FILE_BYTES = local.MIN_MODEL_BYTES * 2;
-
-/** A model file in pieces, its first megabyte a real GGUF header. */
-function modelFile(model: string, architecture: string): Uint8Array[] {
-  const head = ggufHead(model, architecture);
-  const rest = MODEL_FILE_BYTES - head.length;
-  const quarter = Math.floor(rest / 4);
-  return [head, bytes(quarter), bytes(quarter), bytes(quarter), bytes(rest - quarter * 3)];
-}
-
-function joined(chunks: Uint8Array[]): Uint8Array {
-  const all = new Uint8Array(chunks.reduce((sum, one) => sum + one.byteLength, 0));
-  let at = 0;
-  for (const one of chunks) {
-    all.set(one, at);
-    at += one.byteLength;
-  }
-  return all;
-}
-
-/** The value of `tokenizer.ggml.model`: past the key, its u32 type tag and its
- *  8-byte length, which is where the walker said the string would begin. */
-function tokenizerTag(file: Uint8Array): string {
-  const key = Buffer.from('tokenizer.ggml.model', 'utf8');
-  const at = Buffer.from(file).indexOf(key);
-  assert.notEqual(at, -1, 'the header names its tokenizer');
-  const value = at + key.length + 4 + 8;
-  return Buffer.from(file.subarray(value, value + 6)).toString('utf8');
-}
-
-/** How often a tag appears in the part of the file that holds metadata. */
-const times = (file: Uint8Array, needle: string): number =>
-  Buffer.from(file.subarray(0, GGUF_PROBE_BYTES)).toString('latin1').split(needle).length - 1;
-
-const PLAMO_NAME = 'plamo-3-translate-0.8b-BF16.gguf';
-const PLAMO_URL = `https://a.test/${PLAMO_NAME}`;
-
-/** A file `isPlamo3File` cannot read as this model: neither its name nor its
- *  url carries the model's name, so its bytes go to storage untouched. */
-const OTHER_NAME = 'other-model-1.8b-q8_0.gguf';
-const OTHER_URL = `https://a.test/${OTHER_NAME}`;
-
-test('a PLaMo file is stored carrying the tokenizer tag the runtime can load', async () => {
-  const file = modelFile('plamo3', 'plamo3');
-  const result = await modelstore.ingest({ name: PLAMO_NAME, sourceUrl: PLAMO_URL, stream: streamOf(...file) });
-  assert.equal(result.ok, true, String(result.error));
-  const stored = active.stored.get(String(result.record!.id))!;
-  assert.equal(stored.byteLength, MODEL_FILE_BYTES, 'the two tags are the same length, so the file is too');
-  assert.equal(tokenizerTag(stored), 'plamo2', 'the tag with no tokenizer behind it is rewritten on the way in');
-  assert.equal(times(stored, 'plamo3'), 1, 'the architecture keeps its own name');
-  assert.equal(times(stored, 'plamo2'), 1, 'and nothing else takes the new tag');
-  const original = joined(file);
-  let differing = 0;
-  for (let at = 0; at < original.byteLength; at += 1) {
-    if (original[at] !== stored[at]) differing += 1;
-  }
-  assert.equal(differing, 1, 'one byte differs, and it is the tag');
-});
-
-test('a file that is not this model is stored byte for byte as it arrived', async () => {
-  const file = modelFile('gpt2', 'llama');
-  const result = await modelstore.ingest({
-    name: OTHER_NAME,
-    sourceUrl: OTHER_URL,
-    stream: streamOf(...file)
-  });
-  assert.equal(result.ok, true, String(result.error));
-  assert.deepEqual(
-    active.stored.get(String(result.record!.id)),
-    joined(file),
-    'no byte is touched for a file that never needed the rewrite'
-  );
-});
-
-test('a file that is not a GGUF is refused rather than stored under a PLaMo name', async () => {
-  const result = await modelstore.ingest({
-    name: PLAMO_NAME,
-    sourceUrl: PLAMO_URL,
-    stream: streamOf(bytes(MODEL_FILE_BYTES))
-  });
-  assert.equal(result.ok, false);
-  assert.match(String(result.error), /not a GGUF file/);
-  assert.deepEqual(await modelstore.list(), [], 'nothing is registered');
-  assert.equal(active.stored.size, 0, 'and no bytes are left in the way');
-});
-
 // --- download ---------------------------------------------------------------
 
 test('a download is rejected before the network for a bad url', async () => {
@@ -391,14 +294,12 @@ test('a download is rejected before the network for a bad url', async () => {
 test('a download asks for bytes and carries no credential', async () => {
   // The model is published without a login: what leaves is the url the user
   // chose and an Accept header, so nothing can identify anybody.
+  const size = local.MIN_MODEL_BYTES * 2;
   const seen: { url: string; init: { headers: Record<string, string> } }[] = [];
   active.use({
     fetchImpl: async (url: string, init: { headers: Record<string, string> }) => {
       seen.push({ url, init });
-      // The card's own artifact: a PLaMo header, so the rewrite runs on the
-      // way into storage and the transfer has to be a real GGUF.
-      const served = { 'content-length': String(MODEL_FILE_BYTES) };
-      return response(200, bodyOf(...modelFile('plamo3', 'plamo3')), served);
+      return response(200, bodyOf(bytes(size)), { 'content-length': String(size) });
     }
   });
   const result = await modelstore.download({

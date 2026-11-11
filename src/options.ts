@@ -31,7 +31,6 @@ namespace AT.options {
     localUsage: HTMLParagraphElement;
     modelList: HTMLUListElement;
     modelUrl: HTMLInputElement;
-    modelToken: HTMLInputElement;
     downloadModel: HTMLButtonElement;
     cancelDownload: HTMLButtonElement;
     modelFile: HTMLInputElement;
@@ -321,19 +320,17 @@ namespace AT.options {
     el('modelProgress').hidden = true;
     setBusy(false);
     if (!outcome.ok) {
-      const detail = outcome.error === 'needs-token' ? '' : `: ${outcome.error ?? 'unknown'}`;
+      const detail = `: ${outcome.error ?? 'unknown'}`;
       // Two different things happened: the bytes are stored but the model does
       // not load, or nothing arrived at all. Saying "download failed" for the
-      // first one sends the user to re-download 3.9 GiB they already have.
+      // first one sends the user to re-download 706 MB they already have.
       setStatus(
         el('modelStatus'),
         outcome.error === 'cancelled'
           ? AT.i18n.msg('options_cancelled')
-          : outcome.error === 'needs-token'
-            ? AT.i18n.msg('options_needsToken')
-            : outcome.stored
-              ? AT.i18n.msg('options_modelStored', outcome.error ?? 'model-load-failed')
-              : AT.i18n.msg('options_downloadFailed') + detail,
+          : outcome.stored
+            ? AT.i18n.msg('options_modelStored', outcome.error ?? 'model-load-failed')
+            : AT.i18n.msg('options_downloadFailed') + detail,
         'error'
       );
       if (outcome.stored && outcome.modelId) {
@@ -369,19 +366,17 @@ namespace AT.options {
       setStatus(el('modelStatus'), AT.i18n.msg('options_badUrl'), 'error');
       return;
     }
-    // Claim the transfer before the first await: a second click during the
-    // token write used to start a second download of the same 3.9 GiB.
+    // Claim the transfer before the first await: a second click would start a
+    // second download of the same 706 MB.
     if (inflight) return;
-    const token = el('modelToken').value.trim();
     const expected = AT.local.MODEL_SOURCES.find((source) => source.url === url)?.size;
     const controller = new AbortController();
     inflight = controller;
     setBusy(true);
     showProgress(0, expected ?? null);
-    await AT.modelstore.setToken(token).catch((error: unknown) => setStatus(el('modelStatus'), reason(error), 'error'));
     try {
       await settle(
-        await AT.modelflow.installFromUrl({ url, token, signal: controller.signal, onProgress: showProgress })
+        await AT.modelflow.installFromUrl({ url, signal: controller.signal, onProgress: showProgress })
       );
     } finally {
       if (inflight === controller) inflight = null;
@@ -484,9 +479,6 @@ namespace AT.options {
     el('prepareModel').addEventListener('click', () => {
       void prepareLocal();
     });
-    el('modelToken').addEventListener('change', () => {
-      void AT.modelstore.setToken(el('modelToken').value.trim());
-    });
   }
 
   /**
@@ -510,7 +502,6 @@ namespace AT.options {
     buildSelects();
     settings = await AT.settings.load();
     el('modelUrl').value = AT.local.defaultSource().url;
-    if (settings.engine === 'local') el('modelToken').value = await AT.modelstore.getToken().catch(() => '');
     // Ask first, then report: the usage line is only meaningful once the
     // browser has answered whether it will keep the bytes.
     if (settings.engine === 'local') await AT.modelflow.keepStorage();

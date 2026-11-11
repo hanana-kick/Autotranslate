@@ -1,13 +1,13 @@
 # Review / QA work ledger — v0.1.3
 
-The scope is the actual installed extension, its locked `@mediapipe/tasks-genai@0.10.30` runtime and original `translategemma-4b-it-int8-web.task`. Unit doubles, planner identity responses, synthetic pages, live sites and actual model execution are separate evidence layers. This is not a certification of linguistic quality or every browser/GPU combination.
+The scope is the actual installed extension, its vendored `onnxruntime-web`/Transformers.js runtime and the published `plamo-3-translate-0.8b-onnx` graph. Unit doubles, planner identity responses, synthetic pages, live sites and actual model execution are separate evidence layers. This is not a certification of linguistic quality or every browser/GPU combination.
 
 **Integration is not release approval. Firefox original-model initialization remains a release blocker, tracked in [issue #2](https://github.com/hanana-kick/Autotranslate/issues/2).** The release workflow requires its native check in addition to Chrome, planner and deterministic regression checks. A failed or canceled job is not success.
 
 | ID | Implementation / current disposition | Verification and boundary |
 | --- | --- | --- |
 | T01 | Implemented: reject newly introduced control tokens, runaway repetition, excessive or empty output before cache/DOM commit | Production output-validity, DOM and native-host regressions. Literal controls present in source are not universally forbidden. |
-| T02 | Mitigated: isolated inference Worker, first-output/absolute deadlines and one bounded fresh-Worker recovery | Stalled generation, invalid output, repeated failure and cancellation regressions. Recovery is recorded; upstream intermittent native corruption is not claimed eliminated. |
+| T02 | Mitigated: one generation at a time in the offscreen document, an absolute generation deadline and status reported from there | Stalled generation, invalid output, repeated failure and cancellation regressions. |
 | T03 | Implemented: partial/incomplete status and error propagation | Failed work cannot become page-wide success; retries use current original text. |
 | T04 | Implemented: released-browser provenance, bounded CDP captures and an independent hydrated host-monitor page | Options reloads no longer invalidate an unrelated monitoring evaluation. Capture failure still fails QA; monitor regressions are included in npm test. |
 | T05 | Implemented: five independent fresh profiles with original-model static, dynamic and restoration scenarios | The native workflow requires every profile. Artifacts record exact source, installed-file hashes, package and recovery counts. Gate verdicts are recorded on PR #1; canceled runs are excluded. |

@@ -2,9 +2,6 @@ name: Real Firefox extension
 on:
   workflow_dispatch:
   workflow_call:
-    secrets:
-      HF_TOKEN:
-        required: true
   push:
     branches: [fix/review-hardening-20261031]
     paths: ['src/**', 'test/firefox-native/**', '.github/workflows/firefox-native.yml']

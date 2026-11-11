@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildZip, type ZipEntry } from './zip.ts';
-import { BUNDLED_DIR, GECKO_ID, GECKO_MIN_VERSION, ONNX_RUNTIME_ENTRIES, RUNTIME_ENTRIES, archiveName, stripComments } from './package-spec.ts';
+import { BUNDLED_DIR, GECKO_ID, GECKO_MIN_VERSION, ONNX_RUNTIME_ENTRIES, archiveName, stripComments } from './package-spec.ts';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SRC = join(ROOT, 'src');
@@ -22,26 +22,9 @@ const TSC = join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc');
 const POLYFILL = join(ROOT, 'node_modules', 'webextension-polyfill', 'dist', 'browser-polyfill.js');
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 /**
- * The on-device runtime is an installed devDependency, not a checked-in
- * artefact, exactly like the polyfill. `index.js` is the ESM bundle, shipped
- * with a `.js` name so the browser serves it as a script the classic offscreen
- * page can `import()`; the worker code is embedded in it, so the only file the
- * loader asks for by path is the wasm.
- */
-const WLLAMA = join(ROOT, 'node_modules', '@wllama', 'wllama', 'esm');
-const MEDIAPIPE = join(ROOT, 'node_modules', '@mediapipe', 'tasks-genai');
-const GENAI_WASM = ['genai_wasm_internal.js', 'genai_wasm_internal.wasm', 'genai_wasm_nosimd_internal.js', 'genai_wasm_nosimd_internal.wasm'];
-const VENDOR_FILES: { from: string; to: string }[] = [
-  { from: 'genai_bundle.mjs', to: 'vendor/mediapipe/genai_bundle.js' },
-  ...GENAI_WASM.map((file) => ({ from: `wasm/${file}`, to: `vendor/mediapipe/wasm/${file}` })),
-  { from: 'index.js', to: 'vendor/wllama/index.js' },
-  { from: 'wasm/wllama.wasm', to: 'vendor/wllama/wllama.wasm' }
-];
-/**
  * The ONNX runtime, pre-converted to classic scripts by `scripts/onnx-vendor.ts`
- * (run `npm run onnx:vendor`) into `vendor-src/onnxruntime/`, then copied here
- * like the wllama files. The conversion is checked in, so a build does not
- * rewrite it.
+ * (run `npm run onnx:vendor`) into `vendor-src/onnxruntime/`, then copied here.
+ * The conversion is checked in, so a build does not rewrite it.
  */
 const ONNX_VENDOR_DIR = join(ROOT, 'vendor-src', 'onnxruntime');
 // 'offscreen' hosts the on-device model; Firefox has no such API and the
@@ -311,29 +294,13 @@ function validate(): Check {
     existsSync(join(SRC, file)) ||
     existsSync(join(SRC, file.replace(/\.js$/, '.ts'))) ||
     existsSync(join(COMPILED, file)) ||
-    (file.startsWith('vendor/') && existsSync(POLYFILL)) ||
-    vendorTarget(file) !== undefined;
-
-  /** Maps a shipped vendor path back to the installed package file. */
-  function vendorTarget(file: string): string | undefined {
-    const entry = VENDOR_FILES.find((candidate) => candidate.to === file);
-    if (!entry) return undefined;
-    const base = entry.to.startsWith('vendor/mediapipe/') ? MEDIAPIPE : WLLAMA;
-    return existsSync(join(base, entry.from)) ? join(base, entry.from) : undefined;
-  }
-
+    (file.startsWith('vendor/') && existsSync(POLYFILL));
 
   check.fail(
     manifest.version === pkg.version,
     `manifest: version ${String(manifest.version)} must match package.json ${pkg.version}`
   );
   check.fail(existsSync(POLYFILL), 'vendor: webextension-polyfill is not installed (run npm install)');
-  check.fail(existsSync(join(WLLAMA, 'index.js')), 'vendor: @wllama/wllama is not installed (run npm install)');
-  check.fail(existsSync(join(MEDIAPIPE, 'genai_bundle.mjs')), 'vendor: @mediapipe/tasks-genai is not installed (run npm install)');
-  for (const entry of VENDOR_FILES) {
-    const base = entry.to.startsWith('vendor/mediapipe/') ? MEDIAPIPE : WLLAMA;
-    check.fail(existsSync(join(base, entry.from)), `vendor: ${entry.from} is missing from ${base}`);
-  }
   if (!existsSync(ONNX_VENDOR_DIR)) {
     // CI checkouts do not carry the generated runtime; build it from the
     // installed packages so the gate sees real files, never a missing dir.
@@ -344,12 +311,6 @@ function validate(): Check {
   for (const entry of ONNX_RUNTIME_ENTRIES) {
     check.fail(existsSync(join(ONNX_VENDOR_DIR, entry.slice('vendor/onnxruntime/'.length))), `vendor: ${entry} is missing from vendor-src/onnxruntime (run npm run onnx:vendor)`);
   }
-  // What the build copies and what the packaging gate demands are one list; a
-  // new wasm variant has to appear in both at once.
-  check.fail(
-    VENDOR_FILES.map((entry) => entry.to).join('\n') === RUNTIME_ENTRIES.join('\n'),
-    'vendor: the runtime the build copies drifted from the packaging contract'
-  );
   checkManifest(check, manifest, exists);
   for (const file of checkSourcePairing(check, manifest)) {
     check.fail(exists(file), `injection: content file is missing: ${file}`);
@@ -422,14 +383,6 @@ function build(target: string): string {
   const vendorDir = join(out, 'vendor');
   mkdirSync(vendorDir, { recursive: true });
   cpSync(POLYFILL, join(vendorDir, 'browser-polyfill.js'));
-  for (const entry of VENDOR_FILES) {
-    const base = entry.to.startsWith('vendor/mediapipe/') ? MEDIAPIPE : WLLAMA;
-    const source = join(base, entry.from);
-    if (!existsSync(source)) throw new Error(`${entry.from} is missing from ${base} (run npm install)`);
-    const shipped = join(out, entry.to);
-    mkdirSync(dirname(shipped), { recursive: true });
-    cpSync(source, shipped);
-  }
   for (const entry of ONNX_RUNTIME_ENTRIES) {
     const source = join(ONNX_VENDOR_DIR, entry.slice('vendor/onnxruntime/'.length));
     if (!existsSync(source)) throw new Error(`${entry} is missing from vendor-src/onnxruntime (run npm run onnx:vendor)`);

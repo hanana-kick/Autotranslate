@@ -75,12 +75,6 @@
   "options_modelUrl": {
     "message": "Model URL"
   },
-  "options_modelToken": {
-    "message": "Hugging Face token (optional)"
-  },
-  "options_modelTokenHint": {
-    "message": "TranslateGemma is published in a gated repository: sign in at huggingface.co, accept the terms and paste a read token, or download the .task file yourself and use the file picker."
-  },
   "options_download": {
     "message": "Download model"
   },
@@ -146,9 +140,6 @@
   },
   "options_cancelled": {
     "message": "Download cancelled"
-  },
-  "options_needsToken": {
-    "message": "The server refused the request: this repository is gated, so a valid token is required."
   },
   "options_downloadFailed": {
     "message": "Download failed"
@@ -230,7 +221,7 @@
   "tab_enabledHint": { "message": "Only this selected tab is translated, including newly inserted content." },
   "tab_disabledHint": { "message": "Translation is off in this tab. Other tabs keep their own selection." },
   "server_engine": {"message":"Translation engine"},
-  "server_local": {"message":"On-device TranslateGemma"},
+  "server_local": {"message":"On-device PLaMo 3"},
   "server_openai": {"message":"OpenAI-compatible server"},
   "server_privacy": {"message":"Only explicitly enabled tabs send text to this server. API keys are stored in this browser, not sent to page scripts. HTTP is unencrypted; use HTTPS outside trusted networks."},
   "server_baseUrl": {"message":"Base URL"},

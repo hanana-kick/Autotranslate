@@ -48,9 +48,9 @@ test.before(async () => {
   const original = await readFile(join(extension, 'offscreen.html'), 'utf8');
   assert.ok(!original.includes('qa-capabilities'), 'release build contains no test capabilities');
   await cp(join(ROOT, 'test/browser/fixtures/capabilities.js'), join(extension, 'qa-capabilities.js'));
-  const workerEntry = join(extension, 'inference-worker.js');
-  await writeFile(workerEntry, "importScripts('qa-capabilities.js');\n" + await readFile(workerEntry, 'utf8'));
-  await cp(join(ROOT, 'test/browser/fixtures/runtime.mjs'), join(extension, 'vendor/mediapipe/genai_bundle.js'));
+  // The graph and the weights are the only thing not real: the shipped host,
+  // the offscreen document and every message between them stay as built.
+  await cp(join(ROOT, 'test/browser/fixtures/onnx-runtime.mjs'), join(extension, 'vendor/onnxruntime/transformers.web.js'));
   await writeFile(join(extension, 'offscreen.html'), original.replace('<body>', '<body><script src="qa-capabilities.js"></script>'));
   server = createServer((request, response) => {
     response.setHeader('Content-Type', 'text/html; charset=utf-8');
@@ -119,13 +119,13 @@ check('native Fetch streams bytes into real OPFS and persists IndexedDB metadata
     await route.fulfill({ status: 200, headers: { 'content-type': 'application/octet-stream', 'content-length': String(bytes.length) }, body: bytes });
   });
   const result = await control.evaluate(async () => {
-    const saved = await AT.modelstore.download({ url: 'https://model-fixture.invalid/native.task', token: 'fixture-not-a-real-token' });
+    const saved = await AT.modelstore.download({ url: 'https://model-fixture.invalid/native.task' });
     if (!saved.ok) throw new Error(saved.error);
     const file = await AT.modelstore.read(saved.record.id);
     return { id: saved.record.id, size: file.size, first: new Uint8Array(await file.slice(0, 1).arrayBuffer())[0] };
   });
   assert.equal(result.size, bytes.length); assert.equal(result.first, 165);
-  assert.equal(authorization, undefined, 'HF tokens must not leave for other hosts');
+  assert.equal(authorization, undefined, 'a download carries no credential');
   await control.reload(); await control.waitForFunction(() => !!globalThis.AT?.modelstore);
   assert.equal(await control.evaluate((id) => AT.modelstore.get(id).then((record) => record?.size), result.id), bytes.length);
   await control.evaluate((id) => AT.modelstore.remove(id), result.id);
