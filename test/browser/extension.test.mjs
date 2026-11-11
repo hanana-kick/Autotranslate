@@ -233,7 +233,15 @@ check('separate options window remains bound to the originating tab and disables
   assert.equal(await control.evaluate(id=>AT.ui.openPage('options.html','window',id),id),'window');
   const panel=await created;await optionsReady(panel);
   assert.equal(new URL(panel.url()).searchParams.get('tabId'),String(id));
-  const kind=await panel.evaluate(async()=>{const t=(await AT.api.tabs.query({active:true,currentWindow:true}))[0];return (await AT.api.windows.get(t.windowId)).type;});
+  // The panel hydrates, then binds: a document that navigates between the two
+  // has no AT yet. Poll for the answer instead of reading it once, so the probe
+  // runs in whichever document ends up being the options page.
+  const kind=await (await panel.waitForFunction(async()=>{
+    if(!globalThis.AT?.api)return null;
+    const t=(await AT.api.tabs.query({active:true,currentWindow:true}))[0];
+    if(!t)return null;
+    return (await AT.api.windows.get(t.windowId)).type;
+  },null,{timeout:15000})).jsonValue();
   assert.equal(kind,'popup','real separate browser window, not tabs.create');
   await b.bringToFront();await panel.bringToFront();
   await panel.locator('#enabled').check();await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');

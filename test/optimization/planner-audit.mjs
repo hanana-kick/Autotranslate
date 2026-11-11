@@ -62,7 +62,13 @@ for(const size of [100,1000,4000]){
   const page=await browser.newPage({viewport:{width:1100,height:780}});
   await page.setContent('<!doctype html><title translate="no">CPU planner cost</title><main>'+Array.from({length:size},(_,i)=>`<p>Unique document sentence ${i}.</p>`).join('')+'</main>');
   for(const file of ['constants','pagecontext','targets','dom','pipeline'])await page.addScriptTag({content:await readFile(join(root,'build/ts/src/lib',file+'.js'),'utf8')});
-  samples.push(await page.evaluate(async()=>{let first=null,requests=0;const t=performance.now();const p=AT.pipeline.create({doc:document,settings:()=>({maxNodes:600}),translate:async b=>{first??=performance.now()-t;requests+=b.texts.length;return b.texts;}});let r=await p.translate(),passes=1;while(r.hasMore&&passes<20){r=await p.refresh(null,600);passes++;}const total=performance.now()-t;const ts=performance.now();p.restore();return {firstMs:first,totalMs:total,restoreMs:performance.now()-ts,requests,passes};}));
+  samples.push(await page.evaluate(async()=>{let first=null,requests=0;const t=performance.now();const p=AT.pipeline.create({doc:document,settings:()=>({maxNodes:600}),translate:async b=>{
+    // The answer must differ from its source: since the DOM refuses an echo, a
+    // literal identity reply would never be written and every continuation pass
+    // would re-plan the same nodes. One marker character keeps the timing probe
+    // it was written to be — same request count, same DOM work — while the pass
+    // count stays a measure of the planner rather than of the echo guard.
+    first??=performance.now()-t;requests+=b.texts.length;return b.texts.map(text=>'\u00b7'+text);}});let r=await p.translate(),passes=1;while(r.hasMore&&passes<20){r=await p.refresh(null,600);passes++;}const total=performance.now()-t;const ts=performance.now();p.restore();return {firstMs:first,totalMs:total,restoreMs:performance.now()-ts,requests,passes};}));
   await page.close();
  }
  const median=k=>samples.map(s=>s[k]).sort((a,b)=>a-b)[2];performance.push({size,samples,medianFirstMs:median('firstMs'),medianTotalMs:median('totalMs'),medianRestoreMs:median('restoreMs')});
