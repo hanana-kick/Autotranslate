@@ -259,6 +259,31 @@ namespace AT.engines {
     }).filter(Boolean))].slice(0, 512).sort();
   }
 
+  /** The JSON array a server model answered with, however it wrapped it.
+   *
+   *  Asked for "ONLY a JSON array", models still hand back
+   *  `["읽으세요","튜토리얼을","지금mediately."];` or put a sentence in front of it.
+   *  Both are the array the request asked for, and refusing them loses the whole
+   *  chunk to a stray semicolon. What is kept strict is the answer's shape: the
+   *  caller still requires one string per segment, in order, and validates each
+   *  translation. `null` means there was no array to read. */
+  function arrayIn(text: string): unknown {
+    const body = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    try {
+      return JSON.parse(body);
+    } catch {
+      // Fall through: the array sits somewhere inside the answer.
+    }
+    const start = body.indexOf('[');
+    const end = body.lastIndexOf(']');
+    if (start < 0 || end <= start) return null;
+    try {
+      return JSON.parse(body.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+
   async function translateServer(request: TranslateRequest): Promise<TranslateResult> {
     const config = serverConfig(request.server);
     const { texts = [], target = '', source = 'auto' } = request;
@@ -313,8 +338,9 @@ namespace AT.engines {
           .map((part: { text?: unknown }) => typeof part.text === 'string' ? part.text : '').join('').trim() : '';
       let answers: unknown = [content];
       if (items.length > 1) {
-        try { answers = JSON.parse(content.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '')); }
-        catch { throw new EngineError('format', 'Server must return one JSON string per input segment.'); }
+        answers = arrayIn(content) ?? (() => {
+          throw new EngineError('format', 'Server must return one JSON string per input segment.');
+        })();
       }
       if (!Array.isArray(answers) || answers.length !== items.length || answers.some(answer => typeof answer !== 'string')) {
         throw new EngineError('format', 'Server returned an unexpected result count.', { reason: 'count', expected: items.length, got: Array.isArray(answers) ? answers.length : 0 });

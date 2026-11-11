@@ -65,6 +65,31 @@ test('real HTTP: multi-segment JSON result keeps order and deduplicates input', 
   assert.equal(r.requested, 2); assert.equal(requests.length, 1);
 });
 
+// Measured against qwen2.5:7b: asked for only a JSON array, it answered
+// `["읽으세요","튜토리얼을","지금mediately."];` — a trailing semicolon that cost the
+// whole chunk, and with it the page, which then waited on a retry.
+for (const [name, answer] of [
+  ['a trailing semicolon', '["읽으세요","튜토리얼을","지금mediately."];'],
+  ['a leading sentence', 'Here are the translations: ["읽으세요","튜토리얼을","지금mediately."]'],
+  ['a trailing period', '["읽으세요","튜토리얼을","지금mediately."].']
+] as const) {
+  test(`real HTTP: an array wrapped in ${name} is still the answer`, async t => {
+    const { config } = await endpoint(t, (_req, res) => json(res, response(answer)));
+    const r = await translate(config, ['Read', 'the guide', 'carefully.']);
+    assert.deepEqual(r.translations, ['읽으세요', '튜토리얼을', '지금mediately.']);
+  });
+}
+
+test('real HTTP: an answer with no array at all is still a format error', async t => {
+  const { config } = await endpoint(t, (_req, res) => json(res, response('I am not able to translate that.')));
+  await assert.rejects(() => translate(config, ['Read', 'the guide', 'carefully.']), /JSON string per input segment/);
+});
+
+test('real HTTP: an array of the wrong length is still refused', async t => {
+  const { config } = await endpoint(t, (_req, res) => json(res, response('["읽으세요"]')));
+  await assert.rejects(() => translate(config, ['Read', 'the guide', 'carefully.']), /unexpected result count/);
+});
+
 test('real HTTP: models endpoint is independent of model selection and supports manual IDs', async t => {
   const { requests, config } = await endpoint(t, (_req, res) => json(res, { data: [{ id: 'small' }, { id: 'big' }, { id: 'big' }, { id: 1 }] }));
   assert.deepEqual(await AT.engines.listServerModels({ ...config, model: '' }), ['big', 'small']);
