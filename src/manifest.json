@@ -3,7 +3,7 @@
   "name": "__MSG_extensionName__",
   "short_name": "__MSG_shortName__",
   "description": "__MSG_description__",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "default_locale": "en",
   "minimum_chrome_version": "121",
   "icons": {
@@ -36,6 +36,7 @@
       "vendor/onnxruntime/transformers.web.js",
       "lib/local.js",
       "lib/modelstore.js",
+      "lib/pipelinehost.js",
       "lib/ui.js",
       "lib/settings.js",
       "lib/engines.js",

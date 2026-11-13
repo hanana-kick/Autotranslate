@@ -160,6 +160,18 @@ test('the source manifest is wired for the on-device host', () => {
   );
   assert.ok(scripts.includes('lib/onnxhost.js'), 'the host module is part of the background script set');
   assert.ok(
+    scripts.includes('lib/pipelinehost.js'),
+    'the host opens its session through the loader every decode worker shares'
+  );
+  assert.ok(
+    scripts.indexOf('lib/modelstore.js') < scripts.indexOf('lib/pipelinehost.js'),
+    'the loader serves the model files, so it has to load after the store'
+  );
+  assert.ok(
+    scripts.indexOf('lib/pipelinehost.js') < scripts.indexOf('lib/onnxhost.js'),
+    'the host calls into the loader, so the loader has to exist first'
+  );
+  assert.ok(
     scripts.indexOf('lib/onnxhost.js') < scripts.indexOf('background.js'),
     'the background installs the host, so the module has to exist first'
   );

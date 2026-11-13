@@ -127,6 +127,8 @@ namespace AT.engines {
     translations: string[];
     detected: string | null;
     requested: number;
+    /** Where a local batch spent its time: counting tokens, then generating. */
+    timing?: { countMs: number; hostMs: number; chunks: number };
   };
 
   export type TestResult = {
@@ -376,6 +378,7 @@ namespace AT.engines {
      * characters by a constant. The estimate is only the fallback for a host
      * that cannot answer (an older document, a failed load).
      */
+    const countStarted = Date.now();
     const counted = await AT.local.callHost({
       type: C.MSG.LOCAL_COUNT,
       modelId: localModelId,
@@ -385,6 +388,7 @@ namespace AT.engines {
       target: AT.plamo3.langFor(target) ?? '',
       context: AT.pagecontext.hint(request.context ?? null) ?? ''
     });
+    const countMs = Date.now() - countStarted;
     const counts = Array.isArray(counted?.counts) ? counted.counts.map((value) => Number(value)) : null;
     const overhead = Number(counted?.overhead);
     let chunks: string[][];
@@ -395,6 +399,7 @@ namespace AT.engines {
       chunks = AT.local.chunkByTokens(unique, localMaxTokens);
     }
 
+    const hostStarted = Date.now();
     const batchOut = new Map<string, string>();
     let detected: string | null = source !== 'auto' && C.isSupportedLang(source) ? source : null;
     for (const chunk of chunks) {
@@ -410,7 +415,12 @@ namespace AT.engines {
       // the distinction so the DOM can retain the source without marking done.
       return typeof translated === 'string' ? translated : '';
     });
-    return { translations, detected, requested: unique.length };
+    return {
+      translations,
+      detected,
+      requested: unique.length,
+      timing: { countMs, hostMs: Date.now() - hostStarted, chunks: chunks.length }
+    };
   }
 
   export async function test(request: TranslateRequest = {}): Promise<TestResult> {

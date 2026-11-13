@@ -50,15 +50,20 @@ namespace AT.settings {
     debug: boolean;
   };
 
-  /** What a content script may see: no site rules, no debug flag. */
+  /** What a content script may see: no site rules, no credentials. `debug` is
+   *  included because it draws the translated-region overlay in the page. */
   export type ContentSnapshot = {
     /** Opaque generation-configuration identity; never includes credentials. */
     translationKey?: string;
+    /** Which engine answers this page; the on-device one decodes several
+     *  requests at once, a server is asked one at a time. */
+    engine: Engine;
     enabled: boolean;
     targetLang: string;
     sourceLang: string;
     maxNodes: number;
     showBadge: boolean;
+    debug: boolean;
   };
 
   /** A stored blob: every key may be missing and no value is trusted. */
@@ -184,6 +189,7 @@ namespace AT.settings {
   export function contentSnapshot(normalized?: Settings | null): ContentSnapshot {
     const s = normalized ?? defaults();
     return {
+      engine: s.engine,
       translationKey: s.engine === 'openai'
         ? JSON.stringify(['server-prompt-v1', s.serverRevision, s.sourceLang, s.targetLang])
         : JSON.stringify(['prompt-v2', s.localModelId, s.localMaxTokens, s.sourceLang, s.targetLang]),
@@ -191,7 +197,8 @@ namespace AT.settings {
       targetLang: s.targetLang,
       sourceLang: s.sourceLang,
       maxNodes: s.maxNodes,
-      showBadge: s.showBadge
+      showBadge: s.showBadge,
+      debug: s.debug
     };
   }
 

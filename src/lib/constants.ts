@@ -46,9 +46,28 @@ namespace AT {
     BADGE_COLOR: string;
     DEFAULT_MAX_NODES: number;
     OBSERVER_BATCH_NODES: number;
-    /** Plain text nodes packed into one request. Eight is the batch the
-     *  on-device host answers in one graph run, so more would queue anyway. */
+    /** Maximum short text segments in one page request, not inference rows. */
     PACKED_TEXT_NODES: number;
+    /** Source-character budget for a progressive pack; semantic units stay intact. */
+    PACKED_TEXT_CHARS: number;
+    /** Run the decode loop on our own WGSL kernels instead of ONNX Runtime. */
+    ENGINE_KERNELS: boolean;
+    /** Rows one decode step carries: the sequences that share a forward. */
+    ENGINE_BATCH: number;
+    /** Profiling only: '' runs normally; 'nohead' skips the lm_head pass,
+     *  'noattn' skips attention, 'onelay' runs a single layer. Used to attribute
+     *  step time to a component, never left set in a build that ships. */
+    PROFILE_ABLATION: string;
+    /** Decode workers the host keeps, each with its own WebGPU session. One
+     *  worker batches overlapping requests into rows; more than one keeps a
+     *  request's own latency flat by giving it a session of its own. */
+    HOST_POOL_SIZE: number;
+    /** Small page packs allowed in flight; DOM commits remain in reading order. */
+    PAGE_PACKS: number;
+    /** How long a new cohort waits for siblings that arrive in the same tick. */
+    ENGINE_COALESCE_MS: number;
+    /** Prompt tokens one batched prefill may carry, all rows together. */
+    ENGINE_PROMPT_TOKENS: number;
     SENTENCE_MAX_CHARS: number;
     OBSERVER_DEBOUNCE_MS: number;
     IGNORE_SELECTOR: string;
@@ -67,9 +86,48 @@ namespace AT {
     BADGE_COLOR: '#1a73e8',
     // Hard ceiling on DOM text nodes touched per run; keeps huge feeds cheap.
     DEFAULT_MAX_NODES: 600,
-    // Ceiling for nodes translated by the MutationObserver in one tick.
-    OBSERVER_BATCH_NODES: 16,
-    PACKED_TEXT_NODES: 8,
+    // Ceiling for nodes translated by the MutationObserver in one tick. A page
+    // like a watch page plans hundreds of nodes, and a 16-node slice left the
+    // reader looking at untranslated comments for minutes: the pass ends before
+    // the plan reaches them, and the next one starts again from the top band.
+    OBSERVER_BATCH_NODES: 48,
+    // A first segment is dispatched alone. Later short neighbours share bounded
+    // packs to amortize prompt cost without waiting for a whole region.
+    PACKED_TEXT_NODES: 4,
+    PACKED_TEXT_CHARS: 480,
+    // Our own kernels: one submission per token, ~200 dispatches against ONNX
+    // Runtime's ~6800, measured at 13.6 ms/token against ~50. The runtime path
+    // stays as the reference and the fallback.
+    ENGINE_KERNELS: true,
+    // Rows one decode step carries on the kernel path. Measured on a 32-paragraph
+    // page (5 requests, 8 texts each, kernels, per-width pipelines): 76 s
+    // serial, 63 s at two rows, 53 s at four, so a step costs 1.0 / 1.5 / 2.5x
+    // and per-sequence throughput 1.0 / 1.33 / 1.6x. Four is the setting worth
+    // having; a request that arrives alone still runs the one-row template.
+    ENGINE_BATCH: 4,
+    // One. Two sessions on this GPU share the device: the same 32-paragraph page
+    // took 86 s with two sessions against 71-79 s with one (each session's own
+    // 38-48 s requests against 32-43 s), because Metal time-slices them and the
+    // step cost, not the wall clock, is what grows. The count stays a knob - a
+    // machine that really runs sessions in parallel gains ceil(N / pool) page
+    // time, which is the whole point of the pool - but the measured default
+    // here is one session, and concurrency comes from rows in its step.
+    PROFILE_ABLATION: '',
+    HOST_POOL_SIZE: 1,
+    // Packs one page keeps in flight. At four (with ENGINE_BATCH four) its own
+    // requests reach the host together and share steps: the same 32-paragraph
+    // page costs 53 s against 76 s serial. Each pack's latency grows to the
+    // cohort's slowest row, which is the trade this knob spends.
+    PAGE_PACKS: 4,
+    // Requests reach the host a few milliseconds apart (each counts its tokens
+    // first), so a cohort that forms immediately would serve them one after
+    // another. This much quiet is what puts them in the same step.
+    ENGINE_COALESCE_MS: 40,
+    // The graph returns logits for every position it is given: rows x width x
+    // 107520 floats, so a batched prefill is bounded in tokens, not in rows.
+    // 2048 tokens is ~880 MB in one float32 tensor at peak, and still leaves
+    // room on top of two graph sessions (the host keeps one for its fallback).
+    ENGINE_PROMPT_TOKENS: 2048,
     // Longer texts are split into sentences before they are sent: about 50
     // Latin tokens, well inside a sentence's worth of meaning. Only a text
     // longer than this pays for the extra round trip.

@@ -15,6 +15,7 @@ const LIBS = [
   'lib/rules.js',
   'lib/local.js',
   'lib/modelstore.js',
+  'lib/pipelinehost.js',
   'lib/ui.js',
   'lib/settings.js',
   'lib/engines.js',
@@ -30,6 +31,7 @@ const CONTENT_FILES = [
   'lib/targets.js',
   'lib/pipeline.js',
   'lib/dom.js',
+  'lib/translationtext.js',
   'content.js'
 ];
 /** `AT.local.TARGET_OFFSCREEN`: the routing field that addresses the host. */
@@ -531,10 +533,12 @@ test('navigation injects the content script and asks it to translate', async () 
     translate!.message.settings,
     {
       enabled: true,
+      engine: 'local',
       targetLang: 'en',
       sourceLang: 'auto',
       maxNodes: AT.C.DEFAULT_MAX_NODES,
       showBadge: true,
+      debug: false,
       translationKey: JSON.stringify(['prompt-v2', '', 1024, 'auto', 'en'])
     },
     'the content script gets the bounded snapshot, never the stored blob'

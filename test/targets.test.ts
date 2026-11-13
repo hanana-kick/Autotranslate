@@ -75,14 +75,29 @@ test('visible chrome is scheduled before distant content', () => {
   const groups = targets.plan(candidates, { band: 900 });
   assert.deepEqual(
     groups.map((group: { role: string; ids: string[] }) => `${group.role}:${group.ids.join(',')}`),
-    ['article:visible-body', 'navigation:visible-menu', 'heading:next-band', 'article:far-below', 'article:above-fold', 'footer:footer'],
-    'visibility first, with meaningful content first only within the same visibility class'
+    ['article:visible-body', 'heading:next-band', 'navigation:visible-menu', 'article:far-below', 'article:above-fold', 'footer:footer'],
+    'nearby primary reading continues before the sidebar, but visible UI still precedes distant prose'
   );
   assert.equal(targets.isContent('article'), true);
   assert.equal(targets.isContent('heading'), true);
   assert.equal(targets.isContent('navigation'), false);
   assert.equal(targets.isContent('footer'), false);
-  assert.equal(targets.isContent('comment'), false, 'a comment thread is content the reader did not ask for first');
+  assert.equal(targets.isContent('comment'), true, 'a comment thread is page content, not chrome');
+});
+
+test('a lower comment never jumps ahead of the visible title and body', () => {
+  const candidates = [
+    { id: 'body', role: 'article', priority: 'visible', order: 0, top: 120 },
+    { id: 'heading', role: 'heading', priority: 'visible', order: 1, top: 90 },
+    { id: 'menu', role: 'navigation', priority: 'visible', order: 2, top: 60 },
+    { id: 'comment', role: 'comment', priority: 'visible', order: 3, top: 900 }
+  ];
+  const groups = targets.plan(candidates, { band: 1000 });
+  assert.deepEqual(
+    groups.map((group: { role: string }) => group.role),
+    ['heading', 'article', 'comment', 'navigation'],
+    'main content follows rendered top-to-bottom order, not a comment-first role bucket'
+  );
 });
 
 test('document order survives inside a group, and a limit caps the plan', () => {
@@ -103,6 +118,29 @@ test('junk candidates are ignored instead of poisoning the plan', () => {
     { id: 'ok', role: 'article', priority: 'visible', order: 3 }
   ] as unknown as never);
   assert.deepEqual(groups.map((group: { ids: string[] }) => group.ids), [['ok']]);
+});
+
+test('visual order wins over DOM order and preserves intervening headings', () => {
+  const candidates = [
+    { id: 'bottom', role: 'article', priority: 'visible', order: 0, top: 500 },
+    { id: 'section', role: 'heading', priority: 'visible', order: 1, top: 300 },
+    { id: 'top', role: 'article', priority: 'visible', order: 2, top: 100 }
+  ];
+  assert.deepEqual(targets.plan(candidates).map((group: { ids: string[] }) => group.ids),
+    [['top'], ['section'], ['bottom']]);
+  assert.deepEqual(targets.plan(candidates, { limit: 2 }).flatMap((group: { ids: string[] }) => group.ids),
+    ['top', 'section']);
+});
+
+test('same-line targets use inline geometry, with stable order when boxes tie', () => {
+  const candidates = [
+    { id: 'right', role: 'article', priority: 'visible', order: 0, top: 100, inlineStart: 300 },
+    { id: 'left', role: 'article', priority: 'visible', order: 1, top: 100, inlineStart: 20 },
+    { id: 'left-next', role: 'article', priority: 'visible', order: 2, top: 100, inlineStart: 20 }
+  ];
+  assert.deepEqual(targets.plan(candidates)[0].ids, ['left', 'left-next', 'right']);
+  assert.deepEqual(targets.plan(candidates.map((entry) => ({ ...entry, inlineStart: -entry.inlineStart })))[0].ids,
+    ['right', 'left', 'left-next']);
 });
 
 test('each region gets a line the prompt can use, and prose gets none', () => {

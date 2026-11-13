@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>decode engine spike</title>
+  </head>
+  <body>
+    <!-- Throwaway measurement page: the real graph, the real tokenizer, our own
+         decode loop. Served with the built bundle at / so vendor/ resolves the
+         way it does in the extension. -->
+    <script src="vendor/onnxruntime/ort-common.all.js"></script>
+    <script src="vendor/onnxruntime/ort-webgpu.all.js"></script>
+    <script src="vendor/onnxruntime/transformers.web.js"></script>
+    <script src="lib/constants.js"></script>
+    <script src="lib/plamo3.js"></script>
+    <script src="lib/local.js"></script>
+    <script src="lib/pipelinehost.js"></script>
+    <script src="spike-page.js"></script>
+  </body>
+</html>

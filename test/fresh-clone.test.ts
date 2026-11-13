@@ -68,7 +68,7 @@ test('a clean checkout validates, builds and packages', () => {
         `${target}: offscreen is a chrome-only permission`
       );
       const bundle = files(join(dir, 'build', target));
-      for (const host of ['lib/local.js', 'lib/modelstore.js', 'lib/onnxhost.js', 'offscreen.html', 'offscreen.js']) {
+      for (const host of ['lib/local.js', 'lib/modelstore.js', 'lib/pipelinehost.js', 'lib/onnxweights.js', 'lib/kernels.js', 'lib/engine.js', 'lib/onnxhost.js', 'hostworker.js', 'offscreen.html', 'offscreen.js']) {
         assert.ok(bundle.includes(host), `${target}: ${host} is part of the on-device engine`);
       }
       const onnx = bundle.filter((name) => name.startsWith('vendor/onnxruntime/')).sort();

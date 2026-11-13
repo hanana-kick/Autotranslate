@@ -50,6 +50,11 @@ namespace AT.dom {
     onApply?: ((translated: number) => void) | undefined;
     /** Page/region context; model and language are scoped by the page session. */
     cacheScope?: (() => string) | undefined;
+    /** How many packs may be in flight at once. Replies are committed in input
+     *  reading order even when concurrent inference finishes out of order. */
+    concurrency?: (() => number) | undefined;
+    /** Optional inline presentation; translation and source ownership stay here. */
+    presentation?: AT.translationtext.Presentation | undefined;
   };
 
   export type Item = {
@@ -139,7 +144,9 @@ namespace AT.dom {
       sentences,
       shouldAbort,
       onApply,
-      cacheScope
+      cacheScope,
+      concurrency,
+      presentation
     } = options;
 
     if (typeof translate !== 'function') {
@@ -183,6 +190,7 @@ namespace AT.dom {
     }
 
     function forget(node: Text): void {
+      presentation?.forget(node);
       if (originals.get(node)?.complete) completed--;
       originals.delete(node);
     }
@@ -249,6 +257,7 @@ namespace AT.dom {
       if (wasComplete !== complete) completed += complete ? 1 : -1;
       originals.set(item.node, { source: item.source, text: item.source, applied: next, complete });
       if (item.node.nodeValue !== next) item.node.nodeValue = next;
+      presentation?.applied(item.node, complete);
       return true;
     }
 
@@ -343,15 +352,25 @@ namespace AT.dom {
      * short paragraphs too, which trades a little prompt overhead per sentence
      * for an answer that can be written back as soon as it lands.
      */
-    function sentenceJob(item: Item): { item: Item; parts: string[]; gap: string } | null {
+    function sentenceJob(item: Item): { parts: string[]; ends: number[]; gaps: string[] } | null {
       if (!sentences) return null;
       if (!sentences.always && item.core.length <= sentences.maxChars) return null;
-      const parts = sentences.split(item.core);
-      if (parts.length < 2) return null;
-      // Japanese and Chinese do not put a space between sentences; keep the
-      // page's own habit instead of inventing one.
-      const gap = /\s/.test(item.core) ? ' ' : '';
-      return { item, parts, gap };
+      const parts = sentences.split(item.core).map((part) => part.trim());
+      if (parts.length < 2 || parts.some((part) => !part)) return null;
+      const ends: number[] = [];
+      const gaps: string[] = [];
+      let offset = 0;
+      for (const part of parts) {
+        const start = item.core.indexOf(part, offset);
+        // A splitter must retain every non-whitespace source byte. Otherwise
+        // the original suffix cannot safely be spliced onto a translated prefix.
+        if (start < 0 || /\S/u.test(item.core.slice(offset, start))) return null;
+        gaps.push(item.core.slice(offset, start));
+        offset = start + part.length;
+        ends.push(offset);
+      }
+      if (/\S/u.test(item.core.slice(offset))) return null;
+      return { parts, ends, gaps };
     }
 
     async function run(nodes: readonly Text[]): Promise<Result> {
@@ -365,10 +384,9 @@ namespace AT.dom {
         if (claimed.has(node)) continue;
         const id = mergeInline ? runOf.get(node) : undefined;
         const recorded = id ? runs.get(id) : undefined;
-        // A merged run is an optimisation, never an exemption from the text
-        // budget. Long runs fall back to sentence-split individual nodes.
+        // An inline semantic unit stays intact even when it exceeds a pack's
+        // budget: splitting it would lose the element/meaning association.
         if (recorded && recorded.length > 1 && recorded.every((item) => incoming.has(item.node)) &&
-            recorded.reduce((sum, item) => sum + item.source.length, 0) <= (sentences?.maxChars ?? AT.C.SENTENCE_MAX_CHARS) &&
             recorded.every((item) => !/[\uE000\uE001]/u.test(item.source))) {
           const items = recorded.map((item) => itemFor(item.node));
           items.forEach((item) => claimed.add(item.node));
@@ -385,6 +403,13 @@ namespace AT.dom {
       let firstError: unknown = null;
       let wrote = 0;
       const echoesBefore = echoed;
+      let reported = 0;
+      const report = (): void => {
+        if (wrote > reported && !cancelled()) {
+          reported = wrote;
+          onApply?.(completed);
+        }
+      };
       mergedRuns = 0;
       const scope = cacheScope?.() ?? '';
       const keyFor = (kind: string, sources: string[]) => JSON.stringify([scope, kind, sources]);
@@ -417,32 +442,53 @@ namespace AT.dom {
         const split = sentenceJob(item);
         const parts = split?.parts ?? [item.core];
         const key = textKey(item, parts, namespace);
-        let answers = cached(key);
-        if (!answers) {
-          answers = await ask(parts);
+        const hit = cached(key);
+        const answers: string[] = [];
+        let prefix = '';
+        for (let offset = 0; offset < parts.length;) {
           if (cancelled() || !owns(item)) return;
-          if (answers.length === parts.length && answers.every(Boolean)) remember(key, answers);
+          let end = offset;
+          let chars = 0;
+          const limit = offset === 0 ? 1 : AT.C.PACKED_TEXT_NODES;
+          while (end < parts.length && end - offset < limit) {
+            const size = parts[end]!.length;
+            if (end > offset && chars + size > AT.C.PACKED_TEXT_CHARS) break;
+            chars += size;
+            end++;
+          }
+          const reply = hit ? hit.slice(offset, end) : await ask(parts.slice(offset, end));
+          if (cancelled() || !owns(item)) return;
+          let valid = offset;
+          for (; valid < end; valid++) {
+            const answer = reply[valid - offset];
+            if (!answer || answer === parts[valid]) break;
+            answers.push(answer);
+            prefix += (split?.gaps[valid] ?? '') + answer;
+          }
+          const complete = valid === parts.length;
+          if (valid > offset) {
+            // Keep the exact original suffix, including its separating gap.
+            // The restore record continues to own the original source on retry.
+            write(item, prefix + (split ? item.core.slice(split.ends[valid - 1]!) : ''), complete);
+            if (split) report();
+          }
+          if (valid < end) {
+            failed++;
+            error ??= 'empty or echoed translation segment';
+            firstError ??= new Error(error);
+            return;
+          }
+          if (complete && !cancelled() && owns(item)) remember(key, answers);
+          offset = end;
         }
-        if (cancelled() || !owns(item)) return;
-        const complete = answers.length === parts.length && answers.every(Boolean);
-        if (!complete) {
-          failed++;
-          error ??= 'empty translation segment';
-          firstError ??= new Error(error);
-        }
-        if (!answers.some(Boolean)) return;
-        // A partial answer owns a restore record but is NOT complete. Its next
-        // request is built from item.source, never from mixed-language DOM text.
-        write(item, parts.map((part, index) => answers[index] || part).join(split?.gap ?? ''), complete);
       };
 
-      // Plain nodes are packed: one request answers several segments, so a page
-      // with two hundred separate text nodes costs twenty-five prompts instead
-      // of two hundred. Only items that need no sentence split are packed; the
-      // split path keeps its own per-item contract.
+      // A small first pack gets a readable result on screen early. Later packs
+      // are bounded by both ordinary-node count and source characters.
       const PACK = AT.C.PACKED_TEXT_NODES;
       const packable = (items: Item[]): boolean => items.length === 1 && !sentenceJob(items[0]!);
-      const singleMany = async (items: Item[]): Promise<void> => {
+      const pendingTexts = new Map<string, Promise<string>>();
+      const singleMany = async (items: Item[], ready: Promise<void>): Promise<void> => {
         const live = items.filter((item) => owns(item));
         if (!live.length) return;
         const keys = live.map((item) => textKey(item, [item.core]));
@@ -469,7 +515,24 @@ namespace AT.dom {
               slots[at]!.push(slot);
             }
           }
-          const reply = await ask(order);
+          const fresh = order.filter((text) => !pendingTexts.has(text));
+          if (fresh.length) {
+            const request = ask(fresh);
+            fresh.forEach((text, index) => {
+              const answer = request.then((reply) => reply[index] ?? '');
+              pendingTexts.set(text, answer);
+            });
+          }
+          const pending = order.map((text) => pendingTexts.get(text)!);
+          let reply: string[];
+          try {
+            reply = await Promise.all(pending);
+          } finally {
+            order.forEach((text, index) => {
+              if (pendingTexts.get(text) === pending[index]) pendingTexts.delete(text);
+            });
+          }
+          if (cancelled()) return;
           slots.forEach((group, at) => {
             const value = (reply[at] ?? '').trim();
             for (const slot of group) {
@@ -478,6 +541,9 @@ namespace AT.dom {
             }
           });
         }
+        // Inference remains concurrent; only DOM commits wait for earlier jobs.
+        await ready;
+        if (cancelled()) return;
         live.forEach((item, index) => {
           if (!owns(item)) return;
           const value = answers[index] ?? '';
@@ -491,26 +557,82 @@ namespace AT.dom {
         });
       };
 
+      // Keep a bounded inference window and a separate ordered commit chain.
+      const packWindow = Math.max(1, Math.floor(concurrency?.() ?? 1));
+      const inFlight: Promise<void>[] = [];
+      let committed = Promise.resolve();
+      let firstPack = true;
+      const begin = (items: Item[]): void => {
+        if (!presentation) return;
+        for (const item of items) if (owns(item)) presentation.begin(item.node);
+      };
+      const settle = (items: Item[]): void => {
+        if (!presentation) return;
+        for (const item of items) {
+          const record = originals.get(item.node);
+          const status = record && record.applied === item.node.nodeValue
+            ? record.complete ? 'translated' : 'partial'
+            : 'failed';
+          presentation.settled(item.node, status);
+        }
+      };
+      /** Runs one job, keeping the per-job accounting the pass reports on. */
+      const perform = async (items: Item[], work: () => Promise<void>): Promise<void> => {
+        // Always settle this job, including failures, to unblock later commits.
+        try {
+          begin(items);
+          await work();
+        } catch (caught: unknown) {
+          if (cancelled()) return;
+          failed++;
+          firstError ??= caught;
+          error ??= String((caught as { message?: unknown })?.message ?? caught);
+        } finally {
+          settle(items);
+        }
+        report();
+      };
+      const drain = async (): Promise<void> => {
+        const next = inFlight.shift();
+        if (next) await next;
+      };
+      const drainAll = async (): Promise<void> => {
+        while (inFlight.length) await drain();
+      };
+
       for (let job = 0; job < jobs.length; job += 1) {
         if (cancelled()) break;
         const items = jobs[job]!;
         const first = items[0];
         if (!first || !items.every(owns)) continue;
-        const before = wrote;
+        if (packable(items)) {
+          const group: Item[] = [];
+          let next = job;
+          let chars = 0;
+          const limit = firstPack ? 1 : PACK;
+          while (next < jobs.length && group.length < limit) {
+            const candidate = jobs[next]!;
+            if (!packable(candidate) || !candidate.every(owns)) break;
+            const size = candidate[0]!.core.length;
+            if (group.length && chars + size > AT.C.PACKED_TEXT_CHARS) break;
+            chars += size;
+            group.push(candidate[0]!);
+            next += 1;
+          }
+          job = next - 1;
+          firstPack = false;
+          const ready = committed;
+          committed = perform(group, () => singleMany(group, ready)).then(() => ready);
+          inFlight.push(committed);
+          while (inFlight.length >= packWindow) await drain();
+          continue;
+        }
+        // A numbered run and a sentence split read the page's own structure, so
+        // they start once every pack has landed.
+        await drainAll();
         try {
-          if (packable(items)) {
-            const group: Item[] = [];
-            let next = job;
-            while (next < jobs.length && group.length < PACK) {
-              const candidate = jobs[next]!;
-              if (!packable(candidate) || !candidate.every(owns)) break;
-              group.push(candidate[0]!);
-              next += 1;
-            }
-            job = next - 1;
-            if (group.length > 1) await singleMany(group);
-            else await single(group[0]!);
-          } else if (items.length === 1) {
+          begin(items);
+          if (items.length === 1) {
             await single(first);
           } else {
             const key = keyFor('run-numbered-v3', items.map((item) => item.source));
@@ -554,9 +676,12 @@ namespace AT.dom {
           failed++;
           firstError ??= caught;
           error ??= String((caught as { message?: unknown })?.message ?? caught);
+        } finally {
+          settle(items);
         }
-        if (wrote > before && !cancelled()) onApply?.(completed);
+        report();
       }
+      await drainAll();
       if (!cancelled() && wrote === 0) {
         // Nothing was written: either a request threw, or every answer was the
         // page's own text. Reporting that as "translated" is how a page sat in
@@ -602,6 +727,8 @@ namespace AT.dom {
           }
           forget(node);
         }
+        // Pending nodes may have a visual host without a restore record yet.
+        presentation?.restore(root ?? undefined);
         // Keyed by source text alone, so it cannot survive a restore: the next
         // pass may be translating into a different language.
         cache.clear();

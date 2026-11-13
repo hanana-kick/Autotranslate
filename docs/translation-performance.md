@@ -67,3 +67,164 @@ the runtime it compared against no longer ships.
 The Release workflow runs the deterministic browser regressions, the planner acceptance and
 reproducible packaging. Failure in any required check blocks publication. A successful contract
 test or planner-only identity-response benchmark is not substituted for live on-device evidence.
+
+## Current page-selection change: visual order and first readable result
+
+This change freezes the inference implementation and changes only page planning
+and DOM execution. Three separate causes of bottom-first presentation were
+removed:
+
+1. The planner explicitly preferred comments over every other content role.
+2. It bucketed a whole viewport band by role, then ordered each bucket by DOM
+   position. CSS-reordered paragraphs and intervening headings were not kept in
+   rendered order.
+3. Concurrent requests wrote their answers immediately on completion, letting a
+   shorter lower request appear before an unfinished upper request.
+
+The new planner sorts individual text boxes before grouping adjacent compatible
+items. Nearby primary reading content precedes supporting UI; distant primary
+content does not block visible UI indefinitely. Watch-page primary and secondary
+columns supply the semantic distinction missing from YouTube's custom elements.
+The executor keeps bounded concurrent inference and a separate ordered commit
+chain. A failed upper request releases later commits rather than blocking the
+whole page. Long paragraphs keep exact untranslated source suffixes, and partial
+results remain incomplete and restorable.
+
+`test/onnx-live/run-onnx.mjs` now supports `VISUAL_ORDER=1`. It records real DOM
+applications, source boxes, first-content latency, whole-fixture completion,
+partial screenshots and exact restoration using the installed extension and
+real model. The fixture has reversed DOM order, CSS reading order, interleaved
+headings and an early-DOM sidebar. `EXTENSION_DIR` selects a preserved build;
+`VISUAL_ORDER_ASSERT=0` records a known-bad baseline without asserting that its
+order is correct. All completion and restore checks still run.
+
+`YOUTUBE=1` records the real watch title, description, recommendations and
+comments, then performs a normal scroll to expose lazy comments. Site failures
+are reported, not bypassed. A translated description prefix is evidence of first
+readable content, **not** a claim that the whole description or page finished.
+The primary acceptance metric is useful content appearing in reading order;
+smaller requests do not imply higher engine tok/s or faster total-page completion.
+
+### Installed-extension observations
+
+Apple M5, Chrome for Testing 143, PLaMo 0.8B Q4F16, ordinary WebGPU. One sequential
+baseline/current pair used the same installed-model profile, warming the host
+with the existing four-paragraph page before the visual-order fixture. These
+are latency observations, not a sustained throughput benchmark:
+
+| Visual-order fixture metric | Frozen engine with old page policy | New page policy |
+| --- | ---: | ---: |
+| Title first visible | 456.7 ms | 312.2 ms |
+| First body paragraph visible | 2,869.9 ms | 835.4 ms |
+| All 12 units complete | 3,278.9 ms | 2,977.1 ms |
+| Reading-order violations | 8 | 0 |
+
+The baseline applied `section → title → body-8 … body-1`. The new policy applied
+`title → body-1 → body-2 → section → body-3 … body-8`, then the sidebar.
+Both runs translated all units and restored the exact source. The current
+partial screenshot shows only the title translated while every paragraph and
+sidebar remains in its original language.
+
+The separate four-paragraph smoke page took 2 seconds before and 3 seconds after
+the change (coarse harness polling), with 2 versus 3 model generations. Smaller
+requests can cost more prompts and total time; the visual fixture's speedup
+must not be generalized to every page.
+
+Build and tools type-check passed. All 90 targeted Node cases and 17 Chromium
+DOM cases passed across the initial run and focused corrections. Coverage
+includes LTR/RTL CSS order, interleaved roles, watch-column semantics, reverse
+reply completion, progressive paragraph prefixes, restore/source ownership,
+and re-ranking an unsent tail while an earlier request is still running.
+
+Reports and screenshots:
+`test-results/browser/visual-order-baseline/run/`,
+`test-results/browser/visual-order-current/`, and
+`test-results/browser/visual-order-dom/`.
+
+The real YouTube watch-page run, with the current rendered recommendation-title
+selector, observed these first translated appearances:
+
+| Region | Time from enabling translation |
+| --- | ---: |
+| Video title | 562.0 ms |
+| Description prefix | 1,864.3 ms |
+| Recommendation title | 2,823.7 ms |
+| Comment | 4,360.9 ms |
+
+The title and description appeared before either supporting region. A normal
+500-pixel scroll exposed comments; the initial page had 20 recommendation titles
+but no loaded comments. At the observation boundary, one of 20 discovered
+comments and one of 20 recommendations had translated: this proves ordering and
+incremental delivery, not completion of the whole watch page. Media stayed
+paused/muted, with no page errors, count warnings or empty segments.
+
+The earlier run in `visual-order-current/` recorded title, description and
+comments but missed recommendation titles because its observation selector
+used an obsolete site class. It is not evidence that recommendations were absent.
+The corrected run is `test-results/browser/visual-order-youtube/`; consolidated
+measurements are in `visual-order-current/summary.json`.
+
+## Inline translation-state presentation
+
+The engine and reading-order policy are unchanged. `src/lib/translationtext.ts`
+provides a per-session presentation manager for the installed content script.
+Dispatched `Text` nodes become slotted children of `at-translation-text`; queued
+nodes are untouched. The inline shadow surface animates a low-opacity cyan/violet
+gradient on a 3.4-second cycle. Each committed result has a finite 200 ms opacity
+reveal, including progressive paragraph prefixes. Partial failure stops the busy
+effect; failure without a committed prefix unwraps the readable source.
+
+The original text node and outer link elements remain the same objects. Exact
+wrapper-move mutation records are filtered, not arbitrary mutations under a
+component. External edits and late responses from superseded sessions remain
+subject to the existing source-ownership checks. Restoration also unwraps
+pending nodes with no committed translation. Reduced motion and forced colors
+disable animation and decoration. Invalid wrapping containers retain ordinary
+translation without visual feedback.
+
+Chromium's extension isolated world does not provide a usable custom-element
+registry. There the manager attaches the native shadow surface and slot directly
+to the custom-tag host; ordinary page realms register the element class. Neither
+path injects code into the page's main world or substitutes a mock component.
+This distinction was caught by the installed-extension run after the page-world
+DOM tests had passed.
+
+### Focused verification
+
+Chrome build/package and tools TypeScript checks passed. All 76 targeted
+DOM/pipeline/content Node tests and 27 Chromium DOM tests passed. The browser
+cases exercise in-flight-only decoration, out-of-order responses, finite reveal
+progress, multiline geometry, link handlers, original-node identity, partial
+failure, cancellation, late sessions, page edits, observer feedback, and both
+accessibility preferences.
+
+A separate manual-response preview of the production renderer was inspected
+in light and dark themes, then translated and restored without browser errors.
+That preview checks appearance, not model inference or latency. The glow was
+visible behind the original text without hiding glyphs; restoration removed
+all component hosts. Browser regression artifacts are in
+`test-results/browser/aurora-dom/`.
+
+The corrected installed-extension run used Chrome 143, Apple WebGPU, and the
+local PLaMo 0.8B Q4F16 weights, without a provider seam or artificial model delay.
+The pending screenshot captured a readable original heading with an active
+animation; completion left five translated components (heading plus four
+paragraphs), none busy. At most four components were busy simultaneously.
+Disabling translation removed every host and restored the exact original HTML
+and the same original text nodes. All four paragraphs completed within the
+harness's coarse two-second observation window. This is a functional smoke
+result, not a controlled throughput comparison.
+
+Report and pending/translated/restored screenshots:
+`test-results/browser/aurora-extension-native/`. The earlier failed report in
+`aurora-extension/` predates the isolated-world fix and is not a latency result.
+The 27 Chromium DOM cases also passed after that fix, with artifacts in
+`aurora-dom-native/`.
+
+Reproduce after building Chrome (use a fresh throwaway profile):
+
+```sh
+UNSAFE_WEBGPU=0 HEADED=1 AURORA=1 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/aurora-extension-native npm run test:onnx
+```

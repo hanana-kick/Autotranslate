@@ -42,6 +42,23 @@ the messaging and the DOM layer are the production ones, and only the graph's or
 when `MODEL_DIR` supplies it from disk. See [actual installed-extension
 verification](native-extension-testing.md) for the boundaries and the flags.
 
+The decode engine's numbers are reproducible without the extension:
+`npm run build && node test/engine-spike/run-spike.mjs` drives the shipped graph and tokenizer in a
+real Chromium and writes `test-results/browser/engine-spike.json` (batched step cost against context
+length, KV size, token parity against the library's own `generate`, and prefix alignment).
+`node test/engine-spike/run-sustain.mjs` runs a pure decode loop and reports each browser process's
+CPU time per step, which is how the CPU/GPU split above was taken (`STEPS=200` by default).
+`MODE=parity TEXT='<sentence>'` on the same harness compares our kernels' greedy tokens with the
+runtime's for a real prompt (and `MODE=gen` prints the translated text); `MODE=block`/`MODE=dump`
+compare one layer against the debug graph. `PARAGRAPHS=32` widens the live fixture page (distinct paragraphs, so nothing is answered from the
+page's cache); with `PAGE_PACKS` and `ENGINE_BATCH` it measures one page's cost at each decode-step
+width. The batch curve lives in `docs/native-extension-testing.md`, "Batching".
+
+`node test/engine-spike/run-gpuresident.mjs` is the
+GPU-resident experiment: KV kept in GPU buffers
+through IO binding, an ORT-proxy A/B, and the graph-capture attempt that documents why capture needs
+a static-KV export. All three are measurement harnesses, not part of `npm test`.
+
 Public YouTube QA is separate from the deterministic YouTube-like fixture. It must preserve
 external sign-in/bot restrictions instead of logging in, bypassing controls or substituting pages.
 Public-site observations and third-party warnings are not generalized to all YouTube sessions.

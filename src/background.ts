@@ -105,6 +105,7 @@ if (typeof self.importScripts === 'function') {
     'vendor/onnxruntime/transformers.web.js',
     'lib/local.js',
     'lib/modelstore.js',
+    'lib/pipelinehost.js',
     'lib/ui.js',
     'lib/settings.js',
     'lib/engines.js',
@@ -130,6 +131,7 @@ if (typeof self.importScripts === 'function') {
     'lib/targets.js',
     'lib/pipeline.js',
     'lib/dom.js',
+    'lib/translationtext.js',
     'content.js'
   ]);
 
@@ -460,7 +462,7 @@ if (typeof self.importScripts === 'function') {
     if (!targets.has(tabId) || (targetRevisions.get(tabId) ?? 0) !== revision) throw new Error('tab translation was cancelled');
     localKey = request.localModelId || null;
     const result = await AT.engines.translate(request);
-    return { translations: result.translations, detected: result.detected };
+    return { translations: result.translations, detected: result.detected, timing: result.timing };
   }
 
   async function testModel(message: AT.background.EngineTestRequest): Promise<AT.MessageResult> {
@@ -773,7 +775,9 @@ if (typeof self.importScripts === 'function') {
     const current = AT.settings.contentSnapshot(settings);
     const before = AT.settings.contentSnapshot(previous);
     if (current.translationKey === before.translationKey &&
-        settings.maxNodes === previous.maxNodes && JSON.stringify(settings.siteRules) === JSON.stringify(previous.siteRules)) return;
+        settings.maxNodes === previous.maxNodes && JSON.stringify(settings.siteRules) === JSON.stringify(previous.siteRules) &&
+        // The overlay switch is a page setting too: it draws in the tab.
+        settings.debug === previous.debug) return;
     await targetsReady;
     // Only explicitly selected tabs receive changed language/model policy.
     // No foreground heuristics may enroll a tab after an options window opens.

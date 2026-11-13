@@ -12,6 +12,28 @@
   "menuAlwaysSite": { "message": "이 사이트를 선택한 탭에서 허용" },
   "content_close": { "message": "닫기" },
   "content_noSelection": { "message": "번역할 선택 영역이 없습니다." },
+  "content_debugTitle": { "message": "번역 영역" },
+  "content_debugPass": {
+    "message": "이번 패스 $1$개 · 번역 $2$개 · 실패 $3$개 · 계획 $4$개",
+    "placeholders": {
+      "1": { "content": "$1" },
+      "2": { "content": "$2" },
+      "3": { "content": "$3" },
+      "4": { "content": "$4" }
+    }
+  },
+  "content_debugNone": { "message": "아직 잡은 영역이 없습니다" },
+  "content_debugAge": {
+    "message": "마지막 패스 $1$초 전",
+    "placeholders": { "1": { "content": "$1" } }
+  },
+  "content_debugScreen": {
+    "message": "상자 $2$개 · 그중 화면 안 $1$개",
+    "placeholders": {
+      "1": { "content": "$1" },
+      "2": { "content": "$2" }
+    }
+  },
   "popup_enabled": { "message": "이 탭 번역" },
   "popup_enabledTitle": { "message": "이 탭만 번역 대상으로 선택하거나 해제합니다." },
   "popup_targetLanguage": { "message": "번역 언어" },
@@ -29,7 +51,7 @@
   "options_behavior": { "message": "이 탭 번역" },
   "options_enabled": { "message": "이 탭을 번역 대상으로 선택" },
   "options_showBadge": { "message": "번역된 페이지에 배지 표시" },
-  "options_debug": { "message": "상세 로그" },
+  "options_debug": { "message": "번역 영역을 페이지에 표시(외곽선)" },
   "options_test": { "message": "서비스 테스트" },
   "options_testing": { "message": "테스트 중…" },
   "options_testOk": {

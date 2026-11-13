@@ -132,14 +132,21 @@ test('review: partial answers remain eligible and retry from the original text',
   const node = text('First. Second.');
   const root = element('p', [node]);
   const calls: string[][] = [];
+  let partial = true;
   const translator = AT.dom.createTranslator({ doc: doc(root),
     sentences: { split: (value: string) => value.split(' ').filter(Boolean), maxChars: 1, always: true },
-    translate: async (texts: string[]) => { calls.push(texts); return calls.length === 1 ? ['첫째.', ''] : ['첫째.', '둘째.']; }
+    translate: async (texts: string[]) => {
+      calls.push(texts);
+      return texts.map((value) => value === 'First.' ? '첫째.' : partial ? '' : '둘째.');
+    }
   });
   await translator.translateRoot(root);
   assert.equal(translator.has(node), false, 'a partial answer is not a completed translation');
+  assert.equal(node.nodeValue, '첫째. Second.');
+  const retryStart = calls.length;
+  partial = false;
   await translator.translateRoot(root);
-  assert.deepEqual(calls[1], ['First.', 'Second.'], 'retry the original unit, not the mixed-language DOM');
+  assert.deepEqual(calls.slice(retryStart).flat(), ['First.', 'Second.'], 'retry the original unit, not the mixed-language DOM');
   assert.equal(node.nodeValue, '첫째. 둘째.');
   assert.equal(translator.has(node), true);
 });

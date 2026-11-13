@@ -105,8 +105,12 @@ test('site rules are canonicalised and deduplicated', () => {
 
 test('the content snapshot carries only what a page needs', () => {
   const snapshot = settings.contentSnapshot(settings.normalize({ maxNodes: 400 }));
+  // `debug` is here because the content script draws the region overlay itself;
+  // credentials and site rules are not.
   assert.deepEqual(Object.keys(snapshot).sort(), [
+    'debug',
     'enabled',
+    'engine',
     'maxNodes',
     'showBadge',
     'sourceLang',
@@ -114,6 +118,7 @@ test('the content snapshot carries only what a page needs', () => {
     'translationKey'
   ]);
   assert.equal(snapshot.maxNodes, 400);
+  assert.equal(snapshot.debug, false);
 });
 
 test('the UI language picks a supported target', () => {

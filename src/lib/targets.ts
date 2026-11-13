@@ -53,13 +53,17 @@ namespace AT.targets {
   /**
    * The page's own content, as opposed to its chrome. Within the same visibility class, meaningful text precedes
    * chrome. Visible UI always precedes distant prose.
+   *
+   * A comment thread is content: on a watch page or a forum it is the text the
+   * reader came for, and classifying it as chrome put every visible menu label
+   * and form field ahead of forty comments they were actually reading.
    */
   const CONTENT: Record<TextRole, boolean> = {
     article: true,
     heading: true,
     list: true,
     metadata: true,
-    comment: false,
+    comment: true,
     form: false,
     navigation: false,
     aside: false,
@@ -71,19 +75,6 @@ namespace AT.targets {
     return CONTENT[role] === true;
   }
 
-  /** Ties inside one priority: the part a reader is most likely to be reading. */
-  const ROLE_RANK: Record<TextRole, number> = {
-    heading: 0,
-    article: 1,
-    list: 2,
-    metadata: 3,
-    comment: 4,
-    form: 5,
-    navigation: 6,
-    aside: 7,
-    footer: 8,
-    unknown: 9
-  };
 
   /** Comment containers, as sites actually mark them. */
   const COMMENT_MARKERS = /(^|[\s_-])(comments?|replies|responses)([\s_-]|$)/;
@@ -139,70 +130,65 @@ namespace AT.targets {
     order: number;
     /** Vertical position in viewport coordinates (negative is above the fold). */
     top?: number;
+    /** Position along a rendered line; negative right edge for RTL text. */
+    inlineStart?: number;
   };
 
   export type Group = { role: TextRole; priority: Priority; ids: string[] };
 
   /**
-   * The translation plan, in the order a reader moves: the band at the top of
-   * the viewport first, then one screen at a time downwards, and the text above
-   * the fold last. Within a band the plan is grouped by region, so a batch never
-   * mixes a menu label with a comment, and inside a group it stays in document
-   * order. That is what makes progress legible: everything above the cursor is
-   * done before anything below it starts.
+   * Read visible primary content and its next-screen continuation before the
+   * sidebar. Then supporting UI, then distant text. Sort individual text boxes
+   * before grouping: a role bucket must never pull a later paragraph or comment
+   * ahead of an intervening heading. DOM order only breaks geometry ties.
    */
   export function plan(candidates: Candidate[], options?: { limit?: number; band?: number }): Group[] {
     const limit = Number(options?.limit);
     const band = Number(options?.band) > 0 ? Number(options?.band) : 900;
     const usable = (Array.isArray(candidates) ? candidates : []).filter(
       (candidate): candidate is Candidate =>
-        Boolean(candidate) && typeof candidate.id === 'string' && candidate.role in ROLE_RANK && candidate.priority in PRIORITY_RANK
+        Boolean(candidate) && typeof candidate.id === 'string' &&
+        Object.hasOwn(CONTENT, candidate.role) && Object.hasOwn(PRIORITY_RANK, candidate.priority)
     );
-    const bandOf = (candidate: Candidate): number => {
-      const top = candidate.priority === 'visible' ? Math.max(0, Number(candidate.top)) : Number(candidate.top);
-      if (!Number.isFinite(top)) return Number.MAX_SAFE_INTEGER;
-      return Math.floor(top / band);
-    };
-    // Bands at or below the viewport in reading order, then the ones above it.
-    const bandKey = (index: number): number => (index >= 0 ? index : 1000 + -index);
-    const buckets = new Map<string, Group & { key: number; first: number }>();
-    for (const candidate of usable) {
-      const key = bandKey(bandOf(candidate));
-      const bucket = `${candidate.priority}/${key}/${candidate.role}`;
+    const topOf = (candidate: Candidate): number => {
       const top = Number(candidate.top);
-      const first = Number.isFinite(top) ? top : Number.MAX_SAFE_INTEGER;
-      const group = buckets.get(bucket) ?? { role: candidate.role, priority: candidate.priority, ids: [], key, first };
-      // Where the group starts on the page decides its place inside the band, so
-      // the menu at 120px is still translated before the paragraph at 300px.
-      group.first = Math.min(group.first, first);
-      group.ids.push(candidate.id);
-      buckets.set(bucket, group);
-    }
-    const orderOf = new Map(usable.map((candidate) => [candidate.id, Number(candidate.order) || 0]));
-    const groups = [...buckets.values()];
-    for (const group of groups) {
-      group.ids.sort((left, right) => (orderOf.get(left) ?? 0) - (orderOf.get(right) ?? 0));
-    }
-    groups.sort(
-      (left, right) =>
-        PRIORITY_RANK[left.priority] - PRIORITY_RANK[right.priority] ||
+      if (!Number.isFinite(top)) return Number.MAX_SAFE_INTEGER;
+      return candidate.priority === 'visible' ? Math.max(0, top) : top;
+    };
+    const bandOf = (candidate: Candidate): number => Math.floor(topOf(candidate) / band);
+    const readingRank = (candidate: Candidate): number => {
+      if (candidate.priority === 'far') return 4;
+      if (isContent(candidate.role)) {
+        if (candidate.priority === 'visible') return 0;
+        if (topOf(candidate) >= 0) return 1;
+      }
+      return 2 + PRIORITY_RANK[candidate.priority];
+    };
+    usable.sort((left, right) => {
+      const a = topOf(left), b = topOf(right);
+      return readingRank(left) - readingRank(right) ||
         Number(!isContent(left.role)) - Number(!isContent(right.role)) ||
-        left.key - right.key ||
-        left.first - right.first ||
-        ROLE_RANK[left.role] - ROLE_RANK[right.role]
-    );
-    if (!Number.isFinite(limit) || limit <= 0) {
-      return groups.map((group) => ({ role: group.role, priority: group.priority, ids: group.ids }));
+        // Continue down the page before revisiting text above the viewport.
+        Number(a < 0) - Number(b < 0) ||
+        (a < 0 && b < 0 ? bandOf(right) - bandOf(left) : 0) ||
+        a - b ||
+        (Number(left.inlineStart) || 0) - (Number(right.inlineStart) || 0) ||
+        (Number(left.order) || 0) - (Number(right.order) || 0);
+    });
+    const groups: Group[] = [];
+    const count = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : usable.length;
+    let previousBand: number | undefined;
+    for (const candidate of usable.slice(0, count)) {
+      const currentBand = bandOf(candidate);
+      let group = groups[groups.length - 1];
+      if (!group || group.role !== candidate.role || group.priority !== candidate.priority || currentBand !== previousBand) {
+        group = { role: candidate.role, priority: candidate.priority, ids: [] };
+        groups.push(group);
+      }
+      group.ids.push(candidate.id);
+      previousBand = currentBand;
     }
-    let left = limit;
-    const capped: Group[] = [];
-    for (const group of groups) {
-      if (left <= 0) break;
-      const ids = group.ids.slice(0, left);
-      left -= ids.length;
-      capped.push({ role: group.role, priority: group.priority, ids });
-    }
-    return capped;
+    return groups;
   }
 
 

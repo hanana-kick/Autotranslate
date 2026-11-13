@@ -61,6 +61,42 @@ Options retains the originating tab even when another tab gains focus. Closed
 or unbound target tabs cannot silently be replaced with another translation
 target. Setup and provider tests never opt a web tab in.
 
+### Reading order and progressive results
+
+The page planner uses rendered text positions, not DOM traversal order. Visible
+primary content and its next-screen continuation precede sidebars; text within
+that reading flow follows top-to-bottom and the line's LTR/RTL direction.
+Comments no longer jump ahead of a title or paragraph above them. YouTube watch
+columns are recognized even though they use custom elements rather than
+`main`/`aside` landmarks.
+
+The first ordinary segment is sent alone; subsequent short neighbours share
+packs of at most four segments and 480 source characters. Long paragraphs are
+translated in sentence chunks, exposing each completed prefix while retaining
+the original suffix. Inline semantic units and unsplittable sentences stay intact,
+so these limits are not permission to cut words or break links.
+
+On-device requests may still run concurrently, but their DOM writes commit in
+reading order. Scrolling, resizing and page changes re-rank work that has not
+been sent; an already-running bounded wave finishes first. Smaller requests
+trade prompt overhead and possible total-page throughput for earlier readable
+results. The inference kernels and model are unchanged by this policy.
+
+### Inline translation feedback
+
+Actively dispatched text is wrapped in an `at-translation-text` web component.
+Its shadow-DOM surface adds a subtle moving cyan/violet glow without replacing
+the original `Text` node, changing link targets, or adding a loading label.
+Queued text is not animated. Completed text reveals over 200 ms; a progressively
+translated paragraph stays busy until its remaining chunks settle.
+
+Restore/cancel removes the wrappers, and failed requests leave readable source
+text without a busy indicator. Page-owned edits are preserved. Reduced-motion
+and forced-colors preferences disable both the glow and reveal animation.
+The component inherits page typography and preserves inline wrapping; non-HTML
+and text-only/structural containers that cannot safely host it translate without
+the decoration.
+
 ## Privacy and network behavior
 
 On-device mode runs the published ONNX export of PLaMo 3 Translate 0.8B through the
@@ -185,6 +221,7 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
   styles.css             shared by welcome, popup and options
   offscreen.html         the Chrome placement of the on-device host, opened by URL
   offscreen.ts           message plumbing for that document; the host itself is a lib
+  hostworker.ts          the decode engine actor: one WebGPU session, one batched step per token
   lib/
     constants.ts         AT namespace, message names, languages
     browser.ts           the only file that names the host global; AT.api, capabilities, i18n, onMessage
@@ -196,7 +233,11 @@ src/                     TypeScript, compiled to classic scripts (no bundler)
     pagecontext.ts       what kind of page this is, from its own metadata (collect / analyze / hint)
     targets.ts           which region a text is in, how visible it is, and what to translate first
     pipeline.ts          the page translation engine: page context + plan + batches + write-back
-    onnxhost.ts          the on-device host: Transformers.js/WebGPU, OPFS-served model files, one queue
+    pipelinehost.ts      the shared session loader: runtime, OPFS-backed cache, tokenizer, pipeline
+    onnxweights.ts       the graph's weights without the runtime: a focused protobuf reader
+    kernels.ts           the decode kernels: q4 GEMV, norm, RoPE, attention, SwiGLU, head
+    engine.ts            the decode scheduler: cohorts, padding, row retirement, token streaming
+    onnxhost.ts          the on-device host: the decode pool, prompts, token budgets, status
     rules.ts             site pattern matching and precedence
     settings.ts          defaults, validation, persistence, content snapshot
     engines.ts           the model call: chunking, language refusal, error codes
@@ -549,7 +590,7 @@ of failing inside the first kernel.
 | --- | --- |
 | Runtime | `vendor/onnxruntime/` (Transformers.js + onnxruntime-web, pre-converted to classic scripts by `npm run onnx:vendor`), copied into both bundles by `scripts/build.ts`; which context executes it is decided at runtime |
 | Model bytes | OPFS (`navigator.storage.getDirectory()`), one directory per model — the ONNX export stores its graph, tokenizer and config together; only metadata in IndexedDB (`autotranslate-models`) |
-| Inference | `lib/onnxhost.ts` — one pipeline, one generation at a time, in whichever context can hold it |
+| Inference | `lib/onnxhost.ts` — the host: one `hostworker.js` decode engine whose steps carry `C.ENGINE_BATCH` sequences, in whichever context can hold the host; `lib/engine.ts` schedules the rows, `lib/pipelinehost.ts` opens a session for either caller |
 | Prompt | the tokenizer's own chat template: `AT.onnxhost` calls `apply_chat_template` with the target code, and `chat_template.jinja` from the card supplies the PFML3 element order |
 | Languages | the picker offers en, ko and ja (`C.LANGS`); behind it one table, keyed so a prompt can only be built from a spelling the model lists: `AT.plamo3.LANGS` (5 — en, ja, ko, `zh-hans`, `zh-hant`, the spellings PFN's card publishes for this model out of the 53 its `target_lang` names). `AT.plamo3.langFor` folds the picker's code into that spelling, and a target outside the three never reaches a prompt |
 | Source language | the page's own text, detected with the browser's `i18n.detectLanguage` (CLD); an explicit `sourceLang` setting is reported as it stands. Either way the answer feeds only the popup's *detected* line — the prompt names the **target** and nothing else, because a wrong claim about the source moves the translation |
@@ -610,12 +651,30 @@ way, so the engine layer, the popup and the Options page never ask which browser
 The placement is a runtime decision (`chrome.offscreen` present or not), not a build flag: both
 bundles carry the same files.
 
-One pipeline, one queue: generations are serialised, because the graph answers one sequence at a
-time; the model is warmed right after loading with a short prompt and a realistic one, so WebGPU
-compiles its shaders on those instead of on the first real sentence; and it is released ten
-minutes after the last page needed it — a resident model holds the graph, the tokenizer and the
-GPU buffers, and dropping the pipeline is what frees them. `at/local-status` (or the reporter the
-background installs) is what the popup line and the Options status read.
+**Our own kernels.** The decode loop runs on WGSL written for this model (`lib/kernels.ts`): the q4
+GEMV, RMSNorm, RoPE, attention, SwiGLU and the head, one submission per token, with the weights read
+out of the shipped graph by a small protobuf reader (`lib/onnxweights.ts`). Measured at 13.6 ms per
+token against the runtime's ~50; `C.ENGINE_KERNELS` turns it off and the ONNX Runtime path below
+stays as the reference and the fallback.
+
+**One session, several rows** (runtime path). Decoding runs in `hostworker.js`, a dedicated worker
+that opens one WebGPU session over the shared loader (`lib/pipelinehost.ts`) and drives it with its
+own loop (`lib/engine.ts`): the host sends token ids, the engine schedules up to `C.ENGINE_BATCH` sequences
+per forward and answers each one as soon as its own generation ends. A decode step
+costs 52-60 ms whatever the context because it is ~224 JS-dispatched operations, not arithmetic (the
+GPU is idle most of it); each extra row adds its own KV read (6.3 KiB per token), and eight tokens
+verified in one step cost 8.7 ms each instead of 50.7,
+so two rows are nearly free at short context and cost real per-request latency at the 600-1000
+tokens a page actually reaches. A page therefore keeps one pack in flight (`C.PAGE_PACKS`) and pays
+nothing for the batch; requests that genuinely overlap — another tab, a selection translation beside
+a running pass — share a step (`C.ENGINE_BATCH`), which is verified by `TWO_TABS=1 npm run test:onnx`.
+The constants and the measured trade-offs are in `docs/native-extension-testing.md`. Two independent *sessions* are strictly worse
+(1.68× per request, no throughput) and are not used. Loading, unloading and token counting stay one
+at a time, because they own the tokenizer. The model is warmed right after loading, so WebGPU
+compiles its shaders before the first real sentence, and it is released ten minutes after the last
+page needed it. An engine that cannot start is not a broken page: the request is answered by the
+offscreen document's own session and `at/local-status` says `worker-init`. `at/local-status` (or the
+reporter the background installs) is what the popup line and the Options status read.
 
 **Nothing is fetched twice.** Transformers.js is loaded with remote models disabled and a custom
 cache that answers every file request from OPFS, so the graph, the tokenizer and the config are
@@ -821,9 +880,10 @@ path prefix length. A tie resolves to `never`, so `example.com → always` plus
   weights — and each file's licence travels with the release that publishes it, not with this
   repository.
 - Without WebGPU there is no translation at all: the host answers `no-webgpu`, and the popup,
-  the onboarding page and Options all say the browser cannot run the model. Decoding is
-  single-threaded and generations are serial — one at a time per browser, other tabs queue —
-  and the model is released ten minutes after the last page needed it.
+  the onboarding page and Options all say the browser cannot run the model. Decoding runs in one
+  worker-owned session whose steps carry `C.ENGINE_BATCH` sequences (one by default: at the context
+  a page reaches, extra rows cost more per-request latency than they return in throughput), and the
+  model is released ten minutes after the last page needed it.
 
 ## CI and releases
 

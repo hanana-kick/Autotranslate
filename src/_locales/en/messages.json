@@ -12,6 +12,28 @@
   "menuAlwaysSite": { "message": "Allow this site in selected tabs" },
   "content_close": { "message": "Close" },
   "content_noSelection": { "message": "Nothing selected to translate." },
+  "content_debugTitle": { "message": "Translated regions" },
+  "content_debugPass": {
+    "message": "$1$ nodes this pass · $2$ translated · $3$ failed · $4$ planned",
+    "placeholders": {
+      "1": { "content": "$1" },
+      "2": { "content": "$2" },
+      "3": { "content": "$3" },
+      "4": { "content": "$4" }
+    }
+  },
+  "content_debugNone": { "message": "no region taken yet" },
+  "content_debugAge": {
+    "message": "last pass $1$s ago",
+    "placeholders": { "1": { "content": "$1" } }
+  },
+  "content_debugScreen": {
+    "message": "$2$ boxes drawn · $1$ on screen",
+    "placeholders": {
+      "1": { "content": "$1" },
+      "2": { "content": "$2" }
+    }
+  },
   "popup_enabled": { "message": "Translate this tab" },
   "popup_enabledTitle": { "message": "Enable or disable translation for this tab only." },
   "popup_targetLanguage": { "message": "Translate to" },
@@ -29,7 +51,7 @@
   "options_behavior": { "message": "Translation for this tab" },
   "options_enabled": { "message": "Translate this tab" },
   "options_showBadge": { "message": "Show badge on translated pages" },
-  "options_debug": { "message": "Verbose logging" },
+  "options_debug": { "message": "Outline translated regions on the page" },
   "options_test": { "message": "Test provider" },
   "options_testing": { "message": "Testing…" },
   "options_testOk": {

@@ -180,9 +180,8 @@ test('a node the provider answered with nothing is retried, not marked done', as
   const second = await translator.refresh();
   assert.equal(second.requested, 1, 'the heading is asked again');
   assert.deepEqual(asked.at(-1), ['Subspecies'], 'and only the heading');
-  // The first pass packs both plain nodes into one request; only the empty
-  // answer keeps the heading eligible for the next one.
-  assert.deepEqual(asked[0], ['Subspecies', 'The body'], 'both plain nodes travelled in one request');
+  assert.deepEqual(asked.flat(), ['Subspecies', 'The body', 'Subspecies'],
+    'only the empty segment is paid for again');
   assert.equal(texts[0]!.nodeValue, '»Subspecies«');
   assert.equal(texts[1]!.nodeValue, '»The body«', 'the paragraph was not asked twice');
 });
@@ -251,7 +250,7 @@ test('background passes advance through the page instead of re-translating the t
 
   const first = await translator.refresh(null, 2);
   assert.equal(first.requested, 2);
-  assert.deepEqual(batches.map((batch) => batch.texts), [['Headline', 'Second line']], 'both slices travel in one request');
+  assert.deepEqual(batches.flatMap((batch) => batch.texts), ['Headline', 'Second line']);
 
   // The page rewrites the first heading: it is eligible again, but the cursor
   // has moved past it.
@@ -259,8 +258,8 @@ test('background passes advance through the page instead of re-translating the t
   firstNode.nodeValue = 'Headline';
   const second = await translator.refresh(null, 2);
   assert.deepEqual(
-    batches.map((batch) => batch.texts),
-    [['Headline', 'Second line'], ['A comment', 'Another comment']],
+    batches.flatMap((batch) => batch.texts),
+    ['Headline', 'Second line', 'A comment', 'Another comment'],
     'the pass took the text it had not reached yet'
   );
   assert.equal(second.requested, 2);
@@ -295,6 +294,24 @@ test('initial work may yield so a moved viewport is replanned before the old off
 });
 
 
+test('a scroll re-ranks the queue instead of re-collecting the page', async () => {
+  const e = engine(Array.from({ length: 90 }, (_, i) => ({ text: 'Article ' + i, top: i * 30 })));
+  const first = await e.translator.translate(8);
+  assert.equal(first.processedNodes, 8);
+  assert.equal(first.hasMore, true);
+  // The reader scrolls to the end of the page: the queue above is behind them.
+  for (let i = 8; i < 90; i++) {
+    e.texts[i]!.parentElement!.getBoundingClientRect = () => ({ top: -3000, bottom: -2980, width: 600, height: 20 });
+  }
+  e.texts[89]!.parentElement!.getBoundingClientRect = () => ({ top: 100, bottom: 120, width: 600, height: 20 });
+  const ranked = e.translator.reprioritize();
+  assert.equal(ranked.queued, 82, 'only what is still waiting is in the queue');
+  assert.equal(ranked.visible, 1, 'exactly what scrolled into view is on screen now');
+  const before = e.batches.length;
+  await e.translator.resume(8);
+  assert.equal(e.batches[before]!.texts[0], 'Article 89', 'what scrolled into view is translated first');
+});
+
 test('speed: 600 nodes over 38 continuations are measured once, not once per slice', async () => {
   const fixture = page(Array.from({ length: 600 }, (_, i) => ({ text: 'Unique phrase ' + i, top: i * 20 })));
   let measurements = 0, requests = 0;
@@ -320,4 +337,38 @@ test('speed: an external change invalidates queued geometry and preserves new te
   await translator.resume(1); await translator.resume(1);
   assert.equal(measurements, 5, 'remaining two nodes are measured exactly once after invalidation');
   translator.restore(); assert.equal(fixture.texts[1]!.nodeValue, 'Updated source');
+});
+
+test('scrolling during an active request preserves and reorders the unsent tail', async () => {
+  const fixture = page([
+    { text: 'Page title', tag: 'h1', top: 10 },
+    { text: 'Old first paragraph', tag: 'main', top: 100 },
+    { text: 'Newly visible paragraph', tag: 'main', top: 3000 }
+  ]);
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document,
+    settings: () => ({ maxNodes: 600 }),
+    viewportHeight: () => 800,
+    translate: async (batch: { texts: string[] }) => {
+      asked.push(...batch.texts);
+      if (batch.texts.includes('Page title')) { started.resolve(); await release.promise; }
+      return batch.texts.map((text) => `»${text}«`);
+    }
+  });
+  const active = translator.translate();
+  await started.promise;
+  fixture.texts[1]!.parentElement!.getBoundingClientRect = () => ({ top: -3000, bottom: -2980, width: 600, height: 20 });
+  fixture.texts[2]!.parentElement!.getBoundingClientRect = () => ({ top: 100, bottom: 120, width: 600, height: 20 });
+  assert.deepEqual(translator.reprioritize(), { visible: 1, queued: 2 });
+  release.resolve();
+  assert.equal((await active).hasMore, true);
+  assert.deepEqual(asked, ['Page title'], 'the old unsent order is interrupted');
+  const rest = await translator.resume();
+  assert.deepEqual(asked, ['Page title', 'Newly visible paragraph', 'Old first paragraph']);
+  assert.equal(rest.translated, 3);
+  assert.equal(rest.hasMore, false);
+  assert.equal(translator.restore().restored, 3);
 });

@@ -12,6 +12,8 @@ namespace AT.content {
     engine?: string;
     error?: string;
     code?: AT.engines.EngineErrorCode | null;
+    /** Where a local batch spent its time; absent for a server engine. */
+    timing?: { countMs: number; hostMs: number; chunks: number };
   };
 
   /** A rejected batch keeps the engine's code when the background had one. */
@@ -34,6 +36,23 @@ namespace AT.content {
     status?: string;
     translated?: number;
     error?: string | null;
+  };
+
+  /** One model request as the page measured it. The reader's latency unit:
+   *  asking for a batch and getting its translations back. */
+  export type BenchEntry = {
+    index: number;
+    /** Milliseconds from the first request of the session to this one starting. */
+    at: number;
+    ms: number;
+    texts: number;
+    role: string;
+    /** Token counting before the generation, when the host reported it. */
+    countMs?: number;
+    /** The generation itself, host side. */
+    hostMs?: number;
+    /** Chunks the engine split the batch into. */
+    chunks?: number;
   };
 
   /** Everything the script keeps between messages. */
@@ -72,6 +91,21 @@ namespace AT.content {
     lastStatus: string;
     lastTranslated: number;
     lastError: string | null;
+    /** Debug overlay: the outline layer, its panel, the regions it draws, and
+     *  the two handles that keep them in place while the page scrolls. */
+    overlay: HTMLElement | null;
+    overlayPanel: HTMLElement | null;
+    overlayRegions: AT.pipeline.DebugRegion[];
+    overlayPass: AT.pipeline.DebugPass | null;
+    overlayTimer: number;
+    overlayBound: boolean;
+    /** Pending re-rank of the work queue after the reader stopped scrolling. */
+    viewportTimer: number;
+    /** Model requests of this session, oldest first, for the speed report. */
+    bench: BenchEntry[];
+    benchStarted: number;
+    /** The user closed the panel on this page; keep it closed. */
+    overlayClosed: boolean;
   };
 
   /** The handle on globalThis that makes a second injection a no-op. */
@@ -112,7 +146,17 @@ declare var __autotranslate: AT.content.Boot | undefined;
     lastReport: 0,
     lastStatus: 'idle',
     lastTranslated: 0,
-    lastError: null
+    lastError: null,
+    overlay: null,
+    overlayPanel: null,
+    overlayRegions: [],
+    overlayPass: null,
+    overlayTimer: 0,
+    overlayBound: false,
+    overlayClosed: false,
+    viewportTimer: 0,
+    bench: [],
+    benchStarted: 0
   };
 
   globalThis.__autotranslate = {
@@ -125,6 +169,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     settings: AT.settings.ContentSnapshot
   ): Promise<string[]> {
     const texts = batch.texts;
+    const started = Date.now();
     const response = (await AT.sendMessage({
       type: C.MSG.BATCH,
       texts,
@@ -137,6 +182,19 @@ declare var __autotranslate: AT.content.Boot | undefined;
       context: AT.pagecontext.hint(batch.context) ? batch.context : null,
       role: batch.role
     })) as AT.content.BatchReply | undefined;
+    // The round trip a reader waits for: request out, translations back. The
+    // first one of a session carries the model load, later ones do not.
+    const ms = Date.now() - started;
+    if (state.benchStarted === 0) state.benchStarted = started;
+    state.bench.push({
+      index: state.bench.length + 1,
+      at: started - state.benchStarted,
+      ms,
+      texts: texts.length,
+      role: batch.role,
+      ...(response?.timing ? { countMs: response.timing.countMs, hostMs: response.timing.hostMs, chunks: response.timing.chunks } : {})
+    });
+    if (state.bench.length > 200) state.bench.shift();
     if (!response?.ok) {
       const error = new Error(response?.error ?? 'the background context rejected the batch') as AT.content.BatchError;
       error.code = response?.code ?? null;
@@ -152,11 +210,13 @@ declare var __autotranslate: AT.content.Boot | undefined;
       const snapshot = { ...settings };
       state.pipeline = AT.pipeline.create({
         doc: document,
-        settings: () => ({ maxNodes: snapshot.maxNodes }),
+        presentation: AT.translationtext.create(document),
+        settings: () => ({ maxNodes: snapshot.maxNodes, engine: snapshot.engine }),
         // A pass owns an immutable settings snapshot, not mutable global state.
         translate: (batch) => requestBatch(batch, snapshot),
-        // Each paragraph is one unit; token splitting stays in the engine.
-        sentences: { split: AT.targets.sentences, maxChars: C.SENTENCE_MAX_CHARS, always: true },
+        // Keep short semantic units intact. The executor sends a small leading
+        // chunk, packs short neighbours, and progressively applies long prose.
+        sentences: { split: AT.targets.sentences, maxChars: C.SENTENCE_MAX_CHARS, always: false },
         // A restore in another task owns the page: stop writing.
         shouldAbort: () => state.stopped || state.epoch !== epoch,
         // A pass over a long page takes a minute; say so while it works.
@@ -165,6 +225,10 @@ declare var __autotranslate: AT.content.Boot | undefined;
           const now = Date.now();
           if (now - state.lastReport < 700) return;
           state.lastReport = now;
+          // The overlay is redrawn on the same throttle: a pass over a watch
+          // page runs for minutes, and boxes that only appear when it ends tell
+          // the reader nothing about what it is doing.
+          updateDebug(state.pipeline);
           void report({ status: 'translating', translated });
         }
       });
@@ -184,6 +248,236 @@ declare var __autotranslate: AT.content.Boot | undefined;
     }).catch(() => {});
   }
 
+  // --- The debug overlay. A page that "does nothing" is one of three facts:
+  // the plan is somewhere else, the region was classified as the site's chrome,
+  // or the model refused it. The overlay draws all three where they happen,
+  // because a screenshot of the page is worth more than a console line.
+
+  /** One hue per region kind; a failed region is red and dashed instead. */
+  const OVERLAY_ROLE_COLORS: { [role: string]: string } = {
+    comment: '#f59e0b',
+    article: '#22d3ee',
+    heading: '#34d399',
+    list: '#a78bfa',
+    metadata: '#cbd5e1',
+    navigation: '#818cf8',
+    form: '#f472b6',
+    aside: '#fbbf24',
+    footer: '#64748b',
+    unknown: '#94a3b8'
+  };
+  /** Past this the page is a wall of boxes, which diagnoses nothing. */
+  const OVERLAY_MAX_BOXES = 300;
+
+  /** The switch is read per pass, so turning it on applies without a reload. */
+  function debugOn(): boolean {
+    return state.settings?.debug === true && !state.overlayClosed;
+  }
+
+  function overlayLayer(): HTMLElement {
+    if (state.overlay?.isConnected) return state.overlay;
+    const layer = document.createElement('div');
+    layer.setAttribute('data-no-translate', '');
+    layer.setAttribute('data-at-overlay', '');
+    layer.setAttribute('aria-hidden', 'true');
+    layer.setAttribute(
+      'style',
+      [
+        'all:initial',
+        'position:absolute',
+        'top:0',
+        'left:0',
+        'width:0',
+        'height:0',
+        'z-index:2147483646',
+        'pointer-events:none',
+        'contain:layout style'
+      ].join(';')
+    );
+    document.documentElement.appendChild(layer);
+    state.overlay = layer;
+    return layer;
+  }
+
+  /** Boxes in page coordinates: the layer sits at the document's origin, so a
+   *  viewport rect has to be shifted by the scroll offset to stay on its text. */
+  function paintOverlay(): void {
+    const layer = state.overlay;
+    if (!layer) return;
+    layer.textContent = '';
+    const scrollX = globalThis.scrollX || 0;
+    const scrollY = globalThis.scrollY || 0;
+    let painted = 0;
+    for (const region of state.overlayRegions) {
+      if (painted >= OVERLAY_MAX_BOXES) break;
+      const element = region.node.isConnected === false ? null : region.node.parentElement;
+      if (!element) continue;
+      const rect = element.getBoundingClientRect();
+      if (!(rect.width > 1 && rect.height > 1)) continue;
+      const failed = region.status === 'failed';
+      const color = failed ? '#ef4444' : OVERLAY_ROLE_COLORS[region.role] ?? OVERLAY_ROLE_COLORS.unknown;
+      const outline = document.createElement('div');
+      outline.setAttribute('data-no-translate', '');
+      outline.setAttribute(
+        'style',
+        [
+          'position:absolute',
+          `top:${Math.round(rect.top + scrollY)}px`,
+          `left:${Math.round(rect.left + scrollX)}px`,
+          `width:${Math.round(rect.width)}px`,
+          `height:${Math.round(rect.height)}px`,
+          `border:1px ${failed ? 'dashed' : 'solid'} ${color}`,
+          `background:${failed ? 'rgba(239,68,68,.08)' : 'transparent'}`,
+          'border-radius:3px',
+          'box-sizing:border-box',
+          'pointer-events:none'
+        ].join(';')
+      );
+      layer.appendChild(outline);
+      painted += 1;
+    }
+  }
+
+  function debugPanel(): HTMLElement {
+    if (state.overlayPanel?.isConnected) return state.overlayPanel;
+    const panel = document.createElement('div');
+    panel.setAttribute('data-no-translate', '');
+    panel.setAttribute('data-at-overlay-panel', '');
+    panel.setAttribute(
+      'style',
+      [
+        'all:initial',
+        'position:fixed',
+        'z-index:2147483647',
+        'inset:12px 12px auto auto',
+        'max-width:24rem',
+        'padding:10px 12px',
+        'border-radius:10px',
+        'border:1px solid rgba(0,0,0,.2)',
+        'background:#fffff8',
+        'color:#1c1c1c',
+        'font:12px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace',
+        'box-shadow:0 6px 24px rgba(0,0,0,.22)',
+        'white-space:pre-wrap'
+      ].join(';')
+    );
+    const body = document.createElement('p');
+    body.setAttribute('data-at-overlay-body', '');
+    body.setAttribute('style', 'all:unset;display:block;white-space:pre-wrap');
+    const close = document.createElement('button');
+    close.type = 'button';
+    close.textContent = '\u00d7';
+    close.setAttribute('aria-label', AT.i18n.msg('content_close'));
+    close.setAttribute(
+      'style',
+      'all:unset;position:absolute;inset:2px 6px auto auto;cursor:pointer;padding:0 4px;font:14px/1.2 system-ui,sans-serif'
+    );
+    close.addEventListener('click', () => {
+      // Closing is a choice for this page session, not a settings change.
+      state.overlayClosed = true;
+      closeDebug();
+    });
+    panel.append(body, close);
+    document.documentElement.appendChild(panel);
+    state.overlayPanel = panel;
+    return panel;
+  }
+
+  /** One line per fact: what the plan took, from where, and what failed. */
+  function debugSummary(pass: AT.pipeline.DebugPass | null): string {
+    const head = [
+      AT.i18n.msg('content_debugTitle'),
+      `${pass?.context?.site ?? location.host} · ${pass?.context?.kind ?? 'page'} → ${state.settings?.targetLang ?? ''}`
+    ];
+    // No productive pass yet: a page with nothing to translate never has one,
+    // and an age counted from zero would read as a number from the year 1970.
+    if (!pass || pass.at === 0) return head.concat(AT.i18n.msg('content_debugNone')).join('\n');
+    const counts: { [role: string]: number } = {};
+    for (const region of pass.regions) counts[region.role] = (counts[region.role] ?? 0) + 1;
+    const roles = Object.entries(counts)
+      .sort((left, right) => right[1] - left[1])
+      .map(([role, count]) => `${role} ${count}`)
+      .join(' · ');
+    // How much of what was translated was actually in front of the reader. A low
+    // share with a long queue is the shape of "it never gets to my comments".
+    const onScreen = pass.regions.filter((region) => region.priority === 'visible').length;
+    const seconds = Math.max(0, Math.round((Date.now() - pass.at) / 1000));
+    // What the page offered, and how much of it the reader can see: a role with
+    // a large total and no visible share is text this pass will not reach soon.
+    const planned = pass.roles
+      .map((row) => `${row.role} ${row.total}${row.visible ? ` (${row.visible} on screen)` : ''}`)
+      .join(' · ');
+    const lines = [
+      ...head,
+      AT.i18n.msg('content_debugPass', [
+        String(pass.processed),
+        String(pass.translated),
+        String(pass.failed),
+        String(pass.planned)
+      ]),
+      planned || AT.i18n.msg('content_debugNone'),
+      roles || AT.i18n.msg('content_debugNone'),
+      AT.i18n.msg('content_debugScreen', [String(onScreen), String(pass.regions.length)]),
+      AT.i18n.msg('content_debugAge', [String(seconds)])
+    ];
+    if (pass.error) lines.push(pass.error.slice(0, 160));
+    return lines.join('\n');
+  }
+
+  function requestOverlayPaint(): void {
+    if (state.overlayTimer !== 0) return;
+    state.overlayTimer = setTimeout(() => {
+      state.overlayTimer = 0;
+      paintOverlay();
+    }, 80) as unknown as number;
+  }
+
+  function bindOverlayPosition(): void {
+    if (state.overlayBound) return;
+    const target = globalThis as unknown as ScrollTarget;
+    if (typeof target.addEventListener !== 'function') return;
+    target.addEventListener('scroll', requestOverlayPaint, { passive: true });
+    target.addEventListener('resize', requestOverlayPaint, { passive: true });
+    state.overlayBound = true;
+  }
+
+  function unbindOverlayPosition(): void {
+    if (!state.overlayBound) return;
+    const target = globalThis as unknown as ScrollTarget;
+    target.removeEventListener?.('scroll', requestOverlayPaint);
+    target.removeEventListener?.('resize', requestOverlayPaint);
+    state.overlayBound = false;
+  }
+
+  function closeDebug(): void {
+    clearTimeout(state.overlayTimer);
+    state.overlayTimer = 0;
+    unbindOverlayPosition();
+    state.overlay?.remove();
+    state.overlayPanel?.remove();
+    state.overlay = null;
+    state.overlayPanel = null;
+    state.overlayRegions = [];
+    state.overlayPass = null;
+  }
+
+  /** Draw what the last pass did. Called after every pass, never during one. */
+  function updateDebug(pipeline: AT.pipeline.PageTranslator | null): void {
+    if (!pipeline || !debugOn()) {
+      closeDebug();
+      return;
+    }
+    const pass = pipeline.debug();
+    state.overlayPass = pass;
+    state.overlayRegions = pass ? pass.regions.slice() : [];
+    overlayLayer();
+    paintOverlay();
+    bindOverlayPosition();
+    const panel = debugPanel();
+    const body = panel.querySelector('[data-at-overlay-body]');
+    if (body) body.textContent = debugSummary(pass);
+  }
+
   function stopObserver(): void {
     if (state.observer) {
       state.observer.disconnect();
@@ -191,6 +485,11 @@ declare var __autotranslate: AT.content.Boot | undefined;
     }
     clearTimeout(state.timer);
     state.timer = 0;
+  }
+
+  function stopViewportTimer(): void {
+    clearTimeout(state.viewportTimer);
+    state.viewportTimer = 0;
   }
 
   function scheduleTick(immediate = false): void {
@@ -259,6 +558,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       if (roots.length > MAX_TICK_ROOTS) whole = true;
     };
     for (const record of records) {
+      if (state.pipeline?.ownsMutation(record)) continue;
       if (record.type === 'characterData') {
         const node = record.target as Text;
         if (!AT.dom.hasText(node.nodeValue)) continue;
@@ -339,12 +639,20 @@ declare var __autotranslate: AT.content.Boot | undefined;
     });
   }
 
-  /** A page is longer than a screen: translate what scrolls into view. */
+  /** A page is longer than a screen: finish what is on screen, then the rest,
+   *  and jump to whatever scrolls back into view. */
   function scheduleViewportPass(): void {
     if (!state.settings?.enabled || !state.pipeline || state.stopped) return;
-    // Scroll and mutations share a scheduler. Separate promise queues could
-    // accumulate obsolete full-page passes behind a slow generation.
-    requestFullPass();
+    // Re-measuring every queued node on every scroll event would cost more than
+    // the translation. Once the reader stops moving, the queue is re-ranked and
+    // one tick continues from the new front.
+    clearTimeout(state.viewportTimer);
+    state.viewportTimer = setTimeout(() => {
+      state.viewportTimer = 0;
+      if (state.stopped || !state.pipeline) return;
+      state.pipeline.reprioritize();
+      requestContinuation();
+    }, C.OBSERVER_DEBOUNCE_MS) as unknown as number;
   }
 
   type ScrollTarget = {
@@ -362,6 +670,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
   }
 
   function stopViewportPass(): void {
+    stopViewportTimer();
     if (!state.scrollBound) return;
     const target = globalThis as unknown as ScrollTarget;
     if (typeof target.removeEventListener === 'function') {
@@ -421,18 +730,13 @@ declare var __autotranslate: AT.content.Boot | undefined;
     // left. Continuation is the planner's decision, not a request-count guess.
     if (more) requestContinuation();
     if (processed > 0) await report({ status: failure ? 'error' : (more ? 'translating' : 'translated'), translated, error: failure });
+    updateDebug(pipeline);
   }
 
   /** Ask for one pass over the whole page (the queue has no regions). */
   function requestContinuation(): void {
     state.continuation = true;
     scheduleTick(true);
-  }
-
-  function requestFullPass(): void {
-    state.pipeline?.invalidatePlan();
-    state.full = true;
-    scheduleTick();
   }
 
   function sessionKey(settings: AT.settings.ContentSnapshot): string {
@@ -449,10 +753,14 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.continuation = false;
     state.roots = [];
     state.working = false;
+    state.bench = [];
+    state.benchStarted = 0;
     state.targetLang = null;
     state.settingsKey = null;
     stopObserver();
     stopViewportPass();
+    closeDebug();
+    state.overlayClosed = false;
     const restored = state.pipeline?.restore().restored ?? 0;
     state.pipeline = null;
     return restored;
@@ -467,6 +775,13 @@ declare var __autotranslate: AT.content.Boot | undefined;
       state.settingsKey = key;
       state.targetLang = settings.targetLang;
       state.stopped = false;
+    } else if (state.settings && state.settings.debug !== settings.debug) {
+      // The overlay switch is not page content: apply it to what is already
+      // translated instead of rebuilding a session to draw a box.
+      const snapshot: AT.settings.ContentSnapshot = { ...state.settings, debug: settings.debug };
+      state.settings = Object.freeze(snapshot);
+      if (settings.debug) state.overlayClosed = false;
+      updateDebug(state.pipeline);
     }
     const epoch = state.epoch;
     const pipeline = ensurePipeline(settings);
@@ -474,13 +789,14 @@ declare var __autotranslate: AT.content.Boot | undefined;
     startObserver();
     startViewportPass();
     try {
-      // Yield the initial pass too: a large feed must not pin an obsolete
-      // viewport plan while newly inserted, visible text waits behind it.
+      // Yield the initial pass: a large feed must not pin an obsolete viewport
+      // plan while newly inserted, visible text waits behind it.
       const result = await pipeline.translate(C.OBSERVER_BATCH_NODES);
       if (epoch !== state.epoch || state.stopped) return { status: 'cancelled' };
       if (result.hasMore) requestContinuation();
       const status = result.failed || result.error ? 'error' : (result.hasMore ? 'translating' : 'translated');
       await report({ status, translated: result.translated, error: result.error });
+      updateDebug(pipeline);
       return { status, translated: result.translated, requested: result.requested,
         failed: result.failed, error: result.error };
     } finally {
@@ -615,7 +931,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     [C.MSG.CONTENT_STATE]: () => ({
       status: state.lastStatus,
       translated: state.lastTranslated,
-      error: state.lastError
+      error: state.lastError,
+      // Every model request this session, for the speed report: #1 is cold.
+      bench: state.bench
     }),
     [C.MSG.CONTENT_TRANSLATE]: (message) => {
       const request = message as AT.content.TranslateRequest;

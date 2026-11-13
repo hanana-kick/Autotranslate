@@ -28,6 +28,13 @@ namespace AT.local {
   export const IDLE_UNLOAD_MS = 10 * 60 * 1000;
   /** One generation is bounded; the host aborts the run rather than wait. */
   export const GENERATION_TIMEOUT_MS = 180000;
+  /** A decode worker has this long to open its session and say `ready`; the
+   *  graph is already streamed into the in-document session by then, so a
+   *  worker that needs longer is not going to serve this page. */
+  export const WORKER_START_TIMEOUT_MS = 15000;
+  /** A worker aborts its own generation on GENERATION_TIMEOUT_MS; the host
+   *  gives it this much longer than that, then treats the slot as gone. */
+  export const WORKER_REPLY_GRACE_MS = 5000;
   /** Progress is forwarded to the background at most this often. */
   export const DOWNLOAD_PROGRESS_INTERVAL_MS = 500;
 
@@ -107,6 +114,51 @@ namespace AT.local {
   /** The answer at/local-count gives: per-text counts and the instruction. */
   export type TokenCounts = { counts: number[]; overhead: number };
 
+  /**
+   * The messages the host and one decode worker exchange. A worker owns one
+   * WebGPU session and one request at a time: it is told which model to open
+   * and then handed prompts, never text it has to render or report on.
+   */
+  export const WORKER_MESSAGE = {
+    INIT: 'init',
+    GENERATE: 'generate',
+    DROP: 'drop',
+    READY: 'ready',
+    RESULT: 'result'
+  } as const;
+
+  /** What the engine worker needs to open its session. The tokenizer, the
+   *  prompt and the answer parsing stay in the host; the sentinel ids and the
+   *  batch width come from the model's own files (lib/pipelinehost.js). */
+  export type WorkerInit = {
+    type: typeof WORKER_MESSAGE.INIT;
+    modelId: string;
+    dtype: string;
+    target: string;
+  };
+  /** One request as token ids: rendered and tokenized in the host, so the
+   *  engine never sees text. */
+  export type WorkerGenerate = {
+    type: typeof WORKER_MESSAGE.GENERATE;
+    id: number;
+    inputIds: number[];
+    maxNewTokens: number;
+  };
+  /** The host gave up on a request (its own deadline): stop spending steps. */
+  export type WorkerDrop = { type: typeof WORKER_MESSAGE.DROP; id: number };
+  export type WorkerReply =
+    | { type: typeof WORKER_MESSAGE.READY; ok: true; backend?: 'kernels' | 'runtime'; rows?: number }
+    | { type: typeof WORKER_MESSAGE.READY; ok: false; error: string; code: string }
+    | {
+        type: typeof WORKER_MESSAGE.RESULT;
+        id: number;
+        ok: true;
+        tokens: number[];
+        /** Cumulative phase work in this worker, for tokens-per-second rates. */
+        stats?: { prefillTokens: number; decodeTokens: number; prefillMs: number; decodeMs: number };
+      }
+    | { type: typeof WORKER_MESSAGE.RESULT; id: number; ok: false; error: string; code: string };
+
   /** What one host call answers with; `callHost` adds `ok` around it. */
   export type HostReply = {
     status?: LocalStatus;
@@ -175,6 +227,17 @@ namespace AT.local {
     softwareRendering?: boolean;
     /** Aggregate progress only: prompts and generated text are never reported. */
     outputChars?: number;
+    /** Which decode backend answered: our kernels or the ONNX Runtime path. */
+    backend?: 'kernels' | 'runtime';
+    /** Sequences one decode step carries on that backend (1 when serial). */
+    rows?: number;
+    /** Prompt tokens fed per second, measured over this session's prefill. */
+    prefillTokPerSec?: number;
+    /** Answer tokens produced per second, measured over this session's decode. */
+    decodeTokPerSec?: number;
+    /** Raw counters behind those rates. */
+    prefillTokens?: number;
+    decodeTokens?: number;
     /** Bounded fresh-worker recoveries, not successful generations. */
     recoveries?: number;
     lastProgressAt?: number;
@@ -656,6 +719,17 @@ namespace AT.local {
   };
 
   /** The status object arrives over a message boundary; nothing in it is trusted. */
+  /** A rate or a count that came off the wire: kept only when it is a number. */
+  function rateField(key: 'prefillTokPerSec' | 'decodeTokPerSec', value: unknown): Partial<LocalStatus> {
+    const rate = Number(value);
+    return Number.isFinite(rate) && rate >= 0 ? { [key]: Math.round(rate * 10) / 10 } : {};
+  }
+
+  function countField(key: 'prefillTokens' | 'decodeTokens', value: unknown): Partial<LocalStatus> {
+    const count = Number(value);
+    return Number.isFinite(count) && count >= 0 ? { [key]: Math.round(count) } : {};
+  }
+
   export function normalizeStatus(raw: unknown): LocalStatus {
     const input = (raw ?? {}) as Record<string, unknown>;
     const size = Number(input.loadedBytes);
@@ -676,6 +750,15 @@ namespace AT.local {
         ? { phase: input.phase as ModelPhase | null }
         : {}),
       ...(typeof input.softwareRendering === 'boolean' ? { softwareRendering: input.softwareRendering } : {}),
+      ...(input.backend === 'kernels' || input.backend === 'runtime' ? { backend: input.backend } : {}),
+      ...(() => {
+        const width = Number(input.rows);
+        return Number.isFinite(width) && width >= 1 && width <= 8 ? { rows: Math.round(width) } : {};
+      })(),
+      ...rateField('prefillTokPerSec', input.prefillTokPerSec),
+      ...rateField('decodeTokPerSec', input.decodeTokPerSec),
+      ...countField('prefillTokens', input.prefillTokens),
+      ...countField('decodeTokens', input.decodeTokens),
       ...(Number.isFinite(input.recoveries) ? { recoveries: Math.max(0, Number(input.recoveries)) } : {}),
       ...(Number.isFinite(input.outputChars) && Number(input.outputChars) >= 0
         ? { outputChars: Math.min(Math.round(Number(input.outputChars)), 1_000_000) }
@@ -726,6 +809,9 @@ namespace AT.local {
     'no-model': true,
     'model-missing': true,
     'model-load-failed': true,
+    // The host still answers, one generation at a time: the decode pool could
+    // not start, so parallel decoding is off for this load.
+    'worker-init': true,
     'generation-failed': true,
     'invalid-output': true,
     'generation-timeout': true,
