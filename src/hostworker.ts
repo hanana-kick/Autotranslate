@@ -65,6 +65,25 @@ namespace AT.hostworker {
   /** `past_key_values.N.{key,value}` of the cohort being decoded. */
   let cache: Record<string, AT.pipelinehost.Tensor> | null = null;
 
+  // Only requests with a subscriber pay for progress bookkeeping. Token arrays
+  // are cloned by postMessage at most every 40 ms, using existing CPU picks.
+  const streaming = new Map<number, { at: number; count: number }>();
+
+  function progress(id: number, tokens: number[], flush = false): void {
+    const pending = streaming.get(id);
+    if (!pending || pending.count === tokens.length) return;
+    const now = performance.now();
+    if (!flush && now - pending.at < 40) return;
+    pending.at = now;
+    pending.count = tokens.length;
+    post({ type: L.WORKER_MESSAGE.PROGRESS, id, tokens });
+  }
+
+  function finishProgress(outcome: AT.engine.Outcome): void {
+    if (outcome.ok) progress(outcome.id, outcome.tokens, true);
+    streaming.delete(outcome.id);
+  }
+
   function messageOf(error: unknown): string {
     return String((error as { message?: unknown })?.message ?? error ?? 'the decode engine failed');
   }
@@ -171,6 +190,7 @@ namespace AT.hostworker {
       // A page's packs arrive in the same tick and must share the first step.
       coalesceMs: AT.C.ENGINE_COALESCE_MS,
       onDone: (outcome) => {
+        finishProgress(outcome);
         if (outcome.ok) {
           const measured = kernels?.stats();
           post({
@@ -231,6 +251,7 @@ namespace AT.hostworker {
         // the first step, not take one prefill each.
         coalesceMs: AT.C.ENGINE_COALESCE_MS,
         onDone: (outcome) => {
+          finishProgress(outcome);
           if (outcome.ok) post({ type: L.WORKER_MESSAGE.RESULT, id: outcome.id, ok: true, tokens: outcome.tokens });
           else {
             post({
@@ -264,18 +285,22 @@ namespace AT.hostworker {
     }
     if (message?.type === L.WORKER_MESSAGE.GENERATE) {
       const job = message as AT.local.WorkerGenerate;
+      if (job.stream) streaming.set(job.id, { at: -Infinity, count: 0 });
+      const onProgress = job.stream ? (tokens: number[]) => progress(job.id, tokens) : undefined;
       if (kernels) {
-        kernels.add({ id: job.id, prompt: job.inputIds, maxNewTokens: job.maxNewTokens });
+        kernels.add({ id: job.id, prompt: job.inputIds, maxNewTokens: job.maxNewTokens, onProgress });
         return;
       }
       if (!runner) {
+        streaming.delete(job.id);
         post({ type: L.WORKER_MESSAGE.RESULT, id: job.id, ok: false, error: 'this decode engine has no session', code: 'worker-init' });
         return;
       }
-      runner.add({ id: job.id, prompt: job.inputIds, maxNewTokens: job.maxNewTokens });
+      runner.add({ id: job.id, prompt: job.inputIds, maxNewTokens: job.maxNewTokens, onProgress });
       return;
     }
     if (message?.type === L.WORKER_MESSAGE.DROP && typeof message.id === 'number') {
+      streaming.delete(message.id);
       if (kernels) kernels.drop(message.id);
       else runner?.drop(message.id);
     }

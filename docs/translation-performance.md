@@ -505,3 +505,82 @@ Raw report and screenshots:
 The next capacity decision must distinguish whole-comment tail latency from
 prefix responsiveness: small-request scheduling improves interruption points,
 but whole-comment p95 and burst deadline misses remain the acceptance criteria.
+
+## Streaming aurora presentation
+
+Generation now publishes real cumulative translation previews before its final
+answer. Kernel and runtime workers forward generated-token progress without
+additional GPU readbacks; the host decodes only generated IDs and buffers
+unfinished Unicode. Worker notifications are bounded to approximately 40 ms.
+The document fallback uses Transformers.js `TextStreamer` with the prompt and
+special tokens excluded. OpenAI-compatible requests use SSE when the page
+subscribes to previews; incomplete JSON string escapes and batch framing never
+become page text.
+
+Operation-scoped runtime ports carry indexed previews through the same
+authorized background and offscreen dispatch paths. Deduplication and batching
+map progress back to the original text positions. A reset clears a failed
+attempt before a retry. Final validation, completion accounting and caching
+still require the final answer; previews do not satisfy the one-second
+whole-comment SLO.
+
+The aurora component renders previews inside its shadow root while preserving
+the original light-DOM Text node. It coalesces updates on a 40 ms cadence with
+animation-frame scheduling. New or corrected suffixes fade in over 160 ms;
+the unchanged prefix stays opaque and does not restart an animation. At most
+five fading spans are retained, then folded into stable text. The changing
+tail carries the aurora. Final application reveals the canonical Text without
+re-fading the whole paragraph.
+
+Restore, failure, source edits and detachment discard previews and pending
+repaints. Reduced-motion and forced-colors modes keep text readable without
+the visual effects. Shadow text changes do not wake the page's translation
+mutation observer. Preview length can still change line wrapping: this is
+inline content, not a height-frozen overlay.
+
+### Streaming verification results
+
+Chrome build and tooling types passed. The 289 targeted Node cases and 43
+browser cases passed across focused runs. The tests exercised real SSE over
+HTTP, indexed/deduplicated previews, unfinished Unicode, invalid final output,
+retry resets, frame-local ports, exact restoration, external page edits,
+clipped suffixes, bounded rendering regions and actual fade progression.
+Test fixture corrections used a genuinely foreign-script response to exercise
+the existing script-retry policy and retained the empty-answer failure contract.
+
+The installed Chrome extension then ran the real model on M5 with
+`STREAMING=1 YOUTUBE_COMMENTS=1 YOUTUBE_COMMENTS_REPLIES_ONLY=1`.
+The four-paragraph smoke page completed 4/4 translations in the harness's
+two-second sample, on the kernel backend with three generations. All five
+text components (title plus paragraphs) displayed actual token previews before
+their final commit, while their canonical original Text nodes stayed unchanged.
+
+| Installed smoke measurement | Value |
+| --- | ---: |
+| Observed busy preview updates | 16 |
+| Maximum fading spans in a component | 3 (limit: 5) |
+| First title preview after presentation dispatch | 521 ms |
+| First paragraph preview after presentation dispatch | 277 ms |
+| Preview lead before final commit across five components | 155–646 ms |
+| Animation-frame interval p50 / p95 | 8.3 / 9.3 ms |
+| Frames over 50 ms / sampled intervals | 4 / 246 |
+| Largest sampled frame interval | 200 ms |
+
+This 2.619-second observation included screenshot and automation work. It is
+evidence of working previews, not a controlled measurement of incremental
+render overhead; the four long frame intervals must not be omitted. The
+stream observer itself consumed approximately 0.1 ms, which is not the
+component's rendering cost. The real in-progress screenshot and translated
+YouTube reply screenshots were visually inspected.
+
+The YouTube reply scenario completed with null final content error and zero
+remaining component hosts after restore. Its layout exposed only one initial
+comment, so its timings are not directly comparable to the preceding
+six-comment session. Whole-comment p50/p95 among 14 completed viewport episodes
+were 2.181/4.357 s; 7 other episodes left before a known deadline, and 11 of 14
+known deadlines missed one second. Streaming improves the first visible
+translation, not the previously unmet whole-comment capacity target.
+
+Raw reports and screenshots:
+`test-results/browser/streaming-fade-live/`.
+No commit, push or release was performed for this feature.

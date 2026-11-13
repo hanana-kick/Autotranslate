@@ -422,7 +422,7 @@ if (typeof self.importScripts === 'function') {
     return { settings: AT.settings.contentSnapshot(next), pattern: canonical };
   }
 
-  async function translateBatch(message: AT.background.BatchRequest, sender: AT.Sender): Promise<AT.MessageResult> {
+  async function translateBatch(message: AT.background.BatchRequest, sender: AT.Sender, onProgress?: AT.TranslationProgress): Promise<AT.MessageResult> {
     await targetsReady;
     const tabId = sender.tab?.id;
     if (tabId == null || !targets.has(tabId)) throw new Error('translation is turned off for this tab');
@@ -432,6 +432,9 @@ if (typeof self.importScripts === 'function') {
       throw new Error('obsolete translation settings');
     }
     const request: AT.engines.TranslateRequest = {
+      ...(onProgress ? { onProgress: (index: number, text: string) => {
+        if (targets.has(tabId) && (targetRevisions.get(tabId) ?? 0) === revision) onProgress(index, text);
+      } } : {}),
       texts: message.texts ?? [],
       source: message.sourceLang ?? settings.sourceLang,
       target: message.targetLang ?? settings.targetLang,
@@ -831,7 +834,7 @@ if (typeof self.importScripts === 'function') {
   // The runtime hands over untrusted JSON: each handler names the payload it
   // reads, and the table narrows the message to that shape once, here.
   AT.onMessage({
-    [C.MSG.BATCH]: (message, sender) => translateBatch(message as AT.background.BatchRequest, sender),
+    [C.MSG.BATCH]: (message, sender, onProgress) => translateBatch(message as AT.background.BatchRequest, sender, onProgress),
     [C.MSG.STATE_CHANGED]: (message, sender) => reportState(message as AT.background.StateReport, sender),
     [C.MSG.GET_STATE]: (message) => getState(message as AT.background.TabRequest),
     [C.MSG.SET_TAB_ENABLED]: (message, sender) => {

@@ -20,9 +20,9 @@ namespace AT.offscreen {
 
   /** The host answers with the same payload the background would have got
    *  back over the message boundary, so one dispatcher serves both. */
-  const handle = async (message: AT.Message): Promise<AT.local.HostReply | Record<string, never>> => {
+  const handle = async (message: AT.Message, _sender: AT.Sender, onProgress?: AT.TranslationProgress): Promise<AT.local.HostReply | Record<string, never>> => {
     if (!addressed(message)) return {};
-    return AT.onnxhost.handle(message);
+    return AT.onnxhost.handle(message, onProgress);
   };
 
   AT.onMessage({

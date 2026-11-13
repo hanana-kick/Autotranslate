@@ -249,6 +249,8 @@ function installSession(options: {
   beforeGenerate?: () => Promise<void>;
   tokenizer?: typeof codepoints;
   generatedText?: (prompt: string) => string;
+  previewChunks?: string[];
+  onStreamer?: (options: { skip_prompt?: boolean; skip_special_tokens?: boolean }) => void;
 } = {}) {
   const inline: string[] = [];
   const calls = { tokenizers: 0, pipelines: 0, disposed: 0 };
@@ -275,6 +277,16 @@ function installSession(options: {
   onnxhost.configure({
     runtime: () => ({
       env: { backends: { onnx: { wasm: {} } } },
+      TextStreamer: class {
+        readonly config: { callback_function: (text: string) => void };
+        constructor(_tokenizer: unknown, config: {
+          skip_prompt?: boolean; skip_special_tokens?: boolean; callback_function: (text: string) => void;
+        }) {
+          this.config = config;
+          options.onStreamer?.(config);
+        }
+        end() {}
+      },
       AutoTokenizer: {
         from_pretrained: async () => {
           calls.tokenizers += 1;
@@ -285,9 +297,12 @@ function installSession(options: {
       pipeline: async () => {
         calls.pipelines += 1;
         await options.beforePipeline?.();
-        const pipe = async (prompt: string) => {
+        const pipe = async (prompt: string, generation: {
+          streamer?: { config: { callback_function: (text: string) => void } };
+        }) => {
           inline.push(prompt);
           await options.beforeGenerate?.();
+          for (const chunk of options.previewChunks ?? []) generation.streamer?.config.callback_function(chunk);
           return [{ generated_text: options.generatedText?.(prompt) ?? `${prompt}문서` }];
         };
         pipe.dispose = async () => { calls.disposed += 1; };
@@ -739,4 +754,133 @@ test('unload releases a nonkernel pipeline that finishes opening after cancellat
     gate.resolve();
     await finish(started, session);
   }
+});
+
+test('worker previews decode cumulative generated ids and hold incomplete Unicode tails', async () => {
+  const tokenizer = Object.assign(
+    (text: string) => codepoints(text),
+    {
+      ...codepoints,
+      decode: (ids: ArrayLike<number | bigint>) => {
+        const tokens = Array.from(ids).map(Number);
+        if (tokens[0] === 2000001) return tokens.length === 1 ? '\uFFFD' : '녕';
+        return codepoints.decode(tokens);
+      }
+    }
+  );
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const seen: [number, string][] = [];
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate(translateRequest(ASK_ONE), (index: number, text: string) => seen.push([index, text]));
+    started.push(request);
+    await until('streaming job', () => FakeEngine.inFlight.length === 1);
+    const job = jobFor(ASK_ONE);
+    job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: [2000001] } });
+    assert.deepEqual(seen, [], 'an incomplete UTF-8 sequence stays buffered');
+    job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: [2000001, 2000002] } });
+    assert.deepEqual(seen, [[0, '녕']]);
+    job.worker.answer(job, '녕');
+    assert.deepEqual((await request).translations, ['녕']);
+    job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: [1, 2, 3] } });
+    assert.deepEqual(seen, [[0, '녕']], 'settled ids cannot change the preview');
+  } finally { await finish(started, session); }
+});
+
+test('a retry clears its old preview and ignores progress from the old request id', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const seen: string[] = [];
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate(translateRequest(ASK_ONE), (_index: number, text: string) => seen.push(text));
+    started.push(request);
+    await until('first attempt', () => FakeEngine.inFlight.length === 1);
+    const first = jobFor(ASK_ONE);
+    first.worker.onmessage?.({ data: { type: 'progress', id: first.id, tokens: [...'こんにちは'].map((ch) => ch.codePointAt(0)) } });
+    first.worker.answer(first, 'こんにちは');
+    await until('retry', () => FakeEngine.inFlight.length === 1);
+    const second = jobFor(ASK_ONE);
+    assert.notEqual(second.id, first.id);
+    first.worker.onmessage?.({ data: { type: 'progress', id: first.id, tokens: [...'wrong late'].map((ch) => ch.codePointAt(0)) } });
+    assert.deepEqual(seen, ['こんにちは', '']);
+    second.worker.answer(second, '번역');
+    assert.deepEqual((await request).translations, ['번역']);
+  } finally { await finish(started, session); }
+});
+
+test('a worker crash resets its preview before streamed inline fallback, including its final flush', async () => {
+  const session = installSession({
+    previewChunks: ['문', '서'],
+    onStreamer: (options) => {
+      assert.equal(options.skip_prompt, true);
+      assert.equal(options.skip_special_tokens, true);
+    }
+  });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const seen: string[] = [];
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate(translateRequest(ASK_ONE), (_index: number, text: string) => seen.push(text));
+    started.push(request);
+    await until('worker job', () => FakeEngine.inFlight.length === 1);
+    const job = jobFor(ASK_ONE);
+    job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: ['반'.codePointAt(0)] } });
+    job.worker.crash();
+    assert.deepEqual((await request).translations, ['문서']);
+    assert.deepEqual(seen, ['반', '', '문', '문서']);
+  } finally { await finish(started, session); }
+});
+
+test('streaming does not turn invalid final output into success and clears the visible prefix', async () => {
+  const session = installSession({ previewChunks: ['문서'], generatedText: (prompt) => prompt + '문서<pad>' });
+  FakeEngine.reset();
+  FakeEngine.failInit = 'use document fallback';
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const seen: string[] = [];
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate(translateRequest(ASK_ONE), (_index: number, text: string) => seen.push(text));
+    started.push(request);
+    await assert.rejects(request, { reason: 'invalid-output' });
+    assert.deepEqual(seen, ['문서', '']);
+    assert.equal(session.inline.length, 1, 'invalid final output is not retried into apparent success');
+  } finally { await finish(started, session); }
+});
+
+test('numbered batch streams mapped segments without partial markers and resets before per-text retry', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const seen: [number, string][] = [];
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate(
+      { ...translateRequest(ASK_ONE), texts: [ASK_ONE, ASK_TWO] },
+      (index: number, text: string) => seen.push([index, text])
+    );
+    started.push(request);
+    await until('batch job', () => FakeEngine.inFlight.length === 1);
+    const batch = jobFor(ASK_ONE);
+    const progress = (text: string) => batch.worker.onmessage?.({
+      data: { type: 'progress', id: batch.id, tokens: Array.from(text).map((ch) => ch.codePointAt(0)) }
+    });
+    progress('1. 첫째\n2.');
+    assert.deepEqual(seen, [[0, '첫째']], 'an unfinished marker cannot leak into a translation');
+    progress('1. 첫째\n2. 둘째');
+    assert.deepEqual(seen, [[0, '첫째'], [1, '둘째']]);
+    batch.worker.answer(batch, '1. 첫째\n3. 잘못됨');
+    await until('first individual retry', () => FakeEngine.inFlight.length === 1);
+    assert.deepEqual(seen, [[0, '첫째'], [1, '둘째'], [0, ''], [1, '']]);
+    const first = jobFor(ASK_ONE);
+    first.worker.answer(first, '첫째');
+    await until('second individual retry', () => FakeEngine.inFlight.length === 1);
+    const second = jobFor(ASK_TWO);
+    second.worker.answer(second, '둘째');
+    assert.deepEqual((await request).translations, ['첫째', '둘째']);
+  } finally { await finish(started, session); }
 });

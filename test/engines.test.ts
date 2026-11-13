@@ -406,3 +406,69 @@ test('local: a host that cannot count falls back to character estimates', async 
   assert.equal(warnings.length, 1, 'the fallback is announced, not silent');
   assert.match(String(warnings[0]![0]), /did not count tokens/);
 });
+
+test('local: streamed indices survive counts, chunking, deduplication and skipped target text', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const seen: [number, string][] = [];
+  const requests: ATNamespace[] = [];
+  let previous: ((index: number, text: string) => void) | undefined;
+  AT.local.callHost = async (message: ATNamespace, onProgress?: (index: number, text: string) => void) => {
+    requests.push(message);
+    assert.equal(message.onProgress, undefined);
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, counts: message.texts.map(() => 500), overhead: 90 };
+    previous?.(0, '늦은 응답');
+    previous = onProgress;
+    onProgress?.(0, '초안');
+    onProgress?.(0, '');
+    onProgress?.(0, '번역 ' + message.texts[0]);
+    onProgress?.(9, '잘못된 위치');
+    return { ok: true, translations: ['번역 ' + message.texts[0]] };
+  };
+  const result = await localModel({
+    texts: ['한국어', 'alpha', '!', 'beta', 'alpha', 'gamma'], localMaxTokens: 1024,
+    onProgress: (index: number, text: string) => seen.push([index, text])
+  });
+  previous?.(0, '완료 후 응답');
+  assert.deepEqual(requests.filter(message => message.type === AT.C.MSG.LOCAL_TRANSLATE).map(message => message.texts),
+    [['alpha'], ['beta'], ['gamma']]);
+  assert.deepEqual(seen, [
+    [1, '초안'], [4, '초안'], [1, ''], [4, ''], [1, '번역 alpha'], [4, '번역 alpha'],
+    [3, '초안'], [3, ''], [3, '번역 beta'], [5, '초안'], [5, ''], [5, '번역 gamma']
+  ]);
+  assert.deepEqual(result.translations, ['한국어', '번역 alpha', '!', '번역 beta', '번역 alpha', '번역 gamma']);
+});
+
+test('local: an invalid final count clears streamed duplicates and rejects stale progress', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const seen: [number, string][] = [];
+  let stale: ((index: number, text: string) => void) | undefined;
+  AT.local.callHost = async (message: ATNamespace, progress?: (index: number, text: string) => void) => {
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, counts: [10], overhead: 10 };
+    stale = progress;
+    progress?.(0, '안녕');
+    return { ok: true, translations: [] };
+  };
+  await assert.rejects(localModel({ texts: ['hello', 'hello'], onProgress: (index: number, text: string) => seen.push([index, text]) }), /result count/);
+  stale?.(0, '오래된 응답');
+  assert.deepEqual(seen, [[0, '안녕'], [1, '안녕'], [0, ''], [1, '']]);
+});
+
+test('local: cancellation clears previews even when the host completes later', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const controller = new AbortController();
+  const seen: string[] = [];
+  AT.local.callHost = async (message: ATNamespace, progress?: (index: number, text: string) => void) => {
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, counts: [10], overhead: 10 };
+    progress?.(0, '안녕');
+    controller.abort();
+    progress?.(0, '늦은 응답');
+    return { ok: true, translations: ['안녕하세요'] };
+  };
+  await assert.rejects(localModel({
+    signal: controller.signal, onProgress: (_index: number, text: string) => seen.push(text)
+  }), /cancelled/);
+  assert.deepEqual(seen, ['안녕', '']);
+});

@@ -1,7 +1,8 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { once } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import { load } from './helpers.ts';
 
 const AT = load('lib/constants.js', 'lib/pagecontext.js', 'lib/targets.js', 'lib/rules.js', 'lib/local.js', 'lib/settings.js', 'lib/engines.js');
@@ -199,4 +200,173 @@ test('server prompts unambiguously translate greetings and preserve fragment bou
   assert.match(requests[1].body.messages[0].content, /exactly 3 translated strings/);
   assert.deepEqual(JSON.parse(requests[1].body.messages[1].content), ['Read', 'the guide', 'carefully.']);
   assert.equal(requests.length, 2);
+});
+
+const event = (content: string | null, finish_reason: string | null = null) =>
+  'data: ' + JSON.stringify({ choices: [{ index: 0, delta: content === null ? {} : { content }, finish_reason }] }) + '\r\n\r\n';
+const complete = event(null, 'stop') + 'data: [DONE]\r\n\r\n';
+async function streamChunks(res: ServerResponse, chunks: (string | Buffer)[]) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+  for (const chunk of chunks) {
+    res.write(chunk);
+    await nextTurn();
+  }
+  res.end();
+}
+
+test('real SSE: decodes split UTF-8, CRLF and multiline data before the final reply', async t => {
+  const first = Buffer.from(event('안녕'));
+  const split = first.indexOf(Buffer.from('안')) + 1;
+  const seen: [number, string][] = [];
+  const gate = new EventEmitter();
+  const finish = once(gate, 'preview');
+  const { config, requests } = await endpoint(t, (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write(': keepalive\r\n\r');
+    void (async () => {
+      await nextTurn();
+      res.write('\n');
+      res.write(first.subarray(0, split));
+      await nextTurn();
+      res.write(first.subarray(split));
+      await finish;
+      res.write('data: {"choices": [\r\ndata: {"index":0,"delta":{"content":"하세요."},"finish_reason":null}]}\r\n\r\n');
+      res.end(complete);
+    })();
+  });
+  const pending = translate(config, ['Hello.'], { onProgress: (index: number, text: string) => {
+    seen.push([index, text]);
+    if (text === '안녕') gate.emit('preview');
+  } });
+  const result = await pending;
+  assert.deepEqual(seen, [[0, '안녕'], [0, '안녕하세요.']]);
+  assert.deepEqual(result.translations, ['안녕하세요.']);
+  assert.equal(requests[0].body.stream, true);
+  assert.equal(requests[0].headers.accept, 'text/event-stream');
+  assert.deepEqual(Object.keys(requests[0].body).sort(), ['messages', 'model', 'stream']);
+});
+
+test('real SSE: array previews decode unfinished escapes and map duplicates and skipped inputs', async t => {
+  const seen: [number, string][] = [];
+  const { config, requests } = await endpoint(t, (_req, res) => {
+    void streamChunks(res, [
+      event('["안\\u'),
+      event('B155\\uD83D'),
+      event('\\uDE00","고'),
+      event('마워"]'),
+      complete
+    ]);
+  });
+  const result = await translate(config, ['한국어', 'hello', '!', 'thanks', 'hello'], {
+    onProgress: (index: number, text: string) => seen.push([index, text])
+  });
+  assert.deepEqual(result.translations, ['한국어', '안녕😀', '!', '고마워', '안녕😀']);
+  assert.deepEqual(JSON.parse(requests[0].body.messages[1].content), ['hello', 'thanks']);
+  assert.deepEqual(seen, [[1, '안'], [4, '안'], [1, '안녕'], [4, '안녕'],
+    [1, '안녕😀'], [4, '안녕😀'], [3, '고'], [3, '고마워']]);
+  assert.ok(seen.every(([, text]) => !/[\[\]"\\]|\uFFFD/u.test(text)));
+});
+
+test('real SSE: chunk-local indices remain original indices across server request boundaries', async t => {
+  const texts = Array.from({ length: 17 }, (_, index) => `input ${index}`);
+  const seen: [number, string][] = [];
+  const { config, requests } = await endpoint(t, (_req, res, body) => {
+    const input = body.messages[1].content as string;
+    const answer = input.startsWith('[')
+      ? JSON.stringify((JSON.parse(input) as string[]).map(text => '번역 ' + text.slice(6)))
+      : '번역 ' + input.slice(6);
+    void streamChunks(res, [event(answer), complete]);
+  });
+  const result = await translate(config, ['한국어', ...texts, texts[16]!, '!'], {
+    onProgress: (index: number, text: string) => seen.push([index, text])
+  });
+  assert.equal(requests.length, 2);
+  assert.deepEqual(seen, [...texts.map((_, index) => [index + 1, '번역 ' + index]), [18, '번역 16']]);
+  assert.equal(result.translations[18], '번역 16');
+  assert.equal(result.requested, 17);
+});
+
+for (const [name, ending, code] of [
+  ['truncation', event(null, 'length') + 'data: [DONE]\n\n', 'format'],
+  ['refusal', 'data: {"choices":[{"index":0,"delta":{"refusal":"no"}}]}\n\n', 'provider'],
+  ['provider error', 'data: {"error":{"message":"private server text"}}\n\n', 'provider'],
+  ['missing done', event(null, 'stop'), 'format'],
+  ['missing finish', 'data: [DONE]\n\n', 'format'],
+  ['malformed event', 'data: not-json\n\n', 'format'],
+  ['invalid final output', event('<pad>') + complete, 'format']
+] as const) {
+  test('real SSE: ' + name + ' clears the preview and never becomes a success', async t => {
+    const seen: string[] = [];
+    const { config } = await endpoint(t, (_req, res) => { void streamChunks(res, [event('안녕'), ending]); });
+    await assert.rejects(translate(config, ['Hello.'], { onProgress: (_index: number, text: string) => seen.push(text) }),
+      (error: unknown) => error instanceof Error && 'code' in error && error.code === code && !error.message.includes('private server text'));
+    assert.equal(seen[0], '안녕');
+    assert.equal(seen.at(-1), '');
+  });
+}
+
+test('real SSE: invalid final array count clears every mapped preview', async t => {
+  const seen: [number, string][] = [];
+  const { config } = await endpoint(t, (_req, res) => {
+    void streamChunks(res, [event('["안녕"]'), complete]);
+  });
+  await assert.rejects(translate(config, ['hello', 'thanks', 'hello'], {
+    onProgress: (index: number, text: string) => seen.push([index, text])
+  }), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'format' && 'reason' in error && error.reason === 'count');
+  assert.deepEqual(seen, [[0, '안녕'], [2, '안녕'], [0, ''], [2, '']]);
+});
+
+test('real SSE: cancellation clears current previews and ignores buffered later events', async t => {
+  const controller = new AbortController();
+  const seen: string[] = [];
+  const { config } = await endpoint(t, (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end(event('안녕') + event('하세요.') + complete);
+  });
+  await assert.rejects(translate(config, ['Hello.'], {
+    signal: controller.signal,
+    onProgress: (_index: number, text: string) => {
+      seen.push(text);
+      if (text) controller.abort();
+    }
+  }), /cancelled/);
+  assert.deepEqual(seen, ['안녕', '']);
+});
+
+test('real SSE: body deadline and response bounds still apply', async t => {
+  // Exercise fetch's native body-abort behavior against the production deadline;
+  // fake timers do not drive the real HTTP transport.
+  const stalled = await endpoint(t, (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.write(event('안녕'));
+  });
+  const seen: string[] = [];
+  await assert.rejects(translate(stalled.config, ['Hello.'], {
+    onProgress: (_index: number, text: string) => seen.push(text)
+  }), (error: unknown) => error instanceof Error && 'code' in error && error.code === 'timeout');
+  assert.deepEqual(seen, ['안녕', '']);
+  const oversized = await endpoint(t, (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Content-Length': 3000000 }); res.flushHeaders();
+  });
+  await assert.rejects(translate(oversized.config, ['Hello.'], { onProgress: () => {} }), /too large/);
+});
+
+test('real SSE: an unfinished UTF-8 character cannot be accepted as final text', async t => {
+  const { config } = await endpoint(t, (_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.end(Buffer.concat([Buffer.from(event('안녕')), Buffer.from([0xED, 0x95])]));
+  });
+  const seen: string[] = [];
+  await assert.rejects(translate(config, ['Hello.'], { onProgress: (_index: number, text: string) => seen.push(text) }));
+  assert.deepEqual(seen, ['안녕', '']);
+});
+
+test('real SSE: an unfinished JSON surrogate never leaks into previews or final results', async t => {
+  const seen: string[] = [];
+  const { config } = await endpoint(t, (_req, res) => {
+    void streamChunks(res, [event('안녕\uD83D'), complete]);
+  });
+  await assert.rejects(translate(config, ['Hello.'], {
+    onProgress: (_index: number, text: string) => seen.push(text)
+  }), /incomplete Unicode/);
+  assert.deepEqual(seen, ['안녕', '']);
 });

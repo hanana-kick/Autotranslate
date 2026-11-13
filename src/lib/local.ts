@@ -124,6 +124,7 @@ namespace AT.local {
     GENERATE: 'generate',
     DROP: 'drop',
     READY: 'ready',
+    PROGRESS: 'progress',
     RESULT: 'result'
   } as const;
 
@@ -143,12 +144,15 @@ namespace AT.local {
     id: number;
     inputIds: number[];
     maxNewTokens: number;
+    stream?: boolean;
   };
   /** The host gave up on a request (its own deadline): stop spending steps. */
   export type WorkerDrop = { type: typeof WORKER_MESSAGE.DROP; id: number };
   export type WorkerReply =
     | { type: typeof WORKER_MESSAGE.READY; ok: true; backend?: 'kernels' | 'runtime'; rows?: number }
     | { type: typeof WORKER_MESSAGE.READY; ok: false; error: string; code: string }
+    /** Cumulative generated ids, never the prompt. */
+    | { type: typeof WORKER_MESSAGE.PROGRESS; id: number; tokens: number[] }
     | {
         type: typeof WORKER_MESSAGE.RESULT;
         id: number;
@@ -173,11 +177,11 @@ namespace AT.local {
    * `background` placement calls the host module in place; `offscreen`
    * reaches it over runtime messages.
    */
-  export async function callHost(message: AT.Message): Promise<AT.Response> {
+  export async function callHost(message: AT.Message, onProgress?: AT.TranslationProgress): Promise<AT.Response> {
     const host = placement === 'background' ? AT.onnxhost : undefined;
-    if (!host) return AT.sendMessage(Object.assign({}, message, { to: TARGET_OFFSCREEN }));
+    if (!host) return AT.sendMessage(Object.assign({}, message, { to: TARGET_OFFSCREEN }), onProgress);
     try {
-      const reply = (await host.handle(message)) as Record<string, unknown>;
+      const reply = (await host.handle(message, onProgress)) as Record<string, unknown>;
       return { ok: true, ...reply };
     } catch (error: unknown) {
       const rejection = error as { message?: unknown; code?: unknown };

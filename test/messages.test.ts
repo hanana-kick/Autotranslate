@@ -464,3 +464,48 @@ test('a missing port response has a finite deadline and closes its channel', asy
   assert.deepEqual(await result,{ok:false,error:'model preparation channel timed out',code:'provider'});
   assert.ok(ports.connections[0]!.client.closed);
 });
+
+test('translation previews reach only their operation before the final validated result', async () => {
+  const h = boot({ sendMessage: () => assert.fail('stream must not use one-shot messaging') });
+  const ports = installPorts(h);
+  const requests = new Map<string, { progress: (index: number, text: string) => void; finish: (value: unknown) => void }>();
+  h.AT.onMessage({ [h.AT.C.MSG.BATCH]: (message: Message, sender: unknown, progress: (index: number, text: string) => void) => {
+    assert.deepEqual(sender, SENDER);
+    return new Promise(resolve => requests.set(String(message.key), { progress, finish: resolve }));
+  } });
+  const seen: string[][] = [[], []];
+  const first = h.AT.sendMessage({ type: h.AT.C.MSG.BATCH, key: 'first' }, (index: number, text: string) => seen[0]!.push(`${index}:${text}`));
+  const second = h.AT.sendMessage({ type: h.AT.C.MSG.BATCH, key: 'second' }, (index: number, text: string) => seen[1]!.push(`${index}:${text}`));
+  await flush();
+  requests.get('first')!.progress(0, '번역');
+  requests.get('second')!.progress(1, '다른 번역');
+  requests.get('first')!.progress(0, '');
+  await flush();
+  assert.deepEqual(seen, [['0:번역', '0:'], ['1:다른 번역']]);
+  requests.get('first')!.finish({ translations: ['번역 완료'] });
+  assert.deepEqual(await first, { ok: true, translations: ['번역 완료'] });
+  assert.equal(ports.connections[0]!.client.closed, true);
+  assert.equal(ports.connections[1]!.client.closed, false);
+  requests.get('first')!.progress(0, 'stale');
+  requests.get('second')!.finish({ translations: ['다른 완료'] });
+  await second;
+  assert.deepEqual(seen[0], ['0:번역', '0:']);
+});
+
+test('a lost translation channel rejects partial output rather than committing it', async () => {
+  const h = boot({});
+  const ports = installPorts(h);
+  let progress!: (index: number, text: string) => void;
+  h.AT.onMessage({ [h.AT.C.MSG.LOCAL_TRANSLATE]: (_message: Message, _sender: unknown, callback: typeof progress) => {
+    progress = callback;
+    return new Promise(() => {});
+  } });
+  const seen: string[] = [];
+  const result = h.AT.sendMessage({ type: h.AT.C.MSG.LOCAL_TRANSLATE, to: 'offscreen' }, (_index: number, text: string) => seen.push(text));
+  await flush();
+  progress(0, '미완성');
+  await flush();
+  ports.connections[0]!.server.disconnect();
+  assert.deepEqual(await result, { ok: false, error: 'translation stream closed', code: 'no-response' });
+  assert.deepEqual(seen, ['미완성']);
+});

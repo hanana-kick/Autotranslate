@@ -128,3 +128,33 @@ published; its on-device execution remains unverified.
 No token or model file is committed. Authenticated browser traces/profiles are excluded from artifacts; text evidence is scanned before upload. Screenshots, sanitized logs, before/after HTML, installed-file inventories, environment and tested package hashes are retained.
 
 Semantic translation quality, arbitrary websites, all GPU/backends and hours-long memory stability are not certified by these suites. Missing inline alignment falls back to independent fragments to preserve element ownership, not to prove fluency. Oversized inputs fail explicitly. Cancellation immediately stops DOM writes, while actual computation is separately supervised and bounded.
+
+## Streaming translation presentation
+
+Run the changed-region fade, exact-source ownership, cancellation, Unicode,
+SSE framing and port-routing regressions with the focused streaming suites:
+`test/browser/streaming.test.mjs`, `test/dom.test.ts`,
+`test/messages.test.ts`, `test/engine.test.ts`, `test/onnxhost.test.ts`,
+`test/engines.test.ts` and `test/server.test.ts`.
+Browser tests inspect animation progression rather than only CSS declarations.
+
+For actual installed-extension token previews, use the current Chrome build:
+
+```sh
+UNSAFE_WEBGPU=0 HEADED=1 STREAMING=1 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/streaming-fade-live npm run test:onnx
+```
+
+`STREAMING=1` also enables the aurora observation. The report's `streaming`
+section records shadow preview events, source/canonical text, first-preview
+and completion times, bounded fade-span counts, animation-frame intervals and
+observer processing time. It requires actual previews before completion while
+the original Text remains unchanged. The preview screenshot and the existing
+pending/translated/restored screenshots are retained. These frame intervals
+include screenshot/automation effects; they are not an isolated render-cost
+benchmark or a controlled speedup comparison.
+
+Optional `YOUTUBE_COMMENTS=1 YOUTUBE_COMMENTS_REPLIES_ONLY=1` additionally runs
+the existing real-site reply scenario. Its whole-comment metric still observes
+canonical committed text, not temporary shadow previews.

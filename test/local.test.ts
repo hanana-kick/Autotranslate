@@ -579,3 +579,29 @@ test('only an ONNX graph is read as an installed model', () => {
   assert.equal(local.modelKind({ name: 'downloaded.bin' }), 'unknown', 'anything else is the runtime\'s verdict');
 });
 
+
+test('callHost forwards translation previews in both placements without changing the final reply', async () => {
+  const previews: [number, string][] = [];
+  const onProgress = (index: number, text: string) => previews.push([index, text]);
+  const reply = { translations: ['번역'] };
+  const deliver = async (_message: unknown, progress?: (index: number, text: string) => void) => {
+    progress?.(0, '번');
+    progress?.(0, '');
+    progress?.(0, '번역');
+    return reply;
+  };
+  AT.onnxhost = { handle: deliver };
+  AT.sendMessage = async (message: unknown, progress?: (index: number, text: string) => void) =>
+    ({ ok: true, ...await deliver(message, progress) });
+  try {
+    for (const placement of ['background', 'offscreen']) {
+      local.setHostPlacement(placement);
+      assert.deepEqual(await local.callHost({ type: 'at/local-translate' }, onProgress), { ok: true, ...reply });
+    }
+    assert.deepEqual(previews, [[0, '번'], [0, ''], [0, '번역'], [0, '번'], [0, ''], [0, '번역']]);
+  } finally {
+    local.setHostPlacement('offscreen');
+    delete AT.onnxhost;
+    delete AT.sendMessage;
+  }
+});

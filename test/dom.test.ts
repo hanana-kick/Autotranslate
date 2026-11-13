@@ -1071,3 +1071,77 @@ test('a zero character quantum preserves whole sources while honoring the config
   assert.ok(calls.some((call) => call.length === 2));
   assert.deepEqual(calls.flat(), sources);
 });
+
+test('stream previews never commit or cache unfinished output and late callbacks cannot resurrect it', async () => {
+  for (const ending of ['failure', 'restore', 'page-edit']) {
+    const node = t('Original comment.');
+    let emit!: (index: number, text: string) => void;
+    let resolve!: (answers: string[]) => void;
+    let reject!: (error: Error) => void;
+    const shown = new Map<StubText, string>();
+    let requests = 0;
+    const { translator } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+      presentation: {
+        begin: () => {}, preview: (node: StubText, text: string) => shown.set(node, text),
+        clearPreview: (node: StubText) => shown.delete(node),
+        applied: (node: StubText) => shown.delete(node), settled: (node: StubText) => shown.delete(node),
+        forget: (node: StubText) => shown.delete(node), restore: () => shown.clear(), ownsMutation: () => false
+      },
+      translate: (_texts: string[], progress: typeof emit) => {
+        requests++;
+        emit = progress;
+        return new Promise<string[]>((yes, no) => { resolve = yes; reject = no; });
+      }
+    });
+    const work = translator.translateRoot();
+    await turn();
+    emit(0, '미완성 번역');
+    assert.equal(shown.get(node), '미완성 번역');
+    assert.equal(node.nodeValue, 'Original comment.');
+    assert.equal(translator.has(node), false);
+    if (ending === 'failure') {
+      reject(new Error('generation failed'));
+      await assert.rejects(work, /generation failed/);
+    } else {
+      if (ending === 'restore') translator.restore();
+      else node.nodeValue = 'Page edited comment.';
+      resolve(['완료된 번역']);
+      await work;
+    }
+    emit(0, 'late output');
+    assert.equal(shown.size, 0);
+    assert.equal(node.nodeValue, ending === 'page-edit' ? 'Page edited comment.' : 'Original comment.');
+    assert.equal(translator.has(node), false);
+    const retry = translator.translateNodes([node]);
+    await turn();
+    assert.equal(requests, 2, 'a preview must not become a successful cache entry');
+    resolve(['새 번역']);
+    await retry;
+    assert.equal(node.nodeValue, '새 번역');
+  }
+});
+
+test('streaming a bounded suffix retains committed prefix and untouched original tail', async () => {
+  const node = t('First phrase. Second phrase. Third phrase.');
+  const seen: string[] = [];
+  const { translator } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+    workLimit: () => ({ maxChars: 16, maxTexts: 1 }),
+    presentation: {
+      begin: () => {}, preview: (_node: StubText, text: string) => seen.push(text),
+      clearPreview: () => {}, applied: () => {}, settled: () => {}, forget: () => {},
+      restore: () => {}, ownsMutation: () => false
+    },
+    translate: async (texts: string[], progress: (index: number, text: string) => void) => {
+      progress(0, '진행 중');
+      return upcase(texts);
+    }
+  });
+  const first = await translator.translateRoot();
+  assert.equal(seen[0], '진행 중 Second phrase. Third phrase.');
+  assert.equal(node.nodeValue, 'FIRST PHRASE. Second phrase. Third phrase.');
+  await translator.translateNodes(first.pending);
+  assert.equal(seen[1], 'FIRST PHRASE. 진행 중 Third phrase.');
+  assert.equal(node.nodeValue, 'FIRST PHRASE. SECOND PHRASE. Third phrase.');
+  translator.restore();
+  assert.equal(node.nodeValue, 'First phrase. Second phrase. Third phrase.');
+});

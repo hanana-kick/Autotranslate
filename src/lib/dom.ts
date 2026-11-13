@@ -22,7 +22,7 @@ namespace AT.dom {
     STYLE: true, TEMPLATE: true, TEXTAREA: true, TRACK: true, VIDEO: true
   };
 
-  export type Provider = (texts: string[]) => Promise<string[]>;
+  export type Provider = (texts: string[], onProgress?: AT.TranslationProgress) => Promise<string[]>;
 
   /** Only what the engine touches; tests inject a duck-typed document. */
   export type DocumentRoot = { nodeType: number; documentElement: Element | null };
@@ -568,10 +568,20 @@ namespace AT.dom {
       mergedRuns = 0;
       const scope = cacheScope?.() ?? '';
       const keyFor = (kind: string, sources: string[]) => JSON.stringify([scope, kind, sources]);
-      const ask = async (texts: string[]): Promise<string[]> => {
+      const ask = async (texts: string[], onProgress?: AT.TranslationProgress): Promise<string[]> => {
         if (cancelled()) return [];
         requested += texts.length;
-        const answers = await translate(texts);
+        let active = true;
+        let answers: string[];
+        try {
+          answers = await translate(texts, presentation && onProgress ? (index, text) => {
+            if (!active || cancelled() || !Number.isInteger(index) || index < 0 || index >= texts.length) return;
+            if (text && AT.outputIssue(texts[index]!, text, true)) return;
+            onProgress(index, text);
+          } : undefined);
+        } finally {
+          active = false;
+        }
         if (!Array.isArray(answers) || answers.length !== texts.length) {
           throw new Error('the model returned an unexpected number of results');
         }
@@ -586,6 +596,14 @@ namespace AT.dom {
       };
       const write = (item: Item, answer: string, complete = true): void => {
         if (!cancelled() && apply(item, answer, complete)) wrote++;
+      };
+      const preview = (item: Item, text: string): void => {
+        if (cancelled() || !owns(item)) {
+          presentation?.clearPreview(item.node);
+          return;
+        }
+        if (text) presentation?.preview(item.node, item.lead + text + item.trail);
+        else presentation?.clearPreview(item.node);
       };
       /** One segment's cache key. The pack and the single path must agree, or a
        *  node answered in a pack is asked again the next time it stands alone. */
@@ -617,8 +635,19 @@ namespace AT.dom {
           }
           const indices: number[] = [];
           for (let index = offset; index < end; index++) if (eligible(parts[index]!)) indices.push(index);
+          const previews = new Map<number, string>();
           const reply = hit ? indices.map((index) => hit[index]!) :
-            indices.length ? await ask(indices.map((index) => parts[index]!)) : [];
+            indices.length ? await ask(indices.map((index) => parts[index]!), (index, text) => {
+              previews.set(indices[index]!, text);
+              if (![...previews.values()].some(Boolean)) { preview(item, ''); return; }
+              let body = prefix;
+              for (let part = offset; part < end; part++) {
+                body += (split?.gaps[part] ?? whitespace.lead) + (previews.get(part) || parts[part]!);
+              }
+              const sourceEnd = work.offset + (split ? split.ends[end - 1]! :
+                work.item.core.length - whitespace.trail.length);
+              preview(item, body + item.core.slice(sourceEnd));
+            }) : [];
           if (cancelled() || !owns(item)) return;
           let valid = offset, replyAt = 0;
           for (; valid < end; valid++) {
@@ -666,6 +695,14 @@ namespace AT.dom {
         if (!live.length) return;
         const keys = live.map((item) => textKey(item, [item.core]));
         const answers: string[] = new Array<string>(live.length).fill('');
+        let canPreview = false, previewFailed = false;
+        const previews = new Map<Text, { item: Item; text: string }>();
+        void ready.then(() => {
+          if (previewFailed) return;
+          canPreview = true;
+          for (const { item, text } of previews.values()) preview(item, text);
+          previews.clear();
+        });
         const missing: number[] = [];
         live.forEach((_item, index) => {
           const hit = cached(keys[index]!);
@@ -690,7 +727,13 @@ namespace AT.dom {
           }
           const fresh = order.filter((text) => !pendingTexts.has(text));
           if (fresh.length) {
-            const request = ask(fresh);
+            const request = ask(fresh, (index, text) => {
+              for (const item of live) {
+                if (item.core !== fresh[index]) continue;
+                if (canPreview) preview(item, text);
+                else previews.set(item.node, { item, text });
+              }
+            });
             fresh.forEach((text, index) => {
               const answer = request.then((reply) => reply[index] ?? '');
               pendingTexts.set(text, answer);
@@ -700,6 +743,10 @@ namespace AT.dom {
           let reply: string[];
           try {
             reply = await Promise.all(pending);
+          } catch (error: unknown) {
+            previewFailed = true;
+            previews.clear();
+            throw error;
           } finally {
             order.forEach((text, index) => {
               if (pendingTexts.get(text) === pending[index]) pendingTexts.delete(text);
@@ -831,7 +878,7 @@ namespace AT.dom {
               // Use the engine's existing numbered-segment contract directly.
               // Private-use markers were normally dropped, wasting one full
               // generation before the same fragments were translated again.
-              const reply = await ask(items.map((item) => item.core));
+              const reply = await ask(items.map((item) => item.core), (index, text) => preview(items[index]!, text));
               if (cancelled() || !items.every(owns)) continue;
               pieces = reply.length === items.length && reply.every(Boolean) ? reply : null;
             }

@@ -346,6 +346,8 @@ namespace AT.kernels {
     prompt: number[];
     maxNewTokens: number;
     generated: number[];
+    /** Generated ids already read back for scheduling; never triggers GPU work. */
+    onProgress?: ((tokens: number[]) => void) | undefined;
     fed: number;
     done: boolean;
     delivered: boolean;
@@ -381,7 +383,7 @@ namespace AT.kernels {
 
   export type Runner = {
     /** Queues a request; a cohort starts as soon as one can form. */
-    add: (job: { id: number; prompt: number[]; maxNewTokens: number }) => void;
+    add: (job: { id: number; prompt: number[]; maxNewTokens: number; onProgress?: ((tokens: number[]) => void) | undefined }) => void;
     /** Abandons a queued request; a running cohort keeps its rows. */
     drop: (id: number) => boolean;
     /** Resolves when every queued request has been answered. */
@@ -898,8 +900,10 @@ namespace AT.kernels {
           for (let at = 0; at < collectRows.length; at += 1) {
             const row = collectRows[at]!;
             const slot = slots[row]!;
+            if (slot.job.cancelled) continue;
             const pick = picks[at] ?? 0;
             slot.job.generated.push(pick);
+            slot.job.onProgress?.(slot.job.generated);
             if (eos.includes(pick) || slot.job.generated.length >= slot.job.maxNewTokens) {
               slot.job.done = true;
             }
@@ -932,6 +936,7 @@ namespace AT.kernels {
           prompt,
           maxNewTokens: Math.max(1, Math.min(job.maxNewTokens, maxTokens - prompt.length)),
           generated: [],
+          onProgress: job.onProgress,
           fed: 0,
           done: false,
           delivered: false

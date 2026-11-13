@@ -24,6 +24,7 @@ namespace AT.pipeline {
     texts: string[];
     role: AT.targets.TextRole;
     context: AT.pagecontext.PageContext | null;
+    onProgress?: AT.TranslationProgress | undefined;
   };
 
   export type Request = {
@@ -314,12 +315,12 @@ namespace AT.pipeline {
         // answers in reading order even when a lower pack finishes first.
         concurrency: () => commentMode ? 1 : (request.settings().engine === 'local' ? AT.C.PAGE_PACKS : 1),
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
-        translate: async (texts) => {
+        translate: async (texts, onProgress) => {
           batches += 1;
           waveRequests++;
           // The region is set per group by the plan below; a batch that arrives
           // outside a pass is a selection or a retry and has no region.
-          return await request.translate({ texts, role: role ?? 'unknown', context });
+          return await request.translate({ texts, role: role ?? 'unknown', context, onProgress });
         }
       });
       return translator;

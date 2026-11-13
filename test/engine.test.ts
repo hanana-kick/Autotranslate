@@ -199,3 +199,24 @@ test('a row that finishes is answered at once, not when the cohort does', async 
   assert.deepEqual((outcomes[1] as { tokens: number[] }).tokens, [3]);
   assert.equal((outcomes[2] as { tokens: number[] }).tokens.length, 4);
 });
+
+test('progress contains only generated ids and a dropped row stays silent during a pending step', async () => {
+  const script = scripted((_token, _row, step) => step + 1);
+  const progress: number[][] = [];
+  const outcomes: unknown[] = [];
+  const runner = engine.create({
+    forward: async (rows: { inputIds: number[][]; mask?: number[][] }, first: boolean) => {
+      if (!first) runner.drop(7);
+      return await script.forward(rows, first);
+    },
+    eos: [7], batch: 1, pad: 0,
+    onDone: (outcome: unknown) => outcomes.push(outcome)
+  });
+  runner.add({
+    id: 7, prompt: [5, 6], maxNewTokens: 4,
+    onProgress: (tokens: number[]) => progress.push([...tokens])
+  });
+  await runner.drain();
+  assert.deepEqual(progress, [[2]], 'neither prompt ids nor a pick read after cancellation is published');
+  assert.deepEqual(outcomes, [], 'a cancelled generation never becomes a success');
+});

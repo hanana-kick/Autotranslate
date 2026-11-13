@@ -24,6 +24,8 @@ namespace AT.engine {
     /** How many tokens this request may generate, at most. */
     maxNewTokens: number;
     generated: number[];
+    /** Generated ids only; the caller batches notifications before crossing threads. */
+    onProgress?: ((tokens: number[]) => void) | undefined;
     /** The caller gave up on it: its rows keep the batch shape and its answer
      *  is discarded, but it no longer holds the cohort open. */
     abandoned: boolean;
@@ -65,7 +67,7 @@ namespace AT.engine {
 
   export type Runner = {
     /** Queues a request and starts the loop if it is not running. */
-    add: (job: { id: number; prompt: number[]; maxNewTokens: number }) => void;
+    add: (job: { id: number; prompt: number[]; maxNewTokens: number; onProgress?: ((tokens: number[]) => void) | undefined }) => void;
     /** Resolves when every queued request has been answered. */
     drain: () => Promise<void>;
     /** Requests waiting for a cohort. */
@@ -150,7 +152,11 @@ namespace AT.engine {
         }
         return;
       }
-      cohort.forEach((job, row) => job.generated.push(picks[row] ?? 0));
+      cohort.forEach((job, row) => {
+        if (job.abandoned) return;
+        job.generated.push(picks[row] ?? 0);
+        job.onProgress?.(job.generated);
+      });
       deliver(cohort);
       while (cohort.some((job) => !done(job))) {
         // Every row feeds its newest token, finished ones included: the batch
@@ -173,6 +179,7 @@ namespace AT.engine {
           const job = cohort[row]!;
           if (done(job)) continue;
           job.generated.push(picks[row] ?? 0);
+          job.onProgress?.(job.generated);
         }
         // A row that reached its end token does not wait for the cohort's
         // slowest row: the page gets its text as soon as it exists.
@@ -231,6 +238,7 @@ namespace AT.engine {
           prompt: [...job.prompt],
           maxNewTokens: Math.max(1, Math.floor(job.maxNewTokens)),
           generated: [],
+          onProgress: job.onProgress,
           abandoned: false,
           delivered: false
         });

@@ -10,6 +10,7 @@
 //   YOUTUBE_COMMENTS=1 YOUTUBE_URL=<url>   # scroll/reply selection and latency evidence
 //   VISUAL_ORDER=1 ...                    # CSS-reordered reading-order evidence
 //   AURORA=1 ...                          # real pending/revealed web-component evidence
+//   STREAMING=1 ...                       # real token-preview/fade/frame evidence
 //   EXTENSION_DIR=<dir> ...               # a preserved shipped build for comparison
 //   VISUAL_ORDER_ASSERT=0 ...             # record a known-bad baseline without order assertions
 //   PROBE_ENGINE_FAILURE=1 ...            # ships an engine that cannot start: the
@@ -39,7 +40,8 @@ const PROFILE_DIR = process.env.PROFILE_DIR ? resolve(process.env.PROFILE_DIR) :
 const MODEL_URL = process.env.MODEL_URL || CARD;
 const PAGE_SECONDS = Number(process.env.PAGE_SECONDS || 240000);
 const VISUAL_ORDER = process.env.VISUAL_ORDER === '1';
-const AURORA = process.env.AURORA === '1';
+const STREAMING = process.env.STREAMING === '1';
+const AURORA = process.env.AURORA === '1' || STREAMING;
 const VISUAL_ORDER_ASSERT = process.env.VISUAL_ORDER_ASSERT !== '0';
 const EXTENSION_DIR = resolve(process.env.EXTENSION_DIR || join(ROOT, 'build/chrome'));
 const summary = {
@@ -224,6 +226,64 @@ function observeAurora() {
   observer.observe(document.body, { subtree: true, childList: true, characterData: true,
     attributes: true, attributeFilter: ['data-state', 'aria-busy'] });
   window.__auroraEvidence = { snapshot, events, stop: () => observer.disconnect() };
+}
+
+// Shadow previews must be observed separately: document observers cannot see
+// their text and canonical source nodes deliberately remain unchanged.
+function observeStreaming() {
+  const started = performance.now();
+  const entries = new Map(), events = [], frames = [];
+  let observerMs = 0, previousFrame = 0, frame = 0, stopped = false;
+  const sample = host => {
+    const entry = entries.get(host);
+    if (!entry) return;
+    const text = host.shadowRoot?.querySelector('.preview')?.textContent ?? '';
+    if (text === entry.last && host.dataset.state === entry.state) return;
+    entry.last = text; entry.state = host.dataset.state;
+    const now = performance.now() - started;
+    if (host.dataset.streaming === 'true' && text && entry.firstPreviewMs === null) entry.firstPreviewMs = now;
+    if (host.dataset.state === 'translated' && entry.completedMs === null) entry.completedMs = now;
+    events.push({ id: entry.id, atMs: now, text, source: entry.source, canonical: host.textContent,
+      preview: host.dataset.streaming === 'true', busy: host.getAttribute('aria-busy') === 'true',
+      state: host.dataset.state, spans: host.shadowRoot?.querySelectorAll('.preview span').length ?? 0 });
+  };
+  const discover = () => {
+    for (const host of document.querySelectorAll('at-translation-text')) {
+      if (!entries.has(host)) {
+        const entry = { id: entries.size + 1, source: host.textContent, last: null, state: null,
+          startedMs: performance.now() - started, firstPreviewMs: null, completedMs: null, observer: null };
+        entries.set(host, entry);
+        entry.observer = new MutationObserver(() => {
+          const before = performance.now(); sample(host); observerMs += performance.now() - before;
+        });
+        if (host.shadowRoot) entry.observer.observe(host.shadowRoot, { subtree: true, childList: true, characterData: true });
+        entry.observer.observe(host, { attributes: true, attributeFilter: ['data-streaming', 'data-state', 'aria-busy'] });
+      }
+      sample(host);
+    }
+  };
+  const observer = new MutationObserver(() => {
+    const before = performance.now(); discover(); observerMs += performance.now() - before;
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+  const tick = now => {
+    if (stopped) return;
+    if (previousFrame) frames.push(now - previousFrame);
+    previousFrame = now;
+    frame = requestAnimationFrame(tick);
+  };
+  frame = requestAnimationFrame(tick);
+  discover();
+  window.__streamEvidence = { events, stop: () => {
+    stopped = true; cancelAnimationFrame(frame); observer.disconnect();
+    for (const entry of entries.values()) entry.observer.disconnect();
+    const sorted = [...frames].sort((a, b) => a - b);
+    return { elapsedMs: performance.now() - started, observerMs, events,
+      components: [...entries.values()].map(({ observer, last, state, ...entry }) => entry),
+      frameIntervals: { count: frames.length, p50: sorted[Math.ceil(sorted.length * .5) - 1] ?? null,
+        p95: sorted[Math.ceil(sorted.length * .95) - 1] ?? null, max: sorted.at(-1) ?? null,
+        over50Ms: frames.filter(ms => ms > 50).length } };
+  } };
 }
 
 async function evidenceScreenshot(page, name) {
@@ -434,6 +494,17 @@ await page.goto(origin + '/', { waitUntil: 'load' });
 const before = await page.evaluate(() => [...document.querySelectorAll('p')].map((p) => p.textContent));
 const tabId = await tabIdFor(options, page);
 let auroraPending;
+let streamingCapture;
+if (STREAMING) {
+  await page.bringToFront();
+  await page.evaluate(observeStreaming);
+  streamingCapture = (async () => {
+    await page.waitForFunction(() => __streamEvidence.events.some(event => event.preview && event.busy &&
+      event.canonical === event.source && event.text !== event.source), null, { timeout: PAGE_SECONDS });
+    const screenshot = await evidenceScreenshot(page, 'onnx-streaming-preview');
+    return { screenshot };
+  })().catch(error => ({ error: error.message }));
+}
 if (AURORA) {
   await page.bringToFront();
   await page.evaluate(observeAurora);
@@ -507,6 +578,9 @@ if (translated !== before.length) summary.page.failure = 'not every paragraph ca
 if (AURORA) {
   summary.aurora.translated = await page.evaluate(() => __auroraEvidence.snapshot());
   summary.aurora.screenshots.translated = await evidenceScreenshot(page, 'onnx-aurora-translated');
+}
+if (STREAMING) {
+  summary.streaming = { ...await page.evaluate(() => __streamEvidence.stop()), ...await streamingCapture };
 }
 // A silent fallback would still translate, so the backend is part of the check:
 // the shipped build runs the on-device decode on our own kernels.
@@ -790,6 +864,14 @@ console.log(JSON.stringify({ report, target: summary.target, seconds: summary.pa
 assert.equal(summary.page.translated, summary.page.sequences, 'every paragraph must come back translated');
 assert.equal(summary.countWarnings, 0, 'the ONNX host must answer at/local-count');
 assert.deepEqual(summary.errors, [], 'no page errors');
+if (STREAMING) {
+  assert.equal(summary.streaming.error, undefined, 'real generation must show a preview before final commit');
+  assert.ok(summary.streaming.events.some(event => event.preview && event.busy &&
+    event.canonical === event.source && event.text !== event.source), 'stream output must not overwrite canonical source before completion');
+  assert.ok(summary.streaming.components.some(component => component.firstPreviewMs !== null &&
+    component.completedMs > component.firstPreviewMs), 'a real preview must precede full completion');
+  assert.ok(summary.streaming.events.every(event => event.spans <= 5), 'stream render regions must remain bounded');
+}
 if (AURORA) {
   const evidence = summary.aurora;
   assert.equal(evidence.pendingCaptureError, null, 'installed content script must expose a real pending component before completion');

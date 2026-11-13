@@ -373,6 +373,8 @@ namespace AT.onnxhost {
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
     slot: EngineSlot;
+    onProgress?: ((text: string) => void) | undefined;
+    progressTokens: number;
   };
 
   const pending = new Map<number, EngineJob>();
@@ -437,7 +439,19 @@ namespace AT.onnxhost {
       }
       return;
     }
+    if (message?.type === L.WORKER_MESSAGE.PROGRESS) {
+      const job = pending.get(message.id);
+      if (!job?.onProgress || job.slot !== slot || slot.dead || !tokenizer) return;
+      if (!Array.isArray(message.tokens) || message.tokens.length <= job.progressTokens ||
+          !message.tokens.every((id) => Number.isSafeInteger(id) && id >= 0)) return;
+      job.progressTokens = message.tokens.length;
+      // Decode the cumulative GENERATED ids: a byte-fallback character can
+      // span several tokens. Never decode isolated token deltas.
+      job.onProgress(tokenizer.decode(message.tokens, { skip_special_tokens: true }));
+      return;
+    }
     if (message?.type !== L.WORKER_MESSAGE.RESULT) return;
+    if (pending.get(message.id)?.slot !== slot || slot.dead) return;
     if (message.ok) {
       // The worker counts tokens and the milliseconds it spent on each phase;
       // the status carries the rates so a reader sees tok/s, not step times.
@@ -572,7 +586,7 @@ namespace AT.onnxhost {
     slot.inFlight = Math.max(0, slot.inFlight - 1);
   }
 
-  async function generateInEngine(prompt: string, maxNewTokens: number): Promise<string> {
+  async function generateInEngine(prompt: string, maxNewTokens: number, onProgress?: (text: string) => void): Promise<string> {
     await ensureEngine();
     if (!liveEngines().length || !tokenizer) throw engineFailure('the decode engine is not running');
     const inputIds = Array.from(tokenizer(prompt).input_ids.data as ArrayLike<number | bigint>).map(Number);
@@ -586,12 +600,13 @@ namespace AT.onnxhost {
           slot.worker.postMessage({ type: L.WORKER_MESSAGE.DROP, id } satisfies AT.local.WorkerDrop);
           reject(engineTimeout('the decode engine did not answer'));
         }, L.GENERATION_TIMEOUT_MS + L.WORKER_REPLY_GRACE_MS);
-        pending.set(id, { resolve, reject, timer, slot });
+        pending.set(id, { resolve, reject, timer, slot, onProgress, progressTokens: 0 });
         slot.worker.postMessage({
           type: L.WORKER_MESSAGE.GENERATE,
           id,
           inputIds,
-          maxNewTokens
+          maxNewTokens,
+          ...(onProgress ? { stream: true } : {})
         } satisfies AT.local.WorkerGenerate);
       });
       // Worker replies contain only new token IDs. Decoding the prompt as well
@@ -605,11 +620,11 @@ namespace AT.onnxhost {
   /** The engine first. An engine that is gone finishes this request on the
    *  in-document session and is never used again; one that merely missed this
    *  request's deadline answers it here and keeps serving the rest. */
-  async function generateText(prompt: string, maxNewTokens: number): Promise<string> {
+  async function generateText(prompt: string, maxNewTokens: number, onProgress?: (text: string) => void): Promise<string> {
     const version = lifecycle;
     if (!engineUnavailable) {
       try {
-        return await generateInEngine(prompt, maxNewTokens);
+        return await generateInEngine(prompt, maxNewTokens, onProgress);
       } catch (error: unknown) {
         requireLifecycle(version);
         const code = codeOf(error);
@@ -619,13 +634,14 @@ namespace AT.onnxhost {
         if (code === 'worker-init' && loadedId && tokenizer) disableEngine(message);
         else if (code === 'engine-timeout') AT.warn('the decode engine missed a deadline; answering this request in the offscreen document');
         else throw error;
+        onProgress?.('');
       }
     }
-    return await generateInline(prompt, maxNewTokens);
+    return await generateInline(prompt, maxNewTokens, onProgress);
   }
 
   /** The fallback session is opened on demand and runs one generation at a time. */
-  async function generateInline(prompt: string, maxNewTokens: number): Promise<string> {
+  async function generateInline(prompt: string, maxNewTokens: number, onProgress?: (text: string) => void): Promise<string> {
     const version = lifecycle;
     const opening = ensureInline();
     // Observe initialization immediately even while an earlier generation runs.
@@ -634,16 +650,47 @@ namespace AT.onnxhost {
       const session = await opening;
       requireLifecycle(version);
       const controller = new AbortController();
+      let active = true;
+      let preview = '';
+      let sent = '';
+      let lastSent = -Infinity;
+      let flush: (() => void) | undefined;
+      let streamer: { end: () => void } | undefined;
+      if (onProgress) {
+        const tf = seams.runtime?.() ?? (globalThis as Record<string, unknown>).AT_TRANSFORMERS as AT.pipelinehost.TfModule | undefined;
+        if (tf?.TextStreamer) {
+          flush = () => {
+            if (!active || controller.signal.aborted || version !== lifecycle || preview === sent) return;
+            sent = preview;
+            lastSent = performance.now();
+            onProgress(preview);
+          };
+          // Transformers.js emits decoded chunks, not cumulative strings.
+          // skip_prompt prevents the tokenizer's PFML header reaching previews.
+          streamer = new tf.TextStreamer(tokenizer!, {
+            skip_prompt: true,
+            skip_special_tokens: true,
+            callback_function: (text: string) => {
+              if (!active || controller.signal.aborted || version !== lifecycle) return;
+              preview += text;
+              if (performance.now() - lastSent >= 40) flush?.();
+            }
+          });
+        }
+      }
       const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
       try {
         const out = await session(prompt, {
           max_new_tokens: maxNewTokens,
           do_sample: false,
-          abort_signal: controller.signal
+          abort_signal: controller.signal,
+          ...(streamer ? { streamer } : {})
         });
         requireLifecycle(version);
+        flush?.();
         return answerOf(out?.[0]?.generated_text, prompt);
       } finally {
+        active = false;
         clearTimeout(timer);
       }
     });
@@ -653,11 +700,23 @@ namespace AT.onnxhost {
 
   /** One generation, on a worker or in this document, with protocol validation
    * before script checks or numbered-batch retries can hide invalid output. */
-  async function generate(prompt: string, maxNewTokens: number, source: string): Promise<string> {
+  async function generate(prompt: string, maxNewTokens: number, source: string, onProgress?: (text: string) => void): Promise<string> {
     if (!loadedId || !tokenizer) fail('not-loaded', 'no model is loaded');
     const version = lifecycle;
+    let previous = '';
+    const preview = onProgress ? (raw: string): void => {
+      if (version !== lifecycle) return;
+      // Hold incomplete UTF-8 byte fallback and unfinished control syntax until
+      // later ids complete them. Final validation still sees the original text.
+      const text = raw.replace(/\uFFFD+$/u, '').replace(/<[^>]*$/u, '').trim();
+      const valid = !text.includes('\uFFFD') && !AT.outputIssue(source, text, true) && !L.isRunaway(text, source);
+      const next = valid ? text : '';
+      if (next === previous) return;
+      previous = next;
+      try { onProgress(next); } catch { /* A detached subscriber cannot fail generation. */ }
+    } : undefined;
     try {
-      const generated = await generateText(prompt, maxNewTokens);
+      const generated = await generateText(prompt, maxNewTokens, preview);
       requireLifecycle(version);
       generations += 1;
       touchIdleTimer();
@@ -666,6 +725,9 @@ namespace AT.onnxhost {
       if (issue) fail('invalid-output', 'Invalid translation output: ' + issue);
       return answer;
     } catch (error: unknown) {
+      if (previous) {
+        try { onProgress?.(''); } catch { /* Preserve the generation failure. */ }
+      }
       requireLifecycle(version);
       if (error instanceof Error && 'reason' in error && error.reason === 'invalid-output') throw error;
       const message = String((error as { message?: unknown })?.message ?? error);
@@ -694,21 +756,24 @@ namespace AT.onnxhost {
     return lang === null || P.checkScript(answer, lang);
   }
 
-  async function translateOne(target: string, text: string, hint: string | null): Promise<string> {
+  async function translateOne(target: string, text: string, hint: string | null, onProgress?: (text: string) => void): Promise<string> {
     const plain = renderPrompt(target, text, null);
     const framed = hint === null ? plain : renderPrompt(target, text, hint);
     const leadIsPlain = hint === null || text.length >= SELF_SUFFICIENT_CHARS;
     const lead = leadIsPlain ? plain : framed;
     const cap = L.answerTokens(text, lastMaxTokens, lead);
-    const answer = await generate(lead, cap, text);
+    const answer = await generate(lead, cap, text, onProgress);
     if (usable(answer, text, target)) return answer;
+    onProgress?.('');
     const follow = leadIsPlain ? framed : plain;
-    const retry = await generate(follow, L.answerTokens(text, lastMaxTokens, follow), text);
-    return usable(retry, text, target) ? retry : '';
+    const retry = await generate(follow, L.answerTokens(text, lastMaxTokens, follow), text, onProgress);
+    if (usable(retry, text, target)) return retry;
+    onProgress?.('');
+    return '';
   }
 
-  async function translateChunk(target: string, texts: string[], hint: string | null): Promise<string[]> {
-    if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', hint)];
+  async function translateChunk(target: string, texts: string[], hint: string | null, onProgress?: AT.TranslationProgress): Promise<string[]> {
+    if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', hint, onProgress ? (text) => onProgress(0, text) : undefined)];
     // One numbered prompt for the whole chunk: the segments travel as text inside
     // one sequence, one prefill and one decode, and the model stops at its own
     // end. Batched rows were implemented and measured slower (see the speed
@@ -716,12 +781,46 @@ namespace AT.onnxhost {
     const batch = texts.map((text, index) => `${index + 1}. ${P.sanitize(text).replace(/\s+/g, ' ').trim()}`).join('\n');
     const prompt = renderPrompt(target, batch, hint);
     const cap = L.answerTokens(texts, lastMaxTokens, prompt);
-    const reply = await generate(prompt, cap, batch);
+    // A confirmed numbered marker identifies the current segment. Buffer a
+    // trailing partial marker so its digits never appear in the previous text.
+    const shown = onProgress ? new Map<number, string>() : null;
+    const progress = onProgress ? (raw: string): void => {
+      const reset = (): void => {
+        for (const index of shown!.keys()) onProgress(index, '');
+        shown!.clear();
+      };
+      if (!raw) { reset(); return; }
+      const markers = [...raw.matchAll(/^[ \t]*(\d{1,3})[ \t]*[:.)][ \t]+/gm)];
+      if (!markers.length || raw.slice(0, markers[0]!.index).trim() ||
+          markers.some((marker, index) => Number(marker[1]) !== index + 1 || index >= texts.length)) {
+        reset();
+        return;
+      }
+      for (let index = 0; index < markers.length; index += 1) {
+        const marker = markers[index]!;
+        const tail = raw.slice(marker.index + marker[0].length, markers[index + 1]?.index);
+        const text = (index + 1 === markers.length
+          ? tail.replace(/\n[ \t]*\d{0,3}[ \t]*[:.)]?[ \t]*$/u, '') : tail).trim();
+        if (!text) continue;
+        if (!text || AT.outputIssue(texts[index]!, text, true) || L.isRunaway(text, texts[index]!)) {
+          reset();
+          return;
+        }
+        if (shown!.get(index) !== text) {
+          shown!.set(index, text);
+          onProgress(index, text);
+        }
+      }
+    } : undefined;
+    const reply = await generate(prompt, cap, batch, progress);
     const parsed = L.parseNumbered(reply, texts.length);
     if (parsed) return parsed.map((answer) => answer.trim());
+    progress?.('');
     AT.warn('on-device split mismatch, retrying per text', texts.length);
     const out: string[] = [];
-    for (const text of texts) out.push(await translateOne(target, text, hint));
+    for (let index = 0; index < texts.length; index += 1) {
+      out.push(await translateOne(target, texts[index]!, hint, onProgress ? (text) => onProgress(index, text) : undefined));
+    }
     return out;
   }
 
@@ -759,7 +858,7 @@ namespace AT.onnxhost {
     return { counts: texts.map((text) => tokenCount(text)), overhead };
   }
 
-  async function translateNow(request: AT.local.TranslateRequest): Promise<AT.local.HostReply> {
+  async function translateNow(request: AT.local.TranslateRequest, onProgress?: AT.TranslationProgress): Promise<AT.local.HostReply> {
     const texts = Array.isArray(request.texts)
       ? request.texts.filter((text): text is string => typeof text === 'string')
       : [];
@@ -779,7 +878,7 @@ namespace AT.onnxhost {
       lastMaxTokens = maxTokens;
       version = await ensureLoaded(modelId, maxTokens, askedTarget);
       requireLifecycle(version);
-      const translations = await translateChunk(askedTarget, texts, hint);
+      const translations = await translateChunk(askedTarget, texts, hint, onProgress);
       requireLifecycle(version);
       state.state = 'ready';
       publish();
@@ -834,17 +933,17 @@ namespace AT.onnxhost {
     return state;
   }
 
-  export async function translate(request: AT.local.TranslateRequest): Promise<AT.local.HostReply> {
+  export async function translate(request: AT.local.TranslateRequest, onProgress?: AT.TranslationProgress): Promise<AT.local.HostReply> {
     // Not queued: each request is one pool job, and the pool is what keeps a
     // page's N requests finishing in ceil(N / poolSize) request-times rather
     // than N. Loading, unloading and counting still queue (see `handle`).
-    return await translateNow(request);
+    return await translateNow(request, onProgress);
   }
 
-  export async function handle(message: AT.Message): Promise<AT.local.HostReply> {
+  export async function handle(message: AT.Message, onProgress?: AT.TranslationProgress): Promise<AT.local.HostReply> {
     switch (message?.type) {
       case C.MSG.LOCAL_TRANSLATE:
-        return await translate(message as AT.local.TranslateRequest);
+        return await translate(message as AT.local.TranslateRequest, onProgress);
       case C.MSG.LOCAL_LOAD: {
         const request = message as { modelId?: unknown; target?: unknown; maxTokens?: unknown };
         const modelId = typeof request.modelId === 'string' ? request.modelId : '';

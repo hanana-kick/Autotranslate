@@ -136,9 +136,13 @@ namespace AT {
   /** What a handler resolves to; spread into the `{ ok: true, ... }` reply. */
   export type MessageResult = { [key: string]: unknown };
 
+  /** Cumulative decoded preview for one input; empty text resets an attempt. */
+  export type TranslationProgress = (index: number, text: string) => void;
+
   export type MessageHandler = (
     message: Message,
-    sender: Sender
+    sender: Sender,
+    onProgress?: TranslationProgress
   ) => MessageResult | null | undefined | Promise<MessageResult | null | undefined>;
 
   export type MessageHandlers = { [type: string]: MessageHandler | undefined };
@@ -295,8 +299,40 @@ namespace AT {
   // Chrome polyfill converts it to its callback contract. A raw chrome fallback
   // retains sendResponse for hosts that do not support promise listeners.
   const MODEL_PORT = 'autotranslate-model-prepare-v1';
+  const STREAM_PORT = 'autotranslate-translation-v1:';
 
   export function onMessage(handlers: MessageHandlers): void {
+    // Operation-scoped ports isolate previews by caller/frame and close at the
+    // final response. Only the owner of this exact command claims its port.
+    if ([C.MSG.BATCH, C.MSG.LOCAL_TRANSLATE].some((type) => Object.hasOwn(handlers, type))) extensionApi.runtime.onConnect?.addListener((port) => {
+      if (!port.name.startsWith(STREAM_PORT)) return;
+      const type = port.name.slice(STREAM_PORT.length);
+      if (type !== C.MSG.BATCH && type !== C.MSG.LOCAL_TRANSLATE) return;
+      const handler = Object.hasOwn(handlers, type) ? handlers[type] : undefined;
+      if (!handler) return;
+      let active = true, received = false;
+      port.onDisconnect.addListener(() => { active = false; });
+      const post = (value: unknown): void => {
+        if (!active) return;
+        try { port.postMessage(value); } catch { active = false; }
+      };
+      port.onMessage.addListener((raw) => {
+        if (received) return;
+        received = true;
+        const message = raw && typeof raw === 'object' ? raw as Message : null;
+        void Promise.resolve().then(async () => {
+          if (!message || message.type !== type) throw new Error('invalid translation stream command');
+          const result = await handler(message, port.sender ?? {}, (index, text) => {
+            post({ kind: 'progress', index, text });
+          });
+          post({ kind: 'result', response: { ok: true, ...(result ?? {}) } });
+        }).catch((error: unknown) => {
+          const failure = error as Rejection;
+          post({ kind: 'result', response: { ok: false,
+            error: String(failure?.message ?? error), code: failure?.code ?? null } });
+        });
+      });
+    });
     // Only the preparation owner claims this channel; other pages leave it alone.
     if (Object.hasOwn(handlers, C.MSG.LOCAL_PREPARE)) {
       extensionApi.runtime.onConnect?.addListener((port) => {
@@ -379,8 +415,50 @@ namespace AT {
     });
   }
 
-  export async function sendMessage(message: Message | null | undefined): Promise<Response> {
+  function translateOverPort(message: Message, onProgress: TranslationProgress): Promise<Response> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let port: RuntimePort | undefined;
+      const finish = (response: Response): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(response);
+        try { port?.disconnect(); } catch { /* Context already closed. */ }
+      };
+      const timer = setTimeout(() => finish({ ok: false,
+        error: 'translation stream timed out', code: 'timeout' }), 5 * 60 * 1000);
+      try {
+        port = extensionApi.runtime.connect!({ name: STREAM_PORT + message.type });
+        port.onMessage.addListener((raw) => {
+          if (settled || !raw || typeof raw !== 'object') return;
+          const event = raw as { kind?: unknown; index?: unknown; text?: unknown; response?: unknown };
+          if (event.kind === 'progress') {
+            if (Number.isInteger(event.index) && Number(event.index) >= 0 &&
+                typeof event.text === 'string' && event.text.length <= 1_000_000) {
+              onProgress(Number(event.index), event.text);
+            }
+          } else if (event.kind === 'result') {
+            const response = event.response as Partial<Response> | null;
+            finish(response && typeof response.ok === 'boolean' ? response as Response :
+              { ok: false, error: 'invalid translation stream response', code: 'no-response' });
+          }
+        });
+        port.onDisconnect.addListener(() => finish({ ok: false,
+          error: port?.error?.message ?? 'translation stream closed', code: 'no-response' }));
+        port.postMessage(message);
+      } catch (error: unknown) {
+        finish({ ok: false, error: String((error as Rejection)?.message ?? error), code: 'no-response' });
+      }
+    });
+  }
+
+  export async function sendMessage(message: Message | null | undefined, onProgress?: TranslationProgress): Promise<Response> {
     const type = message?.type ?? 'message';
+    if (message && onProgress && (type === C.MSG.BATCH || type === C.MSG.LOCAL_TRANSLATE)) {
+      if (!extensionApi.runtime.connect) return { ok: false, error: 'translation streaming is unavailable', code: 'no-response' };
+      return translateOverPort(message, onProgress);
+    }
     // The document-host preparation uses a native operation-scoped channel.
     // Chrome offscreen and every other command retain ordinary messaging.
     if (message && type === C.MSG.LOCAL_PREPARE && !supportsOffscreen() && extensionApi.runtime.connect) {

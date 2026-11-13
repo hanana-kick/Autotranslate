@@ -110,6 +110,8 @@ namespace AT.engines {
     engine?: AT.settings.Engine;
     server?: AT.settings.ServerSettings;
     signal?: AbortSignal;
+    /** Cumulative decoded preview; empty text clears an earlier attempt. */
+    onProgress?: AT.TranslationProgress | undefined;
     /** What kind of page the texts came from, if the caller knows. */
     context?: AT.pagecontext.PageContext | null;
     /** Which part of the page these texts came from. */
@@ -166,7 +168,7 @@ namespace AT.engines {
         AT.pagecontext.hint(args.context ?? null),
         AT.targets.roleHint(args.role ?? null)
       )
-    });
+    }, args.onProgress);
     if (!reply?.ok) {
       const code = LOCAL_CODES[String(reply?.code)] ?? 'provider';
       throw new EngineError(code, String(reply?.error ?? 'the on-device host did not answer'), {
@@ -188,6 +190,117 @@ namespace AT.engines {
 
   const SERVER_RESPONSE_LIMIT = 2 * 1024 * 1024;
 
+  /** Chunk indices are never the caller's indices after filtering and deduplication. */
+  function mappedProgress(originals: string[], chunk: string[], progress?: AT.TranslationProgress): AT.TranslationProgress | undefined {
+    if (!progress) return undefined;
+    const positions = chunk.map(text => originals.flatMap((original, index) => original === text ? [index] : []));
+    return (index, text) => {
+      if (!Number.isInteger(index) || typeof text !== 'string') return;
+      for (const position of positions[index] ?? []) progress(position, text);
+    };
+  }
+
+  /**
+   * Decode only the JSON array's string values, never its framing. Incomplete
+   * escapes and surrogate pairs stay buffered. Unexpected syntax disables
+   * previews; the existing final parser still decides whether the answer is valid.
+   */
+  function serverPreview(count: number, progress: AT.TranslationProgress): (delta: string) => void {
+    let state: 'start' | 'value' | 'string' | 'separator' | 'done' = 'start';
+    let index = 0, text = '', escape = false, unicode: string | null = null;
+    const escapes: Record<string, string> = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+    return delta => {
+      if (count === 1) {
+        text += delta;
+        progress(0, text.replace(/[\uD800-\uDBFF]$/u, ''));
+        return;
+      }
+      let changed = false;
+      const emit = () => {
+        if (changed) progress(index, text.replace(/[\uD800-\uDBFF]$/u, ''));
+        changed = false;
+      };
+      for (const character of delta) {
+        if (state === 'done') break;
+        if (state === 'string') {
+          if (unicode !== null) {
+            if (!/^[0-9a-f]$/i.test(character)) { state = 'done'; break; }
+            unicode += character;
+            if (unicode.length === 4) { text += String.fromCharCode(parseInt(unicode, 16)); unicode = null; changed = true; }
+          } else if (escape) {
+            escape = false;
+            if (character === 'u') unicode = '';
+            else if (Object.prototype.hasOwnProperty.call(escapes, character)) { text += escapes[character]; changed = true; }
+            else { state = 'done'; break; }
+          } else if (character === '\\') escape = true;
+          else if (character === '"') { emit(); state = 'separator'; }
+          else if (character.charCodeAt(0) < 32) { state = 'done'; break; }
+          else { text += character; changed = true; }
+        } else if (/\s/u.test(character)) continue;
+        else if (state === 'start' && character === '[') state = 'value';
+        else if (state === 'value' && character === '"' && index < count) { text = ''; state = 'string'; }
+        else if (state === 'separator' && character === ',') { index++; state = 'value'; }
+        else state = 'done';
+      }
+      emit();
+    };
+  }
+
+  /**
+   * OpenAI Chat Completions SSE: delta.content is text, not a final answer.
+   * https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create
+   */
+  function completionStream(onContent: (delta: string) => void) {
+    let line = '', data: string[] = [], afterCR = false, done = false;
+    let content = '', finish: string | null = null;
+    const dispatch = () => {
+      if (!data.length || done) { data = []; return; }
+      const value = data.join('\n'); data = [];
+      if (value === '[DONE]') { done = true; return; }
+      let event: { error?: unknown; choices?: { index?: number; delta?: { content?: unknown; refusal?: unknown; tool_calls?: unknown }; finish_reason?: string | null }[] };
+      try { event = JSON.parse(value); }
+      catch { throw new EngineError('format', 'Server returned an invalid streaming event.'); }
+      if (!event || event.error) throw new EngineError('provider', 'Server streaming generation failed.');
+      if (!Array.isArray(event.choices)) throw new EngineError('format', 'Server returned an invalid streaming choice.');
+      for (const choice of event.choices) {
+        if (!choice || choice.index !== 0) throw new EngineError('format', 'Server returned an unexpected streaming choice.');
+        if (choice.delta?.refusal || choice.finish_reason === 'content_filter') throw new EngineError('provider', 'Server declined the translation.');
+        if (choice.finish_reason === 'length') throw new EngineError('format', 'Server truncated the translation; increase the server output limit.');
+        if (choice.delta?.tool_calls || (choice.finish_reason != null && choice.finish_reason !== 'stop')) {
+          throw new EngineError('format', 'Server did not finish a text translation.');
+        }
+        const delta = choice.delta?.content;
+        if (delta != null && typeof delta !== 'string') throw new EngineError('format', 'Server returned invalid streaming text.');
+        if (typeof delta === 'string' && delta) {
+          if (finish) throw new EngineError('format', 'Server sent text after finishing the translation.');
+          content += delta; onContent(delta);
+        }
+        if (choice.finish_reason === 'stop') finish = 'stop';
+      }
+    };
+    const endLine = () => {
+      if (!line) dispatch();
+      else if (line === 'data' || line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+      line = '';
+    };
+    return {
+      get done() { return done; },
+      push(text: string) {
+        for (const character of text) {
+          if (done) break;
+          if (character === '\n' && afterCR) { afterCR = false; continue; }
+          afterCR = character === '\r';
+          if (character === '\r' || character === '\n') endLine();
+          else line += character;
+        }
+      },
+      result() {
+        if (!done || finish !== 'stop') throw new EngineError('format', 'Server stream ended before the translation was complete.');
+        return { choices: [{ finish_reason: finish, message: { content } }] };
+      }
+    };
+  }
+
   function serverConfig(config?: AT.settings.ServerSettings, requireModel = true): AT.settings.ServerSettings {
     if (!config) throw new EngineError('config', 'Configure an OpenAI-compatible server in Options.');
     let baseUrl: string;
@@ -202,17 +315,21 @@ namespace AT.engines {
   }
 
   /** Bound the complete response, not only the initial HTTP headers. */
-  async function serverJson(config: AT.settings.ServerSettings, path: string, body?: unknown, signal?: AbortSignal): Promise<unknown> {
+  async function serverJson(config: AT.settings.ServerSettings, path: string, body?: unknown, signal?: AbortSignal, onContent?: (delta: string) => void): Promise<unknown> {
     const controller = new AbortController();
     let timedOut = false;
     const abort = () => controller.abort();
     if (signal?.aborted) throw new EngineError('provider', 'Server translation cancelled.');
     signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => { timedOut = true; controller.abort(); }, config.timeoutMs);
+    const stream = onContent ? completionStream(delta => {
+      if (controller.signal.aborted) throw new EngineError(timedOut ? 'timeout' : 'provider', timedOut ? 'Server request timed out.' : 'Server translation cancelled.');
+      onContent(delta);
+    }) : null;
     try {
       const response = await fetch(config.baseUrl + path, {
         method: body === undefined ? 'GET' : 'POST',
-        headers: { Accept: 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+        headers: { Accept: stream ? 'text/event-stream' : 'application/json', ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
           ...(config.apiKey ? { Authorization: 'Bearer ' + config.apiKey } : {}) },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer'
@@ -229,20 +346,29 @@ namespace AT.engines {
       if (!response.body) throw new EngineError('format', 'Server returned an empty response.');
       const reader = response.body.getReader();
       let size = 0, text = '';
-      const decoder = new TextDecoder();
+      const decoder = new TextDecoder('utf-8', { fatal: true });
       try {
         for (;;) {
           const part = await reader.read();
           if (part.done) break;
           size += part.value.byteLength;
           if (size > SERVER_RESPONSE_LIMIT) { controller.abort(); throw new EngineError('format', 'Server response is too large.'); }
-          text += decoder.decode(part.value, { stream: true });
+          const decoded = decoder.decode(part.value, { stream: true });
+          if (stream) {
+            stream.push(decoded);
+            if (stream.done) { await reader.cancel(); break; }
+          } else text += decoded;
         }
-        text += decoder.decode();
+        const tail = decoder.decode();
+        if (stream) stream.push(tail);
+        else text += tail;
       } finally { reader.releaseLock(); }
+      if (controller.signal.aborted) throw new EngineError(timedOut ? 'timeout' : 'provider', timedOut ? 'Server request timed out.' : 'Server translation cancelled.');
+      if (stream) return stream.result();
       try { return JSON.parse(text) as unknown; }
       catch { throw new EngineError('format', 'Server did not return valid JSON.'); }
     } catch (error) {
+      controller.abort();
       if (error instanceof EngineError) throw error;
       if (timedOut) throw new EngineError('timeout', 'Server request timed out.');
       if (signal?.aborted) throw new EngineError('provider', 'Server translation cancelled.');
@@ -325,11 +451,12 @@ namespace AT.engines {
             'Translate EVERY string, including short fragments. Return ONLY a JSON array of exactly ' + items.length +
             ' translated strings in the original order. Keep the fragments separate; do not combine or omit them.');
       const context = AT.targets.composeContext(AT.pagecontext.hint(request.context ?? null), AT.targets.roleHint(request.role ?? null));
+      const progress = mappedProgress(originals, items, request.onProgress);
       const payload = await serverJson(config, '/chat/completions', {
-        model: config.model, stream: false,
+        model: config.model, stream: !!progress,
         messages: [{ role: 'system', content: instruction + (context ? '\nContext: ' + context : '') },
           { role: 'user', content: items.length === 1 ? items[0] : JSON.stringify(items) }]
-      }, request.signal) as { choices?: { finish_reason?: string; message?: { content?: unknown; refusal?: unknown } }[] };
+      }, request.signal, progress ? serverPreview(items.length, progress) : undefined) as { choices?: { finish_reason?: string; message?: { content?: unknown; refusal?: unknown } }[] };
       const choice = payload?.choices?.[0];
       if (choice?.finish_reason === 'length') throw new EngineError('format', 'Server truncated the translation; increase the server output limit.');
       if (choice?.message?.refusal || choice?.finish_reason === 'content_filter') throw new EngineError('provider', 'Server declined the translation.');
@@ -349,6 +476,7 @@ namespace AT.engines {
       }
       answers.forEach((answer: string, index) => {
         const output = answer.trim(), input = items[index]!;
+        if (/[\uD800-\uDFFF]/u.test(output)) throw new EngineError('format', 'Server returned incomplete Unicode text.');
         const issue = AT.outputIssue(input, output);
         if (issue) throw new EngineError('format', 'Invalid server translation: ' + issue);
         translated.set(input, output);
@@ -358,7 +486,41 @@ namespace AT.engines {
   }
 
   export async function translate(request: TranslateRequest = {}): Promise<TranslateResult> {
-    if (request.engine === 'openai') return translateServer(request);
+    let active = true;
+    const previews = new Map<number, string>();
+    const progress = request.onProgress;
+    const clear = () => {
+      active = false;
+      for (const index of previews.keys()) progress?.(index, '');
+      previews.clear();
+    };
+    const onProgress: AT.TranslationProgress | undefined = progress ? (index, text) => {
+      if (!active || request.signal?.aborted || !Number.isInteger(index) || index < 0 || index >= (request.texts?.length ?? 0) || typeof text !== 'string') return;
+      const source = request.texts?.[index];
+      if (typeof source !== 'string') return;
+      text = text.replace(/[\uD800-\uDBFF]$/u, '');
+      const safe = /[\uD800-\uDFFF]/u.test(text) || AT.outputIssue(source, text, true) ? '' : text;
+      if (previews.get(index) === safe) return;
+      if (safe) previews.set(index, safe); else previews.delete(index);
+      progress(index, safe);
+    } : undefined;
+    if (request.signal?.aborted) throw new EngineError('provider', 'Translation cancelled.');
+    request.signal?.addEventListener('abort', clear, { once: true });
+    try {
+      const args = { ...request, onProgress };
+      const result = await (request.engine === 'openai' ? translateServer(args) : translateLocal(args));
+      if (request.signal?.aborted) throw new EngineError('provider', 'Translation cancelled.');
+      return result;
+    } catch (error) {
+      clear();
+      throw error;
+    } finally {
+      active = false;
+      request.signal?.removeEventListener('abort', clear);
+    }
+  }
+
+  async function translateLocal(request: TranslateRequest): Promise<TranslateResult> {
     const { texts = [], source = 'auto', target, localModelId = '', localMaxTokens = AT.local.DEFAULT_MAX_TOKENS } = request;
     if (!Array.isArray(texts)) throw new EngineError('config', 'texts must be an array');
     if (typeof target !== 'string' || !C.isSupportedLang(target)) {
@@ -403,9 +565,15 @@ namespace AT.engines {
     const batchOut = new Map<string, string>();
     let detected: string | null = source !== 'auto' && C.isSupportedLang(source) ? source : null;
     for (const chunk of chunks) {
-      const result = await translateChunk({ ...request, texts: chunk, target, localModelId, localMaxTokens });
-      chunk.forEach((text, index) => batchOut.set(text, result.translations[index] ?? text));
-      detected ??= result.detected;
+      if (request.signal?.aborted) throw new EngineError('provider', 'Translation cancelled.');
+      let active = true;
+      const progress = mappedProgress(originals, chunk, request.onProgress);
+      try {
+        const result = await translateChunk({ ...request, texts: chunk, target, localModelId, localMaxTokens,
+          onProgress: progress ? (index, text) => { if (active) progress(index, text); } : undefined });
+        chunk.forEach((text, index) => batchOut.set(text, result.translations[index] ?? text));
+        detected ??= result.detected;
+      } finally { active = false; }
     }
 
     const translations = originals.map((text) => {

@@ -165,7 +165,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
   };
 
   async function requestBatch(
-    batch: Pick<AT.pipeline.Batch, 'texts' | 'role' | 'context'>,
+    batch: AT.pipeline.Batch,
     settings: AT.settings.ContentSnapshot
   ): Promise<string[]> {
     const texts = batch.texts;
@@ -181,7 +181,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       // prompt is sent: an unidentified page adds nothing to a request.
       context: AT.pagecontext.hint(batch.context) ? batch.context : null,
       role: batch.role
-    })) as AT.content.BatchReply | undefined;
+    }, batch.onProgress)) as AT.content.BatchReply | undefined;
     // The round trip a reader waits for: request out, translations back. The
     // first one of a session carries the model load, later ones do not.
     const ms = Date.now() - started;

@@ -21,6 +21,11 @@ namespace AT.pipelinehost {
     };
     Tensor: new (type: string, data: ArrayLike<number | bigint>, dims: number[]) => Tensor;
     pipeline: (task: string, id: string, options: Record<string, unknown>) => Promise<Pipeline>;
+    TextStreamer?: new (tokenizer: Tokenizer, options: {
+      skip_prompt?: boolean;
+      skip_special_tokens?: boolean;
+      callback_function?: (text: string) => void;
+    }) => { end: () => void };
   };
   export type Tokenizer = {
     (text: string, options?: { add_special_tokens?: boolean }): { input_ids: { data: ArrayLike<number | bigint> } };
