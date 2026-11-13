@@ -372,3 +372,208 @@ test('scrolling during an active request preserves and reorders the unsent tail'
   assert.equal(rest.hasMore, false);
   assert.equal(translator.restore().restored, 3);
 });
+
+test('viewport invalidation stops refilling the active wave and retains its unsent nodes', async () => {
+  const fixture = page(Array.from({ length: 21 }, (_, index) => ({
+    text: `Reader comment ${index}`, tag: 'main', top: index === 20 ? 3000 : index * 30
+  })));
+  const started = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const asked: string[] = [];
+  let calls = 0;
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      if (++calls === AT.C.PAGE_PACKS) started.resolve();
+      await release.promise;
+      return texts.map((text) => `»${text}«`);
+    }
+  });
+  const active = translator.translate();
+  await started.promise;
+  const dispatched = asked.length;
+  for (const node of fixture.texts) {
+    node.parentElement!.getBoundingClientRect = () => ({ top: -3000, bottom: -2980, width: 600, height: 20 });
+  }
+  fixture.texts[20]!.parentElement!.getBoundingClientRect = () => ({ top: 100, bottom: 120, width: 600, height: 20 });
+  translator.invalidatePlan();
+  release.resolve();
+  const interrupted = await active;
+  assert.equal(interrupted.hasMore, true);
+  assert.equal(interrupted.failed, 0);
+  assert.equal(asked.length, dispatched, 'in-flight requests commit, but no old-window refill starts');
+  const result = await translator.resume();
+  assert.equal(asked[dispatched], 'Reader comment 20');
+  assert.equal(new Set(asked).size, 21);
+  assert.equal(asked.length, 21, 'yielded nodes are retained without retranslating completed ones');
+  assert.equal(result.translated, 21);
+  assert.equal(translator.restore().restored, 21);
+});
+
+test('target-language prose is left untouched without an echo failure', async () => {
+  const fixture = page([
+    { text: '행복해지셨으면 좋겠습니다', top: 10, tag: 'main' },
+    { text: 'I hope you find happiness.', top: 50, tag: 'main' }
+  ]);
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }),
+    shouldTranslate: (text: string) => !AT.isTargetLanguage(text, 'ko'),
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      return texts.map(() => '행복을 찾으시길 바랍니다.');
+    }
+  });
+  const result = await translator.translate();
+  assert.deepEqual(asked, ['I hope you find happiness.']);
+  assert.equal(fixture.texts[0]!.nodeValue, '행복해지셨으면 좋겠습니다');
+  assert.equal(result.failed, 0);
+  assert.equal(result.hasMore, false);
+  assert.equal(translator.restore().restored, 1);
+});
+
+test('interactive comments park unread work and wake it on viewport invalidation without a retry loop', async () => {
+  const fixture = page([
+    { text: 'Visible reply', top: 100, attrs: { class: 'comment-body' } },
+    { text: 'Next-screen reply', top: 1000, attrs: { class: 'comment-body' } },
+    { text: 'Unread distant reply', top: 5000, attrs: { class: 'comment-body' } },
+    { text: 'Reader author', top: 60, tag: 'time' },
+    { text: 'Distant recommendation', top: 4000, tag: 'aside' }
+  ]);
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      return texts.map(text => `»${text}«`);
+    }
+  });
+  let result = await translator.translate();
+  for (let pass = 0; result.hasMore && pass < 20; pass++) result = await translator.resume();
+  assert.equal(result.hasMore, false, 'parked work does not keep an empty continuation spinning');
+  assert.deepEqual(asked, ['Visible reply', 'Next-screen reply', 'Reader author']);
+  assert.equal(fixture.texts[2]!.nodeValue, 'Unread distant reply');
+  const before = asked.length;
+  assert.equal((await translator.resume()).hasMore, false);
+  assert.equal(asked.length, before);
+  for (const node of fixture.texts) {
+    node.parentElement!.getBoundingClientRect = () => ({ top: -4000, bottom: -3980, width: 600, height: 20 });
+  }
+  fixture.texts[2]!.parentElement!.getBoundingClientRect = () => ({ top: 100, bottom: 120, width: 600, height: 20 });
+  translator.invalidatePlan();
+  result = await translator.resume();
+  assert.equal(asked[before], 'Unread distant reply');
+  assert.equal(result.hasMore, false);
+  assert.equal(translator.restore().restored, 4);
+});
+
+test('interactive comment work keeps one request active and lets new visible replies overtake old pending work', async () => {
+  const fixture = page([
+    { text: 'First visible reply', top: 100, attrs: { class: 'comment-body' } },
+    { text: 'Old pending reply', top: 200, attrs: { class: 'comment-body' } },
+    { text: 'New visible reply', top: 4000, attrs: { class: 'comment-body' } }
+  ]);
+  const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const asked: string[][] = [];
+  let active = 0, maximum = 0;
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(texts); maximum = Math.max(maximum, ++active);
+      if (asked.length === 1) { started.resolve(); await release.promise; }
+      active--;
+      return texts.map(text => `»${text}«`);
+    }
+  });
+  const running = translator.translate();
+  await started.promise;
+  assert.deepEqual(asked, [['First visible reply']]);
+  fixture.texts[1]!.parentElement!.getBoundingClientRect = () => ({ top: -4000, bottom: -3980, width: 600, height: 20 });
+  fixture.texts[2]!.parentElement!.getBoundingClientRect = () => ({ top: 150, bottom: 170, width: 600, height: 20 });
+  translator.invalidatePlan();
+  release.resolve();
+  assert.equal((await running).hasMore, true);
+  let result = await translator.resume();
+  for (let pass = 0; result.hasMore && pass < 10; pass++) result = await translator.resume();
+  assert.deepEqual(asked, [['First visible reply'], ['New visible reply']]);
+  assert.equal(maximum, 1);
+  assert.equal(fixture.texts[1]!.nodeValue, 'Old pending reply');
+  assert.equal(result.failed, 0);
+});
+
+test('interactive long comments retain exact source through bounded work and complete every suffix', async () => {
+  const source = 'A reader describes the changing weather and power network. '.repeat(7);
+  const fixture = page([{ text: source, top: 100, attrs: { class: 'comment-body' } }]);
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      return texts.map(text => text.toUpperCase());
+    }
+  });
+  let result = await translator.translate();
+  assert.equal(result.hasMore, true);
+  assert.equal(result.translated, 0, 'a prefix is not a completed comment');
+  for (let pass = 0; result.hasMore && pass < 50; pass++) result = await translator.resume();
+  assert.equal(result.hasMore, false);
+  assert.equal(result.translated, 1);
+  assert.ok(asked.every(text => text.length <= 64));
+  assert.equal(fixture.texts[0]!.nodeValue, source.toUpperCase());
+  translator.restore();
+  assert.equal(fixture.texts[0]!.nodeValue, source);
+});
+
+test('unchanged failed comment fragments do not consume every mutation tick', async () => {
+  const fixture = page([{ text: 'A refused reader comment', top: 100, attrs: { class: 'comment-body' } }]);
+  let calls = 0;
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    translate: async ({ texts }: { texts: string[] }) => {
+      if (++calls === 1) throw new Error('provider refused this comment');
+      return texts.map(text => `»${text}«`);
+    }
+  });
+  await assert.rejects(translator.translate(), /provider refused/);
+  translator.invalidatePlan();
+  const parked = await translator.refresh();
+  assert.equal(calls, 1);
+  assert.equal(parked.hasMore, false);
+  assert.equal(parked.failed, 1, 'parking is not successful translation or suppressed error');
+  fixture.texts[0]!.nodeValue = 'The reader edited this comment';
+  translator.invalidatePlan();
+  const edited = await translator.refresh();
+  assert.equal(calls, 2);
+  assert.equal(edited.failed, 0);
+  assert.equal(fixture.texts[0]!.nodeValue, '»The reader edited this comment«');
+});
+
+test('a failed bounded request does not discard the unattempted comments behind it', async () => {
+  for (const failure of ['throw', 'echo']) {
+    const fixture = page([
+      { text: 'First reader comment', top: 100, attrs: { class: 'comment-body' } },
+      { text: 'Second reader comment', top: 200, attrs: { class: 'comment-body' } }
+    ]);
+    const asked: string[] = [];
+    const translator = pipeline.create({
+      doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+      translate: async ({ texts }: { texts: string[] }) => {
+        asked.push(...texts);
+        if (asked.length === 1) {
+          if (failure === 'throw') throw new Error('refused first comment');
+          return texts;
+        }
+        return texts.map(text => `»${text}«`);
+      }
+    });
+    const first = await translator.translate();
+    assert.equal(first.failed, 1, failure);
+    assert.equal(first.hasMore, true, failure);
+    const second = await translator.resume();
+    assert.deepEqual(asked, ['First reader comment', 'Second reader comment'], failure);
+    assert.equal(second.hasMore, false, failure);
+    assert.equal(second.failed, 1, 'the original failure remains visible');
+    assert.equal(fixture.texts[1]!.nodeValue, '»Second reader comment«');
+  }
+});

@@ -247,6 +247,8 @@ function installSession(options: {
   beforeTokenizer?: () => Promise<void>;
   beforePipeline?: () => Promise<void>;
   beforeGenerate?: () => Promise<void>;
+  tokenizer?: typeof codepoints;
+  generatedText?: (prompt: string) => string;
 } = {}) {
   const inline: string[] = [];
   const calls = { tokenizers: 0, pipelines: 0, disposed: 0 };
@@ -277,7 +279,7 @@ function installSession(options: {
         from_pretrained: async () => {
           calls.tokenizers += 1;
           await options.beforeTokenizer?.();
-          return codepoints;
+          return options.tokenizer ?? codepoints;
         }
       },
       pipeline: async () => {
@@ -286,7 +288,7 @@ function installSession(options: {
         const pipe = async (prompt: string) => {
           inline.push(prompt);
           await options.beforeGenerate?.();
-          return [{ generated_text: `${prompt}문서` }];
+          return [{ generated_text: options.generatedText?.(prompt) ?? `${prompt}문서` }];
         };
         pipe.dispose = async () => { calls.disposed += 1; };
         return pipe;
@@ -363,6 +365,93 @@ test('requests reach the engine as token ids and come back as tokens', async () 
     assert.deepEqual(replies[1]?.translations, ['둘째']);
     assert.equal(session.inline.length, baseline, 'nothing was generated in this document');
     assert.equal((await onnxhost.status()).generations, 2, 'each answer is one generation');
+  } finally {
+    await finish(started, session);
+  }
+});
+
+/** PFML labels remain plain text after special tokens disappear. The decoder
+ * also normalizes source spacing, so marker removal is not the decoded prompt. */
+const protocolTokenizer = Object.assign(
+  (text: string, options?: { add_special_tokens?: boolean }) => codepoints(text, options),
+  {
+    decode: (ids: ArrayLike<number | bigint>) => codepoints.decode(ids)
+      .replace(/<\|plamo:[^|]*\|>/g, '').replace(/\u3000/g, ' '),
+    apply_chat_template: (messages: { content: string }[]) =>
+      '<|plamo:tag|>dataset<|plamo:msg|>translation' +
+      '<|plamo:tag|>input<|plamo:msg|>' + (messages[0]?.content ?? '') +
+      '<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>ko<|plamo:msg|>'
+  }
+);
+
+for (const mode of ['native', 'fallback'] as const) {
+  test(`${mode}: exact protocol extraction removes the header, not ordinary outputlangko prose`, async () => {
+    const source = '안녕　친구';
+    const answer = 'outputlangko는 문자열입니다. 안녕 친구라고 했습니다. 안녕 친구';
+    const session = installSession({
+      tokenizer: protocolTokenizer,
+      generatedText: prompt => protocolTokenizer.decode(codepoints(prompt).input_ids.data) + answer
+    });
+    FakeEngine.reset();
+    if (mode === 'fallback') FakeEngine.failInit = 'no adapter in this worker';
+    (globalThis as ATNamespace).Worker = FakeEngine;
+    const started: Promise<unknown>[] = [];
+    try {
+      const request = onnxhost.translate(translateRequest(source));
+      started.push(request);
+      if (mode === 'native') {
+        await until('protocol generation', () => FakeEngine.inFlight.length === 1);
+        const job = jobFor(source);
+        job.worker.answer(job, answer);
+      }
+      const reply = await request;
+      assert.deepEqual(reply.translations, [answer]);
+      assert.equal((await onnxhost.status()).generations, 1, 'valid extraction never needs a retry');
+      assert.equal(session.calls.pipelines, mode === 'native' ? 0 : 1);
+    } finally {
+      await finish(started, session);
+    }
+  });
+
+  test(`${mode}: structural invalid output fails rather than retrying or becoming identity text`, async () => {
+    const session = installSession({ generatedText: prompt => prompt + '<pad>' });
+    FakeEngine.reset();
+    if (mode === 'fallback') FakeEngine.failInit = 'no adapter in this worker';
+    (globalThis as ATNamespace).Worker = FakeEngine;
+    const started: Promise<unknown>[] = [];
+    try {
+      const request = onnxhost.translate(translateRequest(ASK_ONE));
+      started.push(request);
+      const rejected = assert.rejects(request, { reason: 'invalid-output', message: /control-token/ });
+      if (mode === 'native') {
+        await until('invalid generation', () => FakeEngine.inFlight.length === 1);
+        const job = jobFor(ASK_ONE);
+        job.worker.answer(job, '<pad>');
+      }
+      await rejected;
+      assert.equal((await onnxhost.status()).generations, 1);
+      assert.equal(FakeEngine.inFlight.length, 0, 'invalid output does not start a retry');
+    } finally {
+      await finish(started, session);
+    }
+  });
+}
+
+test('fallback: incomplete decoded prompt is an explicit protocol error, never a source-anchor guess', async () => {
+  const source = '안녕 친구';
+  const session = installSession({
+    tokenizer: protocolTokenizer,
+    generatedText: () => 'damaged prefix ' + source + 'outputlangko번역'
+  });
+  FakeEngine.reset();
+  FakeEngine.failInit = 'no adapter in this worker';
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate(translateRequest(source));
+    started.push(request);
+    await assert.rejects(request, { reason: 'invalid-output', message: /complete decoded prompt/ });
+    assert.equal(session.inline.length, 1, 'protocol errors are not swallowed by a retry');
   } finally {
     await finish(started, session);
   }

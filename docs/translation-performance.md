@@ -228,3 +228,280 @@ UNSAFE_WEBGPU=0 HEADED=1 AURORA=1 \
   MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
   QA_DIR=test-results/browser/aurora-extension-native npm run test:onnx
 ```
+
+## YouTube comment sessions (v0.1.10)
+
+Measured the public video `https://www.youtube.com/watch?v=DBjiUz0H9HY` with
+the unchanged published Chrome extension, Apple M5, Chrome 143.0.7499.4,
+1100×800 viewport and local PLaMo 0.8B Q4F16/WebGPU. Source was automatic,
+target Korean. Model installation and the harness's initial warmup are excluded.
+The two fresh-profile sessions saw different live comment ordering; they are
+not identical repeated samples and must not be averaged.
+
+Times below start at enable, scroll or click and end at an actual change of the
+original comment text. Completion is conservative text-change coverage, not a
+translation-quality assertion.
+
+| Session / action | First new visible result | Observed coverage |
+| --- | ---: | --- |
+| Scroll / enable | 5.862 s | 2 of 4 visible comments wholly changed within 20.100 s |
+| Scroll / down 900 px | 4.544 s | 2 complete, 1 partial of 7 visible comments within 15.293 s |
+| Scroll / up during pending work | 4.472 s | All 7 newly visible comments changed by 9.740 s; 2 others already translated |
+| Scroll / return to first comments | No new dispatch | All 4 retained their translations |
+| Scroll / open first thread | 7.826 s | All 5 visible replies changed by 14.360 s |
+| Reply-focused / open first thread | 2.346 s | All 6 visible replies changed by 8.599 s |
+| Reply-focused / show more replies | 5.040 s | All 3 newly visible foreign-language replies changed by 5.605 s |
+| Reply-focused / open second thread | 1.983 s | All 4 new foreign-language replies changed by 2.297 s |
+
+The first thread advertises 58 replies; these numbers cover loaded visible
+cohorts, not all 58. One newly loaded Korean reply did not change and exhausted
+the observation window; that is not a 20-second foreign-text translation
+failure. Scrolling back over 7 completed replies produced no new dispatch.
+The brief fast-down phase moved away after 1.139 seconds with no result.
+
+### Selection and latency findings
+
+- Visible top-to-bottom ordering worked in the observed cohorts, including a
+  Japanese reply discovered after English siblings but rendered above them.
+  Previously completed reply bodies were not dispatched again on return.
+- The scroll session selected 168 presentation fragments: 117 comment UI,
+  43 comment-body and 8 reply-body fragments. Thus 69.6% were non-body UI,
+  **not** 69.6% of inference time. Authors, dates and reply controls competed
+  with prose. `targets.ts` classifies comment context before button/form
+  context; the entire comment thread supplies that context.
+- A collapsed 836-character lyric comment was submitted beyond its visible
+  prefix. Its fragment waited 16.209 seconds from dispatch to commit; a
+  following 15-character comment waited 13.498 seconds. Request timestamps
+  and ordered-commit code indicate about 11.33 seconds of head-of-line
+  waiting for the short comment. This attribution is an inference from
+  correlated events, not a per-fragment GPU trace.
+- In the scroll session, replies loaded 0.426 seconds after the click, but
+  first visible-reply dispatch occurred at 2.412 seconds and its first
+  result at 7.826 seconds. Meanwhile an ordinary comment 4,504 pixels below
+  the viewport was dispatched 0.955 seconds after the click. The current
+  wave continued before newly visible work took priority; this is not
+  evidence that the vertical comparator itself is reversed.
+- Already-Korean reply text was submitted and rewritten with a literal
+  `outputlangko` prefix in both sessions. The reply-focused session also
+  ended with content error `empty translation segment`, although its four
+  newly opened foreign-language replies had translated. The trace does not
+  establish which input caused that error.
+
+Next changes should separate comment prose from metadata/UI, bound work on
+collapsed long comments, reconsider visibility between pending work units,
+and skip already-target-language fragments before generation. Engine changes
+were deliberately excluded from this measurement task.
+
+### Evidence and limits
+
+Raw reports and screenshots:
+`test-results/browser/youtube-comments-DBjiUz0H9HY/` and
+`test-results/browser/youtube-comments-DBjiUz0H9HY-replies/`.
+The first directory's `summary.json` consolidates both sessions.
+The release ZIP SHA-256 was
+`74bdae82b1c17c409131a00aad47d3d3efa8635e90239263d4ecced972568c8a`.
+Actual translated reply screenshots were visually inspected; disabling
+translation left zero component hosts in both sessions.
+
+The observer is read-only. Its measured callback time was 134 ms over 62.458 s
+and 216.6 ms over 63.223 s (0.215% and 0.343%); this excludes indirect layout
+overhead. After recording, instrumentation was corrected to attribute nested
+replies to root threads and not count failed unwrapping as a host commit.
+A focused browser smoke passed for both corrections. Reported latencies use
+original-text events, unaffected by those corrections; raw host commits and
+raw nested thread ordinals should not be used interchangeably with them.
+These observations establish neither token throughput nor broad website
+compatibility, and the recorded translation error prevents an all-pass claim.
+
+## Comment-priority corrections after v0.1.10
+
+Comment prose and reply bodies retain primary reading-order priority. Authors,
+dates and other comment metadata are supporting UI; nested buttons remain form
+controls instead of inheriting the entire thread's comment role. The DOM adapter
+recognizes comment-body evidence separately from thread ancestry, including
+YouTube's nested reply view models. Metadata is no longer primary content.
+
+Scroll invalidation now stops refilling the active request window immediately;
+the debounce schedules continuation rather than delaying invalidation. Already
+dispatched requests still commit normally. Unsent and partial nodes are returned
+to the planner without being recorded as failures or swept work. Multiple
+mutation regions, or a mutation with unfinished page work, compete in one visual
+plan rather than being translated in mutation-delivery order. A lone insertion
+on a completed page retains the smaller subtree scan.
+
+Target-language exclusion runs before presentation and model dispatch. The
+current deterministic guard recognizes Hangul-only Korean prose, including short
+replies with punctuation, numbers and emoji. It does not infer languages from
+shared scripts or skip mixed Korean/foreign prose. Direct engine callers receive
+unchanged skipped fragments in their original positions without paying token
+counting or generation costs for them.
+
+The native host decodes generated tokens only. The fallback removes the exact
+tokenizer-decoded prompt prefix rather than searching for the last occurrence
+of source text. This addresses decoded `outputlangko` headers without replacing
+ordinary occurrences of that string in user prose. Invalid outputs remain
+explicit failures.
+
+Clipped text uses rendered Range geometry and ancestor clipping styles to split
+the visible prefix from its hidden continuation. The executor stores source
+offsets and committed translations instead of replacing or splitting page-owned
+Text nodes. A completed visible prefix yields its unfinished node to the
+planner; hidden continuations rank below ordinary pending text. Expanding the
+container rechecks clipping and promotes newly visible source. Continuation
+does not resend committed prefixes, and restoration keeps the exact original
+source and node identity. Language-skipped fragments remain unchanged within
+mixed-language partial text rather than being treated as model echoes.
+
+The first installed-extension correction run exposed a root-overflow edge:
+YouTube propagates scrolling from a zero-height body to the viewport. Treating
+that body as a local clipping box incorrectly classified visible text as hidden.
+Clipping now excludes viewport-propagated root/body overflow and boxless
+`display:contents` ancestors. The browser regression reproduces a scrolled,
+zero-height body with the production shadow presentation, not just an isolated
+line-clamped paragraph.
+
+### Corrected-build verification and live results
+
+Chrome build and tooling type checks passed. The 186 targeted Node cases passed.
+The 34 browser cases passed across focused runs: the old whole-paragraph retry
+expectation was updated to require only the missing suffix, and the final
+root-overflow correction was checked with its specific browser regression.
+This is not a claim that the full suite was rerun after that final correction.
+
+The corrected working-tree extension was then installed with the real local
+model on the same video, M5, Chrome 143 and 1100×800 viewport:
+
+| Action | First visible result | Coverage |
+| --- | ---: | --- |
+| Enable comments | 2.772 s | First 5 bodies by 2.775 s; clipped sixth prefix by 3.119 s |
+| Scroll down | 0.984 s | First newly visible result; the 836-character lyric suffix remained deferred |
+| Open first thread | 6.143 s | 4 visible foreign replies by 9.188 s; Korean reply unchanged |
+| Show more replies | 2.721 s | 3 newly loaded foreign replies by 3.665 s; Korean reply unchanged |
+
+The first comment-UI dispatch was at 8.024 seconds, after all six initial visible
+bodies/prefixes. Both observed Korean replies had zero presentation dispatches
+and unchanged source text; no `outputlang` header was observed in comment/reply
+output. Upward return over the completed replies produced no new dispatch.
+Restoration removed all component hosts. Initial-comment and expanded-reply
+screenshots were visually inspected.
+
+The 596- and 836-character clipped comments retained partial components and
+original hidden suffixes; these are intentionally not whole-comment completion
+results. The live observer therefore sometimes exhausted its whole-text waiting
+budget despite a translated visible prefix. Comment ordering changed relative
+to the earlier release measurements, so no controlled speedup ratio is claimed.
+The second root comment had no public reply expander in this session.
+
+Remaining measured limits: opening replies still waited 4.212 seconds before
+dispatch (DOM load: 0.756 seconds), because already executing requests are not
+preempted. Intermediate scroll phases reported the model returning unchanged
+source text; these errors were not suppressed. Final content/host errors were
+null, but this does not certify every fragment or translation quality.
+
+Final raw report, screenshots and compact `summary.json`:
+`test-results/browser/youtube-comments-DBjiUz0H9HY-priority-fixes-final/`.
+The preceding `youtube-comments-DBjiUz0H9HY-priority-fixes/` directory records
+the diagnostic build before the propagated-overflow fix, not final behavior.
+No release or push was performed for these corrections.
+
+## Whole-comment one-second latency budget
+
+The interactive target is **whole-comment completion within 1,000 ms of
+observed viewport entry**, with no accumulating visible backlog. First-prefix
+paint, cached returns and already-Korean text do not satisfy a new translation
+deadline. Unfinished exits are censored, not counted as successful translations.
+Long collapsed comments retain their hidden suffix and consequently remain
+incomplete under this conservative whole-comment metric.
+
+The local-engine comment path now uses one outstanding model request and one
+source text per request, with a 64 UTF-16-code-unit source quantum. Boundaries
+prefer sentences/words and never split a surrogate pair. This is not an output
+token cap: every original source suffix remains resumable and restorable.
+Unclipped long text and oversized inline runs use the same bounded mechanism.
+Short comments bypass unnecessary sentence splitting.
+
+After every request the pipeline re-collects and re-ranks eligible work.
+Viewport changes yield at that boundary and schedule the next task without
+waiting for the previous 300 ms scroll debounce. Visible comments keep the
+interactive mode active even after their translation completes. Admission is
+limited to visible text and primary content within the next screen; distant
+work and clipped suffixes stay parked until visibility changes. Unchanged failed
+fragments do not retry on each unrelated page mutation, but remain reported
+as failures. Source edits or a new translation session make them eligible again.
+Unattempted work behind a failed request remains pending rather than failed.
+
+This bounds stale queued work, not inference duration or incoming comment rate.
+Already executing GPU work is not preempted. Smaller fragments may increase
+prompt overhead and reduce cross-fragment context; translation fluency is not
+certified by these scheduling tests. The engine kernels are unchanged.
+
+### Installed-extension evaluation
+
+The current local Chrome build was installed in a fresh profile with the real
+673 MiB model on the same YouTube video, M5, Chrome 143, 1100×800 viewport.
+The model was warm after the four-paragraph smoke scenario. No release was made.
+The scenario included six downward and six upward scrolls at one-second
+intervals, five seconds idle, ordinary scrolling, reply expansion, more replies,
+and another public reply thread. Initial and expanded-reply screenshots were
+visually inspected; restoration left zero presentation hosts.
+
+**The one-second whole-comment target is not met.**
+
+| Measurement | Observed value |
+| --- | ---: |
+| Translation viewport episodes | 88 |
+| Whole-completed episodes | 31 |
+| Unfinished exits | 57 |
+| Whole-completion p50 / p95 / maximum, completed episodes only | 0.950 / 3.752 / 4.434 s |
+| Known deadline misses | 47 / 64 (73.4%) |
+| Exits before deadline with unknown outcome | 24 |
+| Peak visible unfinished comments | 8 |
+| Peak observed waiting age, including collapsed hidden suffixes | 31.847 s |
+| Burst-only completed / translation episodes | 10 / 58 |
+| Burst-only known misses / known deadlines | 25 / 35 |
+| Visible unfinished after burst's 5 s idle | 1 |
+| Final visible unfinished comments | 0 |
+
+Episodes are viewport visits, not unique comments. Completed returns (47),
+already-complete entries (5), and Korean episodes (5) are separate from the
+translation denominator. The 57 unfinished exits include 24 unknown short exits
+and 33 known misses. Long collapsed comments remain incomplete by design; this
+is not proof of outstanding GPU work, nor may they be silently dropped to claim
+the whole-comment SLO. The burst's completed-only p95 was 0.9995 s, but its 48
+unfinished episodes make that percentile alone misleading.
+
+The first initial prefix appeared 0.743 s after enabling; the first whole
+142-character comment completed 1.596 s after enable confirmation. The next
+four short comments completed at 1.942, 2.201, 2.552 and 3.071 s: sequential
+service still produces head-of-line delay even when individual requests are
+short. First-thread reply presentation dispatch started 0.527 s after the click
+(previous corrected session: 4.212 s); its first result arrived at 1.328 s and
+the visible foreign cohort completed by 4.837 s. The second public thread's
+visible cohort completed by 0.957 s after the click. Live ordering changed, so
+these are separate observations, not a controlled speedup ratio.
+
+The final rolling 200-request log contained 55 comment requests, median 328 ms,
+maximum 801 ms, totalling 20.771 s. It also contained 99 aside, 40 metadata and
+6 form requests, totalling 21.554 s. These are request intervals, not a complete
+session accounting: completed comment work permits visible sidebar/UI work.
+Reducing that secondary work cannot by itself remove the initial sequence of
+whole-comment completions. Queue bounds do not raise model service capacity;
+64-character fragments also repeat prompt costs.
+
+The final content status still reported unchanged-source model output; this
+error was retained, not hidden or repeatedly retried. Final host error was null.
+Observer processing totalled 1.846 s over 90.984 s (about 2.0%), including
+mutation, sampling, setup and API calls, excluding protocol serialization.
+This run does not certify translation quality or indefinite backlog stability.
+
+Chrome build and tooling types passed. All 101 targeted Node cases and 35
+targeted browser cases passed across focused runs; repetitive uppercase fixture
+strings were corrected after the output repetition guard rejected them.
+A standalone accounting check covered completed, missed, unfinished, censored,
+Korean and cached populations.
+
+Raw report and screenshots:
+`test-results/browser/youtube-comments-DBjiUz0H9HY-latency/`.
+The next capacity decision must distinguish whole-comment tail latency from
+prefix responsiveness: small-request scheduling improves interruption points,
+but whole-comment p95 and burst deadline misses remain the acceptance criteria.

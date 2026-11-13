@@ -936,6 +936,28 @@ test('an inserted region is translated on its own, not by re-reading the page', 
   }
 });
 
+test('simultaneous inserted regions compete by visibility instead of mutation order', async () => {
+  const env = environment();
+  const clock = installClock();
+  try {
+    await env.send(translateMessage());
+    const before = env.recorded.batch.length;
+    const distant = env.page.make('p', { attrs: { top: '4000' } }, [t('Distant counter update')]);
+    const visible = env.page.make('p', { attrs: { top: '100' } }, [t('New visible reply')]);
+    env.page.body.append(distant, visible);
+    env.mutate([
+      { type: 'childList', target: env.page.body, addedNodes: [distant] },
+      { type: 'childList', target: env.page.body, addedNodes: [visible] }
+    ]);
+    await clock.run();
+    assert.deepEqual(env.recorded.batch.slice(before).flatMap((batch) => batch.texts),
+      ['New visible reply', 'Distant counter update']);
+    assert.deepEqual(pageTexts(visible), ['»New visible reply«']);
+  } finally {
+    clock.restore();
+  }
+});
+
 test('a text the page rewrote is picked up from its record', async () => {
   const env = environment();
   const clock = installClock();

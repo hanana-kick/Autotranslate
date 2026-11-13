@@ -292,7 +292,7 @@ namespace AT.engines {
     if (!Array.isArray(texts)) throw new EngineError('config', 'texts must be an array');
     if (!C.isSupportedLang(target)) throw new EngineError('config', 'Unsupported target language.');
     const originals = texts.map((value) => typeof value === 'string' ? value : '');
-    const unique = [...new Set(originals.filter(needsTranslation))];
+    const unique = [...new Set(originals.filter(text => needsTranslation(text) && !AT.isTargetLanguage(text, target)))];
     if (!unique.length) return { translations: originals, detected: null, requested: 0 };
     if (unique.length > 128 || unique.some(t => t.length > 32000)) throw new EngineError('config', 'Server translation input is too large.');
     const translated = new Map<string, string>();
@@ -368,7 +368,7 @@ namespace AT.engines {
     if (texts.length === 0) return { translations: [], detected: null, requested: 0 };
 
     const originals = texts.map((text) => (typeof text === 'string' ? text : ''));
-    const pending = originals.filter((text) => needsTranslation(text));
+    const pending = originals.filter((text) => needsTranslation(text) && !AT.isTargetLanguage(text, target));
     const unique = [...new Set(pending)];
     if (unique.length === 0) return { translations: originals, detected: null, requested: 0 };
 
@@ -409,7 +409,7 @@ namespace AT.engines {
     }
 
     const translations = originals.map((text) => {
-      if (!needsTranslation(text)) return text;
+      if (!needsTranslation(text) || AT.isTargetLanguage(text, target)) return text;
       const translated = batchOut.get(text);
       // An empty model answer is not a successful identity translation. Keep
       // the distinction so the DOM can retain the source without marking done.

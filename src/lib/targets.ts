@@ -9,8 +9,8 @@
 //   in what order do we send it    → `plan`
 //
 // The answers are mechanical: semantic elements, ARIA landmarks and the
-// attributes sites use to mark comments. A text inside a comment thread is a
-// comment even when the whole thread sits inside `<main>`; a list inside an
+// attributes sites use to mark comments. Comment prose remains content inside
+// `<main>`, but its author/date controls are supporting UI. A list inside an
 // article is article text, not a list of its own.
 // Load after lib/constants.js.
 namespace AT.targets {
@@ -35,6 +35,7 @@ namespace AT.targets {
     ariaRole?: string | null;
     inArticle: boolean;
     inComment: boolean;
+    inCommentMetadata?: boolean;
     inNav: boolean;
     inForm: boolean;
     inFooter: boolean;
@@ -62,7 +63,7 @@ namespace AT.targets {
     article: true,
     heading: true,
     list: true,
-    metadata: true,
+    metadata: false,
     comment: true,
     form: false,
     navigation: false,
@@ -87,9 +88,14 @@ namespace AT.targets {
   export function roleOf(info: NodeInfo): TextRole {
     if (!info || typeof info !== 'object') return 'unknown';
     const role = (info.ariaRole ?? '').toLowerCase();
-    if (info.inComment || role === 'comment' || COMMENT_MARKERS.test(info.markers ?? '')) return 'comment';
-    if (info.inNav || role === 'navigation' || role === 'menu' || role === 'menubar') return 'navigation';
     if (info.inForm || info.tag === 'button' || role === 'form' || role === 'search' || role === 'button') return 'form';
+    if (info.inCommentMetadata) return 'metadata';
+    if (info.inComment || role === 'comment' || COMMENT_MARKERS.test(info.markers ?? '')) {
+      if (info.tag === 'time' || info.tag === 'address' ||
+          /(^|[\s_-])(author|byline|dateline|timestamp|published|vote-count)([\s_-]|$)/.test(info.markers ?? '')) return 'metadata';
+      return 'comment';
+    }
+    if (info.inNav || role === 'navigation' || role === 'menu' || role === 'menubar') return 'navigation';
     if (info.inFooter || role === 'contentinfo') return 'footer';
     if (info.inAside || role === 'complementary' || role === 'note') return 'aside';
     if (info.inHeading || info.tag === 'h1' || /^h[1-6]$/.test(info.tag) || role === 'heading') return 'heading';
@@ -132,6 +138,8 @@ namespace AT.targets {
     top?: number;
     /** Position along a rendered line; negative right edge for RTL text. */
     inlineStart?: number;
+    /** A clipped node's visible prefix is done; its hidden continuation can wait. */
+    deferred?: boolean;
   };
 
   export type Group = { role: TextRole; priority: Priority; ids: string[] };
@@ -157,6 +165,7 @@ namespace AT.targets {
     };
     const bandOf = (candidate: Candidate): number => Math.floor(topOf(candidate) / band);
     const readingRank = (candidate: Candidate): number => {
+      if (candidate.deferred) return 5;
       if (candidate.priority === 'far') return 4;
       if (isContent(candidate.role)) {
         if (candidate.priority === 'visible') return 0;

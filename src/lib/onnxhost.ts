@@ -163,7 +163,7 @@ namespace AT.onnxhost {
   function renderPrompt(target: string, text: string, hint: string | null): string {
     // Pass the page text as a plain string, not a chat: the template is already
     // applied here, and a chat input would make the pipeline render it again.
-    // The prompt comes back verbatim in `generated_text`; `answerOf` cuts it off.
+    // The fallback echoes the decoded prompt; `answerOf` removes that exact prefix.
     const safe = P.sanitize(text);
     const context = hint === null ? null : P.sanitize(hint);
     return tokenizer!.apply_chat_template(
@@ -594,7 +594,9 @@ namespace AT.onnxhost {
           maxNewTokens
         } satisfies AT.local.WorkerGenerate);
       });
-      return tokenizer.decode([...inputIds, ...tokens], { skip_special_tokens: true });
+      // Worker replies contain only new token IDs. Decoding the prompt as well
+      // would reintroduce its plain-text PFML header (`outputlangko`).
+      return tokenizer.decode(tokens, { skip_special_tokens: true });
     } finally {
       release(slot);
     }
@@ -640,7 +642,7 @@ namespace AT.onnxhost {
           abort_signal: controller.signal
         });
         requireLifecycle(version);
-        return out?.[0]?.generated_text ?? '';
+        return answerOf(out?.[0]?.generated_text, prompt);
       } finally {
         clearTimeout(timer);
       }
@@ -649,9 +651,8 @@ namespace AT.onnxhost {
     return await run;
   }
 
-  /** One generation, on a worker or in this document. `source` is the text the
-   *  prompt asked about, used only to find where the answer starts when the
-   *  decoded prompt does not match the string we sent. */
+  /** One generation, on a worker or in this document, with protocol validation
+   * before script checks or numbered-batch retries can hide invalid output. */
   async function generate(prompt: string, maxNewTokens: number, source: string): Promise<string> {
     if (!loadedId || !tokenizer) fail('not-loaded', 'no model is loaded');
     const version = lifecycle;
@@ -660,32 +661,29 @@ namespace AT.onnxhost {
       requireLifecycle(version);
       generations += 1;
       touchIdleTimer();
-      return answerOf(generated, prompt, source).trim();
+      const answer = generated.trim();
+      const issue = AT.outputIssue(source, answer);
+      if (issue) fail('invalid-output', 'Invalid translation output: ' + issue);
+      return answer;
     } catch (error: unknown) {
       requireLifecycle(version);
+      if (error instanceof Error && 'reason' in error && error.reason === 'invalid-output') throw error;
       const message = String((error as { message?: unknown })?.message ?? error);
       fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
     }
   }
 
-  /** Every marker the chat template writes is a special token, so the decoded
-   *  text carries the prompt without them; this strips the same markers from
-   *  the prompt we sent. */
-  const PROMPT_MARKERS = /<\|[^|]*\|>/g;
-
-  /** The generation alone. The library's own cut needs a prompt length the
-   *  tokenizer and the padded batch do not agree on, which leaves the source
-   *  sentence in the answer. */
-  function answerOf(generated: unknown, prompt: string, source: string): string {
+  /** The fallback pipeline returns the full decoded sequence. Decode the input
+   * with the same tokenizer: stripping marker strings cannot reproduce byte
+   * fallback, normalization or spacing. Never cut at a source occurrence: the
+   * output header follows it, and the answer may legitimately repeat it. */
+  function answerOf(generated: unknown, prompt: string): string {
     const text = typeof generated === 'string' ? generated : '';
-    if (!text) return '';
-    const bare = prompt.replace(PROMPT_MARKERS, '');
-    if (bare && text.startsWith(bare)) return text.slice(bare.length);
-    // A prompt the decoder renders differently still ends with the text we
-    // asked about; anchoring there cannot return text from earlier in the prompt.
-    const anchor = source.trim();
-    const at = anchor ? text.lastIndexOf(anchor) : -1;
-    return at >= 0 ? text.slice(at + anchor.length) : '';
+    if (prompt && text.startsWith(prompt)) return text.slice(prompt.length);
+    const input = tokenizer!(prompt).input_ids.data;
+    const decoded = tokenizer!.decode(input, { skip_special_tokens: true });
+    if (decoded && text.startsWith(decoded)) return text.slice(decoded.length);
+    fail('invalid-output', 'The generated response did not contain the complete decoded prompt.');
   }
 
   const SELF_SUFFICIENT_CHARS = 40;

@@ -65,6 +65,26 @@ test('real HTTP: multi-segment JSON result keeps order and deduplicates input', 
   assert.equal(r.requested, 2); assert.equal(requests.length, 1);
 });
 
+test('real HTTP: Korean-only fragments never request inference', async t => {
+  const { requests, config } = await endpoint(t, () => assert.fail('target-language input reached the server'));
+  const texts = ['이 노래 정말 좋아요!!', '감사합니다', '네'];
+  const result = await translate(config, texts);
+  assert.deepEqual(result.translations, texts);
+  assert.equal(result.requested, 0);
+  assert.equal(requests.length, 0);
+});
+
+test('real HTTP: target-language exclusion preserves mixed-batch positions and counts', async t => {
+  const mixed = '좋아요 Please translate this';
+  const { requests, config } = await endpoint(t, (_req, res) => json(res, response('["안녕", "혼합 번역"]')));
+  const korean = '이 노래 정말 좋아요!!';
+  const result = await translate(config, [korean, 'Hello', mixed, korean, 'Hello']);
+  assert.deepEqual(JSON.parse(requests[0].body.messages[1].content), ['Hello', mixed]);
+  assert.deepEqual(result.translations, [korean, '안녕', '혼합 번역', korean, '안녕']);
+  assert.equal(result.requested, 2);
+  assert.equal(requests.length, 1);
+});
+
 // Measured against qwen2.5:7b: asked for only a JSON array, it answered
 // `["읽으세요","튜토리얼을","지금mediately."];` — a trailing semicolon that cost the
 // whole chunk, and with it the page, which then waited on a retry.

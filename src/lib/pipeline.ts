@@ -35,6 +35,7 @@ namespace AT.pipeline {
     translate: (batch: Batch) => Promise<string[]>;
     sentences?: AT.dom.Sentences | undefined;
     presentation?: AT.translationtext.Presentation | undefined;
+    shouldTranslate?: ((text: string) => boolean) | undefined;
     /** Viewport height; the browser's own when omitted. */
     viewportHeight?: () => number;
     /** Checked between groups, so a restore can drop a pass it no longer owns. */
@@ -65,7 +66,7 @@ namespace AT.pipeline {
   export type DebugRegion = {
     node: Text;
     role: AT.targets.TextRole;
-    status: 'translated' | 'failed';
+    status: 'translated' | 'partial' | 'failed';
     /** How visible the region was when it was taken. */
     priority: AT.targets.Priority;
   };
@@ -155,16 +156,30 @@ namespace AT.pipeline {
     let ariaRole: string | null = null;
     const markers: string[] = [];
     let watchPage = false, watchPrimary = false, watchSidebar = false;
+    let commentBody = false, commentMetadata = false, youtubeComment = false;
     let current: Element | null = element;
     while (current) {
       const name = current.tagName.toLowerCase();
+      const marker = `${current.getAttribute('class') ?? ''} ${current.id ?? ''}`.toLowerCase().trim();
+      if (!flags.inComment) {
+        if (current.id === 'content-text' || current.getAttribute('itemprop') === 'text' ||
+            /(^|[\s_-])(?:comment|reply)-(?:body|content|text)([\s_-]|$)/.test(marker)) commentBody = true;
+        if (!commentBody && (name === 'time' || name === 'address' ||
+            /(^|[\s_-])(author|byline|dateline|timestamp|published|vote-count)([\s_-]|$)/.test(marker) ||
+            /^(authorText|datePublished|author)$/i.test(current.getAttribute('itemprop') ?? ''))) commentMetadata = true;
+        if (name === 'p' || name === 'blockquote') commentBody = true;
+      }
       // Watch layouts use custom elements rather than main/aside landmarks.
       // Scope their column ids to a watch page, not arbitrary site ids.
       if (name === 'ytd-watch-flexy' || name === 'ytd-watch-grid') watchPage = true;
       if (current.id === 'primary' || name === 'ytd-watch-metadata' ||
           name === 'ytd-video-primary-info-renderer' || name === 'ytd-video-secondary-info-renderer') watchPrimary = true;
       if (current.id === 'secondary' || name === 'ytd-watch-next-secondary-results-renderer') watchSidebar = true;
-      if (name === 'ytd-comments' || name === 'ytd-comment-thread-renderer' || name === 'ytd-comment-view-model') flags.inComment = true;
+      if (name === 'ytd-comments' || name === 'ytd-comment-thread-renderer' || name === 'ytd-comment-view-model' ||
+          name === 'ytd-comment-renderer') {
+        flags.inComment = true;
+        youtubeComment = true;
+      }
       // `<main>` is the page's own content in practice (Wikipedia, MDN, most
       // documentation), so it counts as the article region without <article>.
       if (name === 'article' || name === 'main') flags.inArticle = true;
@@ -186,7 +201,6 @@ namespace AT.pipeline {
       if ((role ?? '').toLowerCase() === 'comment') flags.inComment = true;
       // schema.org marks a comment thread as itemtype="…Comment".
       if (/comment/i.test(current.getAttribute('itemtype') ?? '')) flags.inComment = true;
-      const marker = `${current.getAttribute('class') ?? ''} ${current.id}`.toLowerCase().trim();
       if (marker) markers.push(marker);
       current = current.parentElement;
     }
@@ -196,6 +210,7 @@ namespace AT.pipeline {
       tag: element?.tagName.toLowerCase() ?? '',
       ariaRole,
       ...flags,
+      inCommentMetadata: flags.inComment && (commentMetadata || (youtubeComment && !commentBody)),
       markers: markers.join(' ')
     };
   }
@@ -273,6 +288,14 @@ namespace AT.pipeline {
     let savedPlan: Plan | null = null;
     /** A re-rank replaced the plan while a pass was working through it. */
     let replanned = false;
+    // Interactive comment reading pays for the current screen and its immediate
+    // continuation, not every unloaded/unread feed entry. Keep completed comment
+    // anchors too: finishing the visible prose must not reopen bulk UI dispatch.
+    const commentNodes = new Set<Text>();
+    let commentMode = false;
+    let waveRequests = 0;
+    const commentWork = { maxChars: 64, maxTexts: 1 };
+    const ordinaryWork = { maxChars: 0, maxTexts: AT.C.PACKED_TEXT_NODES };
 
     function executor(): AT.dom.Translator {
       if (translator) return translator;
@@ -282,14 +305,18 @@ namespace AT.pipeline {
         maxNodes: settings.maxNodes,
         sentences: request.sentences,
         presentation: request.presentation,
+        shouldTranslate: request.shouldTranslate,
+        shouldYield: () => replanned || (commentMode && waveRequests > 0),
+        workLimit: () => commentMode ? commentWork : ordinaryWork,
         shouldAbort: request.shouldAbort,
         cacheScope: () => JSON.stringify([context, role]),
         // Small packs share inference, but the DOM executor commits their
         // answers in reading order even when a lower pack finishes first.
-        concurrency: () => (request.settings().engine === 'local' ? AT.C.PAGE_PACKS : 1),
+        concurrency: () => commentMode ? 1 : (request.settings().engine === 'local' ? AT.C.PAGE_PACKS : 1),
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
         translate: async (texts) => {
           batches += 1;
+          waveRequests++;
           // The region is set per group by the plan below; a batch that arrives
           // outside a pass is a selection or a retry and has no region.
           return await request.translate({ texts, role: role ?? 'unknown', context });
@@ -324,6 +351,8 @@ namespace AT.pipeline {
         failures.clear();
         context = AT.pagecontext.analyze(AT.pagecontext.collect(request.doc as AT.pagecontext.MetaDocument));
         done.clear();
+        commentNodes.clear();
+        commentMode = false;
         swept = new Set<Text>();
       }
       const start = root ?? request.doc.documentElement;
@@ -367,13 +396,30 @@ namespace AT.pipeline {
           id: String(index),
           role: AT.targets.roleOf(describe(node)),
           priority: AT.targets.priorityOf(rect, viewport),
+          deferred: dom.deferred(node),
           order: index,
           top: rect.top,
           inlineStart: rect.inlineStart ?? rect.left ?? 0
         };
       });
+      if (!previousPlan) {
+        for (const candidate of candidates) {
+          if (candidate.role === 'comment') commentNodes.add(ordered[Number(candidate.id)]!);
+        }
+        commentMode = false;
+        for (const node of commentNodes) {
+          if (node.isConnected === false) { commentNodes.delete(node); continue; }
+          if (settings.engine === 'local' && AT.targets.priorityOf(measure(node), viewport) === 'visible') commentMode = true;
+        }
+      }
+      // Park work outside the reading window without starting model requests or
+      // scheduling empty continuations. Scroll/expansion invalidation rediscovers
+      // it; no source is discarded or marked translated.
+      const admitted = commentMode ? candidates.filter((candidate) =>
+        !failures.has(ordered[Number(candidate.id)]!) && !candidate.deferred && (candidate.priority === 'visible' ||
+          (candidate.priority === 'near' && Number(candidate.top) >= 0 && AT.targets.isContent(candidate.role)))) : candidates;
       const plan: Plan = previousPlan ?? { nodes: ordered, cursor: 0,
-        entries: AT.targets.plan(candidates, { band: height }).flatMap((group) =>
+        entries: AT.targets.plan(admitted, { band: height }).flatMap((group) =>
           group.ids.map((id) => ({ id, role: group.role, priority: group.priority }))) };
       const groups: AT.targets.Group[] = [];
       const count = Number.isFinite(limit) && limit > 0 ? limit : plan.entries.length;
@@ -435,6 +481,7 @@ namespace AT.pipeline {
           .filter((node): node is Text => node !== undefined && node.isConnected !== false && !dom.has(node));
         if (subset.length === 0) continue;
         role = group.role;
+        waveRequests = 0;
         attempted += 1;
         processedNodes += subset.length;
         if (budgeted) subset.forEach((node) => swept.add(node));
@@ -443,6 +490,7 @@ namespace AT.pipeline {
           if (cancelled()) break;
           requested += result.requested;
           runs += result.runs;
+          const pendingNodes = result.pending;
           if (result.failed > 0) {
             failed += result.failed;
             error ??= result.error ?? 'a batch was refused';
@@ -451,6 +499,15 @@ namespace AT.pipeline {
           // answered with nothing stays eligible, so the next pass retries it
           // instead of leaving the page half English forever.
           for (const node of subset) {
+            if (pendingNodes?.includes(node)) {
+              swept.delete(node);
+              failures.delete(node);
+              debugRegions.delete(node);
+              if (dom.holds(node)) debugRegions.set(node, {
+                node, role: group.role, status: 'partial', priority: group.priority
+              });
+              continue;
+            }
             const written = dom.has(node);
             if (written) { done.add(node); failures.delete(node); }
             else if (result.failed > 0) failures.set(node, { value: node.nodeValue, error: result.error ?? 'translation incomplete' });
@@ -468,6 +525,14 @@ namespace AT.pipeline {
           pass.error = error;
           pass.hasMore = plan.cursor < plan.entries.length;
           request.onProgress?.({ translated: dom.stats().translated, requested });
+          if (pendingNodes?.length) {
+            // The active wave reserved these nodes, but did not consume them.
+            // Rediscover to merge its continuations with new replies/viewport
+            // work. Completed sources remain owned by the DOM executor.
+            savedPlan = null;
+            yielded = true;
+            break;
+          }
         } catch (caught: unknown) {
           if (cancelled()) break;
           // A generation that fails must not take the rest of the page with it. Those nodes stay eligible; the caller is
@@ -541,6 +606,7 @@ namespace AT.pipeline {
           id: String(position),
           role: AT.targets.roleOf(describe(node)),
           priority: AT.targets.priorityOf(rect, viewport),
+          deferred: translator?.deferred(node) ?? false,
           order: position,
           top: rect.top,
           inlineStart: rect.inlineStart ?? rect.left ?? 0
@@ -567,6 +633,8 @@ namespace AT.pipeline {
       restore() {
         generation++;
         savedPlan = null;
+        commentNodes.clear();
+        commentMode = false;
         const restored = translator ? translator.restore(request.doc.documentElement).restored : 0;
         done.clear();
         failures.clear();

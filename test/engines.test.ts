@@ -242,7 +242,7 @@ test('local: Korean packs by script-aware estimate, not by Latin characters', as
   // by length must still be split when the host cannot count.
   const korean = Array.from({ length: 4 }, (_unused, index) => `${index}번째 ` + '인공지능 번역 모델은 문장의 의미와 뉘앙스를 정확하게 전달해야 하며, 원문의 문체와 문화적 맥락을 함께 고려해야 합니다. '.repeat(4));
   stubSend((message) => ({ ok: true, translations: message.texts.map(() => '번역') }));
-  await localModel({ texts: korean, localMaxTokens: 1024, source: 'ko', target: 'ko' });
+  await localModel({ texts: korean, localMaxTokens: 1024, source: 'ko', target: 'en' });
   assert.ok(translates().length >= 2, 'the Latin-sized batch would have overflowed the context');
   assert.equal(
     translates().reduce((sum, call) => sum + call.texts.length, 0),
@@ -267,6 +267,33 @@ test('local: texts with no letters or numbers are not sent', async () => {
   assert.deepEqual(translates()[0]!.texts, ['42'], 'only a text the model can translate is asked about');
   assert.deepEqual(result.translations, ['', '   ', '!!!', '😀', 'a', '[42]']);
   assert.equal(result.requested, 1);
+});
+
+test('local: Korean replies pass through without counting, detection or inference', async () => {
+  stubSend(() => assert.fail('target-language text must not reach the host'));
+  const texts = ['이 노래 정말 좋아요!!', '감사합니다', '네', '   '];
+  const result = await localModel({ texts });
+  assert.deepEqual(result.translations, texts);
+  assert.equal(result.requested, 0);
+  assert.deepEqual(sent, []);
+  assert.deepEqual(detector.calls, []);
+});
+
+test('local: mixed batches skip only proven target fragments and retain every position', async () => {
+  const korean = '이 노래 정말 좋아요!!';
+  const mixed = '좋아요 Please translate this';
+  detector.answer = { isReliable: true, languages: [{ language: 'ko', percentage: 99 }] };
+  stubSend(
+    message => ({ ok: true, translations: message.texts.map((text: string) => '번역: ' + text) }),
+    message => ({ ok: true, counts: message.texts.map(() => 10), overhead: 10 })
+  );
+  const texts = [korean, 'Hello', korean, mixed, 'Hello', '감사합니다', '日本語'];
+  const result = await localModel({ texts });
+  const eligible = ['Hello', mixed, '日本語'];
+  assert.deepEqual(sent.find(message => message.type === AT.C.MSG.LOCAL_COUNT)?.texts, eligible);
+  assert.deepEqual(translates()[0]?.texts, eligible);
+  assert.deepEqual(result.translations, [korean, '번역: Hello', korean, '번역: ' + mixed, '번역: Hello', '감사합니다', '번역: 日本語']);
+  assert.equal(result.requested, 3, 'only unique eligible fragments count, regardless of detector majority');
 });
 
 test('local: no model selected fails without waking the host', async () => {

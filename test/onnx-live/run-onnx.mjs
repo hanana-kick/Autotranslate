@@ -7,6 +7,7 @@
 //   MODEL_DIR=weight/plamo-3-translate-0.8b-onnx npm run test:onnx
 //   PROFILE_DIR=<dir> npm run test:onnx   # reuse an installed model
 //   YOUTUBE=1 ...                         # adds a paused watch page
+//   YOUTUBE_COMMENTS=1 YOUTUBE_URL=<url>   # scroll/reply selection and latency evidence
 //   VISUAL_ORDER=1 ...                    # CSS-reordered reading-order evidence
 //   AURORA=1 ...                          # real pending/revealed web-component evidence
 //   EXTENSION_DIR=<dir> ...               # a preserved shipped build for comparison
@@ -653,6 +654,14 @@ if (VISUAL_ORDER) {
     actualPrimaryOrder, violations, restored: summary.visualOrder.restored
   }));
   await visual.close();
+}
+
+if (process.env.YOUTUBE_COMMENTS === '1') {
+  const { runYouTubeComments } = await import('./youtube-comments.mjs');
+  summary.youtubeComments = await runYouTubeComments({
+    context, options, output: OUTPUT,
+    url: process.env.YOUTUBE_URL || 'https://www.youtube.com/watch?v=DBjiUz0H9HY'
+  });
 }
 
 // 5. Observe the real watch page without replacing its DOM, dismissing consent,

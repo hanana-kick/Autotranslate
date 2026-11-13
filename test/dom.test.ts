@@ -598,7 +598,7 @@ test('a malformed sentence chunk is not cached and retries use the original sour
   const before = calls.length;
   malformed = false;
   await translator.translateRoot();
-  assert.deepEqual(calls.slice(before).flat(), ['First sentence.', 'Second sentence.', 'Third sentence.']);
+  assert.deepEqual(calls.slice(before).flat(), ['Second sentence.', 'Third sentence.']);
   assert.equal(node.nodeValue, 'FIRST SENTENCE.  SECOND SENTENCE. THIRD SENTENCE.');
   assert.equal(translator.has(node), true);
 });
@@ -628,7 +628,7 @@ test('an empty sentence answer retains only a contiguous translated prefix and c
   const before = calls.length;
   empty = false;
   await translator.translateRoot();
-  assert.deepEqual(calls.slice(before).flat(), ['First sentence.', 'Second sentence.', 'Third sentence.', 'Fourth sentence.']);
+  assert.deepEqual(calls.slice(before).flat(), ['Third sentence.', 'Fourth sentence.']);
   assert.equal(node.nodeValue, source.toUpperCase());
 });
 
@@ -647,4 +647,427 @@ test('a page rewrite during a sentence request keeps ownership through completio
   assert.equal(translator.has(node), false);
   translator.restore();
   assert.equal(node.nodeValue, 'The page replaced this paragraph.');
+});
+
+// Unit geometry pins source-offset bookkeeping; browser/clipped.test.mjs covers
+// actual Range rects, nested clipping, line clamps, bidi and expansion.
+function clipping(node: StubText, visible: number) {
+  let count = visible;
+  const parent = node.parentElement!;
+  Object.assign(parent, {
+    clientLeft: 0, clientTop: 0, clientWidth: 200, clientHeight: 20,
+    offsetWidth: 200, offsetHeight: 20,
+    getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 20 })
+  });
+  Object.assign(node, { ownerDocument: {
+    defaultView: { getComputedStyle: (element: StubElement) => ({
+      overflowX: 'visible', overflowY: element === parent ? 'hidden' : 'visible',
+      display: 'block', getPropertyValue: () => ''
+    }) },
+    createRange: () => {
+      let start = 0;
+      return {
+        setStart: (_node: StubText, value: number) => { start = value; },
+        setEnd: () => {},
+        getClientRects: () => start < count
+          ? [{ left: 0, right: 10, top: 0, bottom: 20, width: 10, height: 20 }]
+          : [{ left: 0, right: 10, top: 40, bottom: 60, width: 10, height: 20 }]
+      };
+    }
+  } });
+  return { expand: () => { count = Number.MAX_SAFE_INTEGER; } };
+}
+
+test('clipped text returns after its visible prefix and resumes exact source offsets', async () => {
+  const source = '  First sentence.\n\nSecond sentence.  Third sentence.\t';
+  const node = t(source);
+  const body = el('body', {}, [el('p', {}, [node])]);
+  const { translator, calls } = harness(body, upcase, { sentences: sentenceOptions });
+  const geometry = clipping(node, source.indexOf('\n'));
+  const first = await translator.translateRoot();
+  assert.deepEqual(calls, [['First sentence.']]);
+  assert.equal(node.nodeValue, '  FIRST SENTENCE.\n\nSecond sentence.  Third sentence.\t');
+  assert.deepEqual(first.pending, [node]);
+  assert.equal(translator.deferred(node), true);
+  assert.equal(translator.has(node), false);
+  assert.equal(body.childNodes[0]!.childNodes![0], node);
+  const second = await translator.translateNodes(first.pending);
+  assert.equal(calls.flat().filter((part) => part === 'First sentence.').length, 1);
+  assert.ok(second.pending.includes(node));
+  geometry.expand();
+  assert.equal(translator.deferred(node), false);
+  for (let remaining = second.pending, count = 0; remaining.length && count < 10; count++) {
+    remaining = (await translator.translateNodes(remaining)).pending;
+  }
+  assert.equal(node.nodeValue, source.toUpperCase());
+  assert.equal(translator.has(node), true);
+  translator.restore();
+  assert.equal(node.nodeValue, source);
+});
+
+test('a clipped prefix restores safely and page edits discard its continuation', async () => {
+  const source = 'First sentence. Second sentence. Third sentence.';
+  const node = t(source);
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase);
+  const geometry = clipping(node, 'First sentence.'.length);
+  await translator.translateRoot();
+  assert.equal(translator.restore().restored, 1);
+  assert.equal(node.nodeValue, source);
+  await translator.translateRoot();
+  node.nodeValue = 'New page-owned comment.';
+  geometry.expand();
+  const before = calls.length;
+  await translator.translateRoot();
+  assert.deepEqual(calls.slice(before), [['New page-owned comment.']]);
+  translator.restore();
+  assert.equal(node.nodeValue, 'New page-owned comment.');
+});
+
+test('source eligibility precedes presentation and preserves mixed inline owners', async () => {
+  const first = t('English before ');
+  const korean = t('이미 한국어입니다');
+  const last = t(' English after');
+  const body = el('body', {}, [el('p', {}, [first, el('strong', {}, [korean]), last])]);
+  const begun: StubText[] = [];
+  const settled: StubText[] = [];
+  const { translator, calls } = harness(body, upcase, {
+    shouldTranslate: (text: string) => !/[가-힣]/u.test(text),
+    presentation: {
+      begin: (node: StubText) => begun.push(node),
+      applied: () => {},
+      settled: (node: StubText) => settled.push(node),
+      forget: () => {},
+      restore: () => {}
+    }
+  });
+  const result = await translator.translateRoot();
+  assert.deepEqual(calls.flat(), ['English before', 'English after']);
+  assert.deepEqual(begun, [first, last]);
+  assert.deepEqual(settled, [first, last]);
+  assert.equal(korean.nodeValue, '이미 한국어입니다');
+  assert.equal(translator.has(korean), false);
+  assert.equal(translator.holds(korean), false);
+  assert.equal(result.failed, 0);
+  assert.equal(result.translated, 2);
+  translator.restore();
+  assert.equal(first.nodeValue, 'English before ');
+  assert.equal(last.nodeValue, ' English after');
+});
+
+test('ineligible sentences keep their exact bytes and never enter model requests', async () => {
+  const source = '이미 한국어입니다.\nEnglish sentence.  역시 한국어입니다. Last sentence.';
+  const node = t(source);
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+    sentences: sentenceOptions,
+    shouldTranslate: (text: string) => !/[가-힣]/u.test(text)
+  });
+  const result = await translator.translateRoot();
+  assert.deepEqual(calls.flat(), ['English sentence.', 'Last sentence.']);
+  assert.equal(node.nodeValue, source.toUpperCase());
+  assert.equal(result.failed, 0);
+  translator.restore();
+  assert.equal(node.nodeValue, source);
+});
+
+test('yield resumes sentence progress without cancelling or retranslating its prefix', async () => {
+  const node = t('First sentence. Second sentence. Third sentence.');
+  let yieldWork = false;
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+    sentences: sentenceOptions,
+    shouldYield: () => yieldWork,
+    onApply: () => { yieldWork = true; }
+  });
+  const first = await translator.translateRoot();
+  assert.deepEqual(calls, [['First sentence.']]);
+  assert.deepEqual(first.pending, [node]);
+  assert.equal(first.failed, 0);
+  yieldWork = false;
+  await translator.translateNodes(first.pending);
+  assert.deepEqual(calls[1], ['Second sentence.']);
+  assert.equal(node.nodeValue, 'FIRST SENTENCE. SECOND SENTENCE. Third sentence.');
+  translator.restore();
+  assert.equal(node.nodeValue, 'First sentence. Second sentence. Third sentence.');
+});
+
+test('yield drains active packs but returns unattempted nodes without failures', async () => {
+  const provider = controlledProvider();
+  const nodes = Array.from({ length: 30 }, (_, index) => t(`Comment number ${index}.`));
+  let yieldWork = false;
+  const { translator } = harness(el('body', {}, nodes.map((node) => el('p', {}, [node]))), provider.translate, {
+    concurrency: () => 2, shouldYield: () => yieldWork
+  });
+  const pending = translator.translateRoot();
+  await turn();
+  assert.equal(provider.requests.length, 2);
+  yieldWork = true;
+  provider.requests[1]!.resolve(upcase(provider.requests[1]!.texts));
+  provider.requests[0]!.resolve(upcase(provider.requests[0]!.texts));
+  const result = await pending;
+  const attempted = provider.requests.reduce((sum, request) => sum + request.texts.length, 0);
+  assert.equal(provider.requests.length, 2);
+  assert.equal(result.failed, 0);
+  assert.deepEqual(result.pending, nodes.slice(attempted));
+  assert.ok(nodes.slice(0, attempted).every((node) => translator.has(node)));
+});
+
+test('an entirely ineligible source has no request, presentation, restore record or failure', async () => {
+  const node = t('이미 한국어인 댓글입니다.');
+  const events: string[] = [];
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+    shouldTranslate: () => false,
+    presentation: {
+      begin: () => events.push('begin'), applied: () => events.push('applied'),
+      settled: () => events.push('settled'), forget: () => {}, restore: () => {}
+    }
+  });
+  const result = await translator.translateNodes([node]);
+  assert.deepEqual(calls, []);
+  assert.deepEqual(events, []);
+  assert.equal(result.requested, 0);
+  assert.equal(result.translated, 0);
+  assert.equal(result.failed, 0);
+  assert.deepEqual(result.pending, []);
+  assert.equal(translator.holds(node), false);
+  assert.equal(translator.restore().restored, 0);
+});
+
+test('failed suffixes are not pending work and direct calls skip completed sources', async () => {
+  const node = t('First sentence. Second sentence.');
+  let fail = true;
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), (texts) =>
+    texts.map((text) => fail && text === 'Second sentence.' ? '' : text.toUpperCase()),
+  { sentences: sentenceOptions });
+  const first = await translator.translateRoot();
+  assert.equal(first.failed, 1);
+  assert.deepEqual(first.pending, []);
+  fail = false;
+  await translator.translateNodes([node]);
+  assert.deepEqual(calls.flat(), ['First sentence.', 'Second sentence.', 'Second sentence.']);
+  const before = calls.length;
+  await translator.translateNodes([node]);
+  assert.equal(calls.length, before);
+});
+
+test('skipped clipped prefixes advance without being marked translated or presented', async () => {
+  const source = '이미 한국어입니다.\nEnglish comment follows. Last English sentence.';
+  const node = t(source);
+  const events: string[] = [];
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+    sentences: sentenceOptions,
+    shouldTranslate: (text: string) => !/[가-힣]/u.test(text),
+    presentation: {
+      begin: () => events.push('begin'), applied: () => events.push('applied'),
+      settled: () => events.push('settled'), forget: () => {}, restore: () => {}
+    }
+  });
+  const geometry = clipping(node, source.indexOf('\n'));
+  const first = await translator.translateRoot();
+  assert.deepEqual(calls, []);
+  assert.deepEqual(events, []);
+  assert.equal(first.translated, 0);
+  assert.equal(first.failed, 0);
+  assert.deepEqual(first.pending, [node]);
+  assert.equal(translator.holds(node), false);
+  geometry.expand();
+  await translator.translateNodes(first.pending);
+  assert.deepEqual(calls.flat(), ['English comment follows.', 'Last English sentence.']);
+  assert.equal(node.nodeValue, source.toUpperCase());
+  translator.restore();
+  assert.equal(node.nodeValue, source);
+});
+
+test('interactive short comments bypass always-split sentences and finish in one request', async () => {
+  const node = t('  First sentence. Second sentence.\n');
+  let splits = 0;
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+    workLimit: () => ({ maxChars: 64, maxTexts: 1 }),
+    sentences: { always: true, maxChars: 1, split: (text: string) => {
+      splits++;
+      return sentenceOptions.split(text);
+    } }
+  });
+  const result = await translator.translateRoot();
+  assert.deepEqual(calls, [['First sentence. Second sentence.']]);
+  assert.equal(splits, 0);
+  assert.equal(translator.has(node), true);
+  assert.deepEqual(result.pending, []);
+  assert.equal(node.nodeValue, '  FIRST SENTENCE. SECOND SENTENCE.\n');
+});
+
+test('unclipped unpunctuated source resumes bounded prefixes without duplicates or lost Unicode', async () => {
+  const prefix = 'abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0';
+  const source = ' \t' + prefix + '😀' + Array.from({ length: 90 }, (_, i) => `bc${i}`).join('') + '𐐨tail' + '\n';
+  const node = t(source);
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+    workLimit: () => ({ maxChars: 64, maxTexts: 1 }),
+    sentences: { ...sentenceOptions, always: true }
+  });
+  let result = await translator.translateRoot();
+  assert.deepEqual(calls, [[prefix]]);
+  assert.equal(node.nodeValue, ' \t' + prefix.toUpperCase() + source.slice(65));
+  assert.deepEqual(result.pending, [node]);
+  assert.equal(translator.has(node), false);
+  assert.equal(translator.deferred(node), false, 'the suffix is pending work, not clipped content');
+  for (let count = 0; result.pending.length && count < 20; count++) {
+    result = await translator.translateNodes(result.pending);
+  }
+  assert.deepEqual(result.pending, []);
+  assert.ok(calls.every((call) => call.length === 1 && call[0]!.length <= 64));
+  assert.equal(calls.flat().join(''), source.trim(), 'every original source unit is requested exactly once');
+  assert.ok(calls.flat().every((part) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(part)));
+  assert.equal(node.nodeValue, source.toUpperCase());
+  assert.equal(translator.has(node), true);
+  assert.equal(translator.restore().restored, 1);
+  assert.equal(node.nodeValue, source);
+});
+
+test('bounded prefixes prefer sentence, newline and word boundaries without dropping whitespace', async () => {
+  for (const [source, expected] of [
+    ['First sentence. next words continue until well beyond the budget', 'First sentence.'],
+    ['First line\nsecond words continue until well beyond the budget', 'First line'],
+    ['first words continuewithalongunbrokenwordpastthebudget', 'first words']
+  ]) {
+    const node = t(source!);
+    const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+      workLimit: () => ({ maxChars: 24, maxTexts: 1 })
+    });
+    let result = await translator.translateRoot();
+    assert.deepEqual(calls, [[expected]]);
+    assert.equal(node.nodeValue, expected!.toUpperCase() + source!.slice(expected!.length));
+    for (let count = 0; result.pending.length && count < 20; count++) result = await translator.translateNodes(result.pending);
+    assert.ok(calls.flat().every((part) => part.length <= 24));
+    assert.equal(node.nodeValue, source!.toUpperCase());
+    translator.restore();
+    assert.equal(node.nodeValue, source);
+  }
+});
+
+test('ordinary interactive packs obey both source and text budgets and yield after one request', async () => {
+  const nodes = ['first comment', 'second comment', 'third comment', 'fourth comment'].map(t);
+  let yieldWork = false;
+  let limit = { maxChars: 64, maxTexts: 1 };
+  const { translator, calls } = harness(el('body', {}, nodes.map((node) => el('p', {}, [node]))),
+    (texts) => { yieldWork = true; return upcase(texts); }, {
+      workLimit: () => limit, shouldYield: () => yieldWork, concurrency: () => 3
+    });
+  let result = await translator.translateRoot();
+  assert.deepEqual(calls, [['first comment']]);
+  assert.deepEqual(result.pending, nodes.slice(1));
+  while (result.pending.length) {
+    yieldWork = false;
+    result = await translator.translateNodes(result.pending);
+  }
+  assert.ok(calls.every((call) => call.length === 1));
+  translator.restore();
+  yieldWork = false;
+  limit = { maxChars: 25, maxTexts: 3 };
+  // Disable the yield between these requests to exercise aggregate pack limits.
+  const packed = harness(el('body', {}, nodes.map((node) => el('p', {}, [node]))), upcase, {
+    workLimit: () => limit
+  });
+  await packed.translator.translateRoot();
+  assert.ok(packed.calls.every((call) => call.length <= 3 && call.join('').length <= 25));
+  assert.deepEqual(packed.calls.flat(), nodes.map((node) => node.nodeValue.toLowerCase()));
+});
+
+test('oversized mixed inline runs fall back to resumable element-owned fragments', async () => {
+  const words = Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
+  const sources = ['  opening ' + words + ' ', 'link ' + words, '\nfinal ' + words + '\t'];
+  const nodes = sources.map(t);
+  const link = el('a', { attrs: { href: '/original' } }, [nodes[1]!]);
+  const paragraph = el('p', {}, [nodes[0]!, link, el('em', {}, [nodes[2]!])]);
+  let yieldWork = false;
+  const { translator, calls } = harness(el('body', {}, [paragraph]),
+    (texts) => { yieldWork = true; return upcase(texts); }, {
+      workLimit: () => ({ maxChars: 64, maxTexts: 1 }),
+      shouldYield: () => yieldWork,
+      sentences: { ...sentenceOptions, always: true }
+    });
+  let result = await translator.translateRoot();
+  assert.equal(calls.length, 1);
+  assert.equal(translator.has(nodes[0]), false);
+  assert.deepEqual(nodes.slice(1).map((node) => node.nodeValue), sources.slice(1));
+  for (let count = 0; result.pending.length && count < 30; count++) {
+    yieldWork = false;
+    const before: number = calls.length;
+    result = await translator.translateNodes(result.pending);
+    assert.equal(calls.length - before, 1);
+  }
+  assert.deepEqual(result.pending, []);
+  assert.ok(calls.every((call) => call.length === 1 && call[0]!.length <= 64));
+  assert.deepEqual(nodes.map((node) => node.nodeValue), sources.map((source) => source.toUpperCase()));
+  assert.equal(link.childNodes[0], nodes[1]);
+  assert.equal(link.attrs.href, '/original');
+  assert.equal(translator.stats().runs, 0);
+  assert.equal(translator.restore().restored, 3);
+  assert.deepEqual(nodes.map((node) => node.nodeValue), sources);
+});
+
+test('bounded continuations discard stale source offsets after page edits and restore', async () => {
+  const source = 'original ' + Array.from({ length: 30 }, (_, i) => `word${i}`).join(' ');
+  const node = t(source);
+  const provider = controlledProvider();
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), provider.translate, {
+    workLimit: () => ({ maxChars: 64, maxTexts: 1 })
+  });
+  const first = translator.translateRoot();
+  await turn();
+  provider.requests[0]!.resolve(upcase(provider.requests[0]!.texts));
+  const prefix = await first;
+  assert.deepEqual(prefix.pending, [node]);
+  const continuation = translator.translateNodes(prefix.pending);
+  await turn();
+  node.nodeValue = 'The page replaced this comment.';
+  provider.requests[1]!.resolve(upcase(provider.requests[1]!.texts));
+  await continuation;
+  assert.equal(node.nodeValue, 'The page replaced this comment.');
+  translator.restore();
+  assert.equal(node.nodeValue, 'The page replaced this comment.');
+  const replacement = translator.translateNodes([node]);
+  await turn();
+  assert.deepEqual(calls[2], ['The page replaced this comment.']);
+  provider.requests[2]!.resolve(upcase(provider.requests[2]!.texts));
+  await replacement;
+  assert.equal(translator.has(node), true);
+  translator.restore();
+  assert.equal(node.nodeValue, 'The page replaced this comment.');
+  node.nodeValue = source;
+  const again = translator.translateNodes([node]);
+  await turn();
+  provider.requests[3]!.resolve(upcase(provider.requests[3]!.texts));
+  const partial = await again;
+  const outstanding = translator.translateNodes(partial.pending);
+  await turn();
+  assert.equal(translator.restore().restored, 1);
+  provider.requests[4]!.resolve(upcase(provider.requests[4]!.texts));
+  await outstanding;
+  assert.equal(node.nodeValue, source);
+  assert.equal(translator.has(node), false);
+});
+
+test('a quantum smaller than one Unicode code point never splits its surrogate pair', async () => {
+  const source = '𐐨𐐩';
+  const node = t(source);
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+    workLimit: () => ({ maxChars: 1, maxTexts: 1 })
+  });
+  const first = await translator.translateRoot();
+  assert.deepEqual(first.pending, [node]);
+  const second = await translator.translateNodes(first.pending);
+  assert.deepEqual(calls, [['𐐨'], ['𐐩']], 'only an indivisible code point may exceed the UTF-16 budget');
+  assert.deepEqual(second.pending, []);
+  assert.equal(node.nodeValue, source.toUpperCase());
+  translator.restore();
+  assert.equal(node.nodeValue, source);
+});
+
+test('a zero character quantum preserves whole sources while honoring the configured pack count', async () => {
+  const sources = ['first comment', 'second comment', 'third comment', 'fourth comment', 'fifth comment', 'a'.repeat(700)];
+  const { translator, calls } = harness(el('body', {}, sources.map((source) => el('p', {}, [t(source)]))), upcase, {
+    workLimit: () => ({ maxChars: 0, maxTexts: 2 })
+  });
+  await translator.translateRoot();
+  assert.ok(calls.every((call) => call.length <= 2));
+  assert.ok(calls.some((call) => call.length === 2));
+  assert.deepEqual(calls.flat(), sources);
 });

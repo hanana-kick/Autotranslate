@@ -124,6 +124,31 @@ check('YouTube watch custom elements put title and description before recommenda
   assert.equal(result.restored, true);
 });
 
+check('comment bodies and nested replies precede their authors dates and controls', async (page) => {
+  const result = await readingOrder(page, `
+    <ytd-comments style="display:block">
+      <ytd-comment-thread-renderer style="display:block">
+        <ytd-comment-view-model style="display:block">
+          <a id="author-text" data-unit="author">Reader Alice</a>
+          <span id="published-time-text" data-unit="date">Three weeks ago</span>
+          <yt-attributed-string id="content-text" style="display:block" data-unit="body">An interesting explanation of the power grid</yt-attributed-string>
+          <button><span data-unit="control">Show replies</span></button>
+        </ytd-comment-view-model>
+        <ytd-comment-replies-renderer style="display:block">
+          <ytd-comment-thread-renderer><ytd-comment-view-model style="display:block">
+            <a id="author-text" data-unit="reply-author">Reader Bob</a>
+            <yt-attributed-string id="content-text" style="display:block" data-unit="reply">Thank you for explaining the battery system</yt-attributed-string>
+          </ytd-comment-view-model></ytd-comment-thread-renderer>
+        </ytd-comment-replies-renderer>
+      </ytd-comment-thread-renderer>
+    </ytd-comments>`);
+  assert.deepEqual(result.applied.slice(0, 2), ['body', 'reply']);
+  assert.equal(result.requests.find(({ texts }) => texts.includes('Reader Alice'))?.role, 'metadata');
+  assert.equal(result.requests.find(({ texts }) => texts.includes('Show replies'))?.role, 'form');
+  assert.equal(result.translated, true);
+  assert.equal(result.restored, true);
+});
+
 check('aligned inline text preserves the link and restores exact authored nodes', async (page) => {
   const result = await page.evaluate(async () => {
     const root = document.querySelector('#fixture');
@@ -177,7 +202,7 @@ check('late inference cannot replace a newer page edit and the edit remains elig
   assert.deepEqual(result, { text: 'New page value', eligible: true });
 });
 
-check('partial paragraph failures retain original segments and retry the whole unit', async (page) => {
+check('partial paragraph failures retain committed text and retry only the missing suffix', async (page) => {
   const result = await page.evaluate(async () => {
     const root = document.querySelector('#fixture'); root.innerHTML = '<p>One sentence. Another sentence.</p>';
     const calls = []; let missing = true;
@@ -196,7 +221,7 @@ check('partial paragraph failures retain original segments and retry the whole u
   assert.equal(result.intermediate.done, false);
   assert.equal(result.intermediate.text, '첫 문장. Another sentence.');
   assert.equal(result.text, '첫 문장. 다른 문장.');
-  assert.deepEqual(result.retried, ['One sentence.', 'Another sentence.']);
+  assert.deepEqual(result.retried, ['Another sentence.']);
 });
 
 check('repeated strings do not hide remaining DOM nodes from the continuation budget', async (page) => {

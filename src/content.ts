@@ -99,7 +99,7 @@ namespace AT.content {
     overlayPass: AT.pipeline.DebugPass | null;
     overlayTimer: number;
     overlayBound: boolean;
-    /** Pending re-rank of the work queue after the reader stopped scrolling. */
+    /** Coalesced next-task continuation after a viewport change. */
     viewportTimer: number;
     /** Model requests of this session, oldest first, for the speed report. */
     bench: BenchEntry[];
@@ -212,6 +212,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
         doc: document,
         presentation: AT.translationtext.create(document),
         settings: () => ({ maxNodes: snapshot.maxNodes, engine: snapshot.engine }),
+        shouldTranslate: (text) => !AT.isTargetLanguage(text, snapshot.targetLang),
         // A pass owns an immutable settings snapshot, not mutable global state.
         translate: (batch) => requestBatch(batch, snapshot),
         // Keep short semantic units intact. The executor sends a small leading
@@ -643,16 +644,15 @@ declare var __autotranslate: AT.content.Boot | undefined;
    *  and jump to whatever scrolls back into view. */
   function scheduleViewportPass(): void {
     if (!state.settings?.enabled || !state.pipeline || state.stopped) return;
-    // Re-measuring every queued node on every scroll event would cost more than
-    // the translation. Once the reader stops moving, the queue is re-ranked and
-    // one tick continues from the new front.
-    clearTimeout(state.viewportTimer);
+    // Stop refilling the active inference window immediately. Geometry is read
+    // once by the next pass, not on every scroll event.
+    state.pipeline.invalidatePlan();
+    if (state.viewportTimer) return;
     state.viewportTimer = setTimeout(() => {
       state.viewportTimer = 0;
       if (state.stopped || !state.pipeline) return;
-      state.pipeline.reprioritize();
       requestContinuation();
-    }, C.OBSERVER_DEBOUNCE_MS) as unknown as number;
+    }, 0) as unknown as number;
   }
 
   type ScrollTarget = {
@@ -693,7 +693,11 @@ declare var __autotranslate: AT.content.Boot | undefined;
     const queue = takeQueue();
     if (!queue) return;
     const continuing = queue === 'continue';
-    const regions = queue === 'full' || continuing ? [document.documentElement] : queue;
+    // Multiple changed regions (or an unfinished page) compete in one visual
+    // plan. Mutation delivery order must not put a counter ahead of new replies.
+    // A lone insertion on an otherwise completed page can retain the subtree scan.
+    const regions = queue === 'full' || continuing || state.continuation || queue.length > 1
+      ? [document.documentElement] : queue;
     state.working = true;
     // Background passes take a small slice: a page that keeps mutating (a video
     // site re-rendering its feed) must not hold the single model for minutes.

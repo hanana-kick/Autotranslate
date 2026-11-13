@@ -76,6 +76,44 @@ Public YouTube QA is separate from the deterministic YouTube-like fixture. It mu
 external sign-in/bot restrictions instead of logging in, bypassing controls or substituting pages.
 Public-site observations and third-party warnings are not generalized to all YouTube sessions.
 
+For comment scrolling and reply expansion on the actual site, run the installed
+extension harness with an unpacked, unchanged release and a fresh profile:
+
+```sh
+UNSAFE_WEBGPU=0 HEADED=1 YOUTUBE_COMMENTS=1 \
+  YOUTUBE_URL='https://www.youtube.com/watch?v=DBjiUz0H9HY' \
+  EXTENSION_DIR=/absolute/path/to/unpacked/chrome-release \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/youtube-comments-DBjiUz0H9HY npm run test:onnx
+```
+
+`YOUTUBE_COMMENTS_REPLIES_ONLY=1` skips the initial down/up sequence and focuses
+on reply expansion, loading more replies, scrolling back, and a second thread.
+`YOUTUBE_COMMENTS_BURST=1` additionally moves down six times and up six times
+at one-second intervals, followed by five seconds idle. Omit `EXTENSION_DIR`
+to exercise the current local Chrome build rather than an unpacked release.
+`youtube-comments.json` includes `slo` totals and source-length buckets:
+whole-comment completion p50/p95, 1s deadline misses, unfinished/censored
+viewport episodes, and visible backlog samples. The clock starts at observed
+viewport entry after enable confirmation, not at first dispatch. Already-Korean
+comments and cached-complete returns are separate populations, not fast passes.
+Completion percentiles include completed episodes only; always report their
+unfinished denominator too. `evidence.overhead` records mutation, sampling,
+setup and API processing time. Busy presentation hosts are not GPU concurrency.
+
+The scenario uses visible controls; modern nested replies may have no visible
+collapse button. It records viewport cohorts, original-text changes, presentation
+dispatch/commit events, content/host status and screenshots, then disables
+translation and checks remaining component hosts. Dispatch is not GPU start.
+First-result latency starts at the user action, excludes model installation,
+and uses actual original-text changes, not component insertion. The current
+observer excludes already-Korean units from waiting without counting them as
+translations, and does not mark a settled partial component wholly complete.
+Older v0.1.10 reports retained unchanged Korean units in their wait cohorts.
+Unchanged names or links can still leave coverage conservatively incomplete.
+An `observed` scenario status does not mean translation errors were absent.
+See [the measured comment sessions](translation-performance.md#youtube-comment-sessions-v0110).
+
 **Firefox on-device execution is unverified, not a known failure of this engine.** The older "preparation channel closed" report was measured on the MediaPipe host and its inference worker, both removed in 0.1.7, so it says nothing about the ONNX host that ships now. `test/firefox-native/released.mjs` installs the built add-on through Mozilla's GeckoDriver and records the adapter features, the host status and the browser error console; that is the run that would settle it. See [the T01–T16 ledger](review-qa-status.md) for the current distinctions.
 
 ## Release, evidence and limits

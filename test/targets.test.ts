@@ -29,6 +29,31 @@ test('a comment inside an article is a comment', () => {
   assert.equal(targets.roleOf(info({ ariaRole: 'comment' })), 'comment');
 });
 
+test('comment prose precedes author metadata and reply controls', () => {
+  const roles = [
+    targets.roleOf(info({ inComment: true, inForm: true, tag: 'span' })),
+    targets.roleOf(info({ inComment: true, inCommentMetadata: true })),
+    targets.roleOf(info({ inComment: true, tag: 'time' })),
+    targets.roleOf(info({ inComment: true }))
+  ];
+  assert.deepEqual(roles, ['form', 'metadata', 'metadata', 'comment']);
+  const order = targets.plan(roles.map((role: string, index: number) => ({
+    id: String(index), role, priority: 'visible', order: index, top: 20 * index
+  }))).flatMap((group: { ids: string[] }) => group.ids);
+  assert.deepEqual(order, ['3', '0', '1', '2']);
+});
+
+test('hidden continuations follow ordinary work even when their element is visible', () => {
+  const entries = [
+    { id: 'hidden', role: 'comment', priority: 'visible', top: 10, order: 0, deferred: true },
+    { id: 'reply', role: 'comment', priority: 'visible', top: 200, order: 1 },
+    { id: 'author', role: 'metadata', priority: 'visible', top: 100, order: 2 },
+    { id: 'later', role: 'comment', priority: 'far', top: 3000, order: 3 }
+  ];
+  assert.deepEqual(targets.plan(entries).flatMap((group: { ids: string[] }) => group.ids),
+    ['reply', 'author', 'later', 'hidden']);
+});
+
 test('a list inside an article is article text, not a list of its own', () => {
   assert.equal(targets.roleOf(info({ inArticle: true, inList: true, tag: 'li' })), 'article');
   assert.equal(targets.roleOf(info({ inList: true, tag: 'li' })), 'list');

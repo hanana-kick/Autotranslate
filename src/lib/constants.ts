@@ -238,6 +238,19 @@ namespace AT {
     return !right.includes('-') && left.split('-')[0] === right;
   }
 
+  /** A per-fragment proof, not a majority-language guess. Shared scripts (Latin,
+   * Han, Cyrillic, etc.) cannot identify a language safely without a detector.
+   * Hangul-only prose can: punctuation, numbers and emoji do not change it. */
+  export function isTargetLanguage(text: string, target: string): boolean {
+    if (!sameLanguage(target, 'ko')) return false;
+    let hangul = false;
+    for (const character of text) {
+      if (/\p{Script=Hangul}/u.test(character)) hangul = true;
+      else if (/[\p{L}\p{M}]/u.test(character)) return false;
+    }
+    return hangul;
+  }
+
   // Cheap logging shared by every context; engines and background call it
   // without loading lib/browser.
   export let debug = false;
@@ -260,7 +273,7 @@ namespace AT {
     if (!partial && !answer.trim()) return 'empty-output';
     // A page that literally discusses these tokens may legitimately contain them.
     // Newly introduced controls, or more copies than the source, are not prose.
-    const controls = /<(?:pad|bos|eos|start_of_turn|end_of_turn)>|<\|(?:endoftext|im_start|im_end)\|>/g;
+    const controls = /<(?:pad|bos|eos|start_of_turn|end_of_turn)>|<\|(?:endoftext|im_start|im_end|plamo:[^|]*)\|>/g;
     for (const token of new Set(answer.match(controls) ?? [])) {
       if (answer.split(token).length > source.split(token).length) return 'control-token';
     }
