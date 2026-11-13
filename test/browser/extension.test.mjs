@@ -204,6 +204,7 @@ check('failed replacement keeps the selected model and both native files recover
   assert.match(outcome.error, /warmup rejected/);
   assert.equal((await control.evaluate(() => AT.settings.load())).localModelId, before.localModelId);
   assert.equal(await control.evaluate(async (id) => (await AT.modelstore.read(id))?.size, before.localModelId), 1024 * 1024);
+  assert.equal(await control.evaluate(async (id) => (await AT.modelstore.read(id))?.size, outcome.modelId), 1024 * 1024);
   await model({ failWarmup: false });
   await control.evaluate((id) => AT.modelstore.remove(id), outcome.modelId);
 });

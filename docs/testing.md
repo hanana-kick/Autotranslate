@@ -15,6 +15,12 @@ Storage tests use native `Response` and `ReadableStream`. Host tests deliberatel
 
 Regression invariants cover Fetch/OPFS/IndexedDB failure cleanup; activation before retirement; epoch and source ownership; current-source restoration; strict inline alignment; partial completion; context-budget changes; invalid generated output; bounded caches and detached-node cleanup; tab discovery after background restart; standard Promise/raw Chrome callback messaging; and bounded Firefox preparation channels. A passing message-contract test does not establish Firefox native compatibility.
 
+Explicit model preparation must validate an executable engine before selecting
+a replacement. If native workers cannot start, it opens and warms the document
+fallback; tokenizer-only readiness is insufficient. Failed preparation keeps
+the previous selection and both stored model files recoverable. Ordinary page
+translation still opens that fallback lazily.
+
 ## Actual browser / deterministic inference layer
 
 ```sh
@@ -28,6 +34,13 @@ npm run test:browser
 `dom.test.mjs` exercises actual DOM and MutationObserver with a scripted translator. `extension.test.mjs` installs an ephemeral copy of the package and tests actual extension APIs, service-worker restart, offscreen placement, settings, file selection and browser storage. Only that copy gets a deterministic inference implementation and capability fixture. Production files and release packages remain untouched.
 
 For an existing Chromium executable, use `CHROMIUM_EXECUTABLE=/path/to/chromium npm run test:browser:dom`. `PLAYWRIGHT_MODULE` selects a driver module and `QA_DIR` selects the evidence directory. Do not bypass managed extension-installation policies; isolated Actions runners provide the separate extension test environment.
+
+The actual-server gate runs `test/server-extension/e2e.mjs` against a real
+OpenAI-compatible model server with the untouched installed Chrome package.
+Dynamic-text checks retain the page-owned `Text` handle before translation:
+the paragraph's first child may become an inline presentation component.
+They mutate that same text node, verify its new translation, then require
+current-source restoration and original-node identity.
 
 ## Planner-only layer
 
@@ -67,7 +80,12 @@ Public-site observations and third-party warnings are not generalized to all You
 
 ## Release, evidence and limits
 
-Publication requires browser regression, planner acceptance, native Chrome and native Firefox success, followed by the build action's type/unit/package checks. Main integration is not permission to publish a package with a failed native gate.
+The current Chrome release workflow requires browser regressions, planner
+acceptance, actual installed-extension server-mode QA, and the build action's
+type/unit/package and reproducibility checks. The published archive must match
+the server-tested package byte for byte. Native-model smoke results are separate
+evidence, not certification supplied by that server run. No Firefox archive is
+published; its on-device execution remains unverified.
 
 No token or model file is committed. Authenticated browser traces/profiles are excluded from artifacts; text evidence is scanned before upload. Screenshots, sanitized logs, before/after HTML, installed-file inventories, environment and tested package hashes are retained.
 

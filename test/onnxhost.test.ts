@@ -246,6 +246,7 @@ codepoints.apply_chat_template = (messages: { content: string }[]) => `PROMPT:${
 function installSession(options: {
   beforeTokenizer?: () => Promise<void>;
   beforePipeline?: () => Promise<void>;
+  beforeGenerate?: () => Promise<void>;
 } = {}) {
   const inline: string[] = [];
   const calls = { tokenizers: 0, pipelines: 0, disposed: 0 };
@@ -284,6 +285,7 @@ function installSession(options: {
         await options.beforePipeline?.();
         const pipe = async (prompt: string) => {
           inline.push(prompt);
+          await options.beforeGenerate?.();
           return [{ generated_text: `${prompt}문서` }];
         };
         pipe.dispose = async () => { calls.disposed += 1; };
@@ -569,6 +571,38 @@ test('a failed lazy pipeline can be retried by the next request', async () => {
     await finish([], session);
   }
 });
+
+for (const failure of ['open', 'warmup'] as const) {
+  test(`explicit preparation rejects a failed fallback ${failure} and validates retries`, async () => {
+    let reject = true;
+    const fail = async () => {
+      if (reject) throw new Error(`fallback ${failure} rejected`);
+    };
+    const session = installSession(failure === 'open' ? { beforePipeline: fail } : { beforeGenerate: fail });
+    FakeEngine.reset();
+    FakeEngine.failInit = 'worker unavailable';
+    (globalThis as ATNamespace).Worker = FakeEngine;
+    try {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await assert.rejects(onnxhost.load('onnx-model', 512, 'ko'), new RegExp(`fallback ${failure} rejected`));
+        assert.equal((await onnxhost.status()).state, 'error', 'a tokenizer is not a prepared model');
+      }
+      reject = false;
+      const before = session.inline.length;
+      assert.equal((await onnxhost.load('onnx-model', 512, 'ko')).state, 'ready');
+      assert.equal(session.inline.length, before + 2, 'preparation validates both warmup shapes');
+      await onnxhost.load('onnx-model', 512, 'ko');
+      assert.equal(session.inline.length, before + 2, 'an already validated fallback is reused');
+      assert.deepEqual((await onnxhost.translate(translateRequest(ASK_ONE))).translations, ['문서']);
+      await onnxhost.unload();
+      const after = session.inline.length;
+      await onnxhost.load('onnx-model', 512, 'ko');
+      assert.equal(session.inline.length, after + 2, 'a new session must be validated again');
+    } finally {
+      await finish([], session);
+    }
+  });
+}
 
 for (const mode of ['runtime', 'disabled'] as const) {
   test(`${mode} engine preserves eager pipeline loading and warmup`, async () => {

@@ -32,6 +32,7 @@ namespace AT.onnxhost {
   let seams: Seams = {};
   let tokenizer: Tokenizer | null = null;
   let pipe: Pipeline | null = null;
+  let inlineWarmed = false;
   let loadedId: string | null = null;
   let loadedBytes = 0;
   let loadMs: number | null = null;
@@ -291,6 +292,8 @@ namespace AT.onnxhost {
     await session(build('Good morning.'), { max_new_tokens: 4, do_sample: false });
     requireLifecycle(version);
     await session(build(sample), { max_new_tokens: 4, do_sample: false });
+    requireLifecycle(version);
+    inlineWarmed = true;
   }
 
   function teardown(cause: string): Promise<void> {
@@ -305,6 +308,7 @@ namespace AT.onnxhost {
     engineUnavailable = false;
     const session = pipe;
     pipe = null;
+    inlineWarmed = false;
     tokenizer = null;
     loadedId = null;
     loadedBytes = 0;
@@ -800,7 +804,30 @@ namespace AT.onnxhost {
   }
 
   export async function load(modelId: string, maxTokens: number, target: string): Promise<AT.local.LocalStatus> {
-    await ensureLoaded(modelId, maxTokens, target);
+    const version = await ensureLoaded(modelId, maxTokens, target);
+    // Preparation commits a replacement model. A tokenizer alone is not proof
+    // it works: if no worker opened the graph, validate the document fallback
+    // before the caller can select it and retire the previous model. Ordinary
+    // translations still open their fallback lazily, without an eager warmup.
+    if (!liveEngines().length && !inlineWarmed) {
+      state.state = 'loading';
+      publish();
+      try {
+        await ensureInline();
+        requireLifecycle(version);
+        await warmup(target);
+        requireLifecycle(version);
+      } catch (error: unknown) {
+        requireLifecycle(version);
+        const reason = error && typeof error === 'object' && 'reason' in error && typeof error.reason === 'string'
+          ? error.reason : 'model-load-failed';
+        fail(reason, error);
+      }
+      state.state = 'ready';
+      state.reason = engineUnavailable ? 'worker-init' : null;
+      state.lastError = null;
+      publish();
+    }
     return state;
   }
 

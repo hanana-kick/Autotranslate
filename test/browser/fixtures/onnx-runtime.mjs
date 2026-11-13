@@ -75,14 +75,13 @@
     env: { backends: { onnx: { wasm: {} } } },
     AutoTokenizer: { from_pretrained: async () => tokenizer },
     pipeline: async () => {
-      // The host warms a fresh pipeline with two prompts before it answers
-      // anything: one short and one realistic, neither of them page text.
-      let warmup = 2;
+      // Explicit preparation uses a four-token probe for each warmup shape.
+      // Lazy fallback translations can open a pipeline without warming it, so
+      // the first two calls are not necessarily probes.
       const state = qa();
       if (state) state.instances += 1;
-      return async (prompt) => {
-        if (warmup > 0) {
-          warmup -= 1;
+      return async (prompt, options) => {
+        if (options.max_new_tokens === 4) {
           if (state?.failWarmup) throw new Error('fixture warmup rejected');
           return [{ generated_text: prompt }];
         }

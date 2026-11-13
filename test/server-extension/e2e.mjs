@@ -150,13 +150,21 @@ try {
   await writeFile(join(out, 'restored.html'), await page.locator('body').innerHTML());
   await options.locator('#enabled').check();
   await page.waitForFunction(() => /[가-힣]/u.test(document.querySelector('#hello').textContent), null, { timeout: 180000 });
-  await page.evaluate(() => { const p = document.createElement('p'); p.id = 'added'; p.textContent = 'Good morning.'; document.querySelector('#late').append(p); });
+  const addedText = await page.evaluateHandle(() => {
+    const p = document.createElement('p'); p.id = 'added'; p.textContent = 'Good morning.';
+    const text = p.firstChild;
+    document.querySelector('#late').append(p);
+    return text;
+  });
   await page.waitForFunction(() => /[가-힣]/u.test(document.querySelector('#added').textContent), null, { timeout: 180000 });
-  await page.evaluate(() => document.querySelector('#added').firstChild.nodeValue = 'See you tomorrow.');
+  // Keep the page-owned Text reference: its parent may now be a presentation host.
+  await addedText.evaluate(node => node.nodeValue = 'See you tomorrow.');
   await page.waitForFunction(() => /[가-힣]/u.test(document.querySelector('#added').textContent), null, { timeout: 180000 });
   await screenshot(page, 'server-dynamic-translated');
   await options.locator('#enabled').uncheck();
   await page.waitForFunction(() => document.querySelector('#hello').textContent === 'Hello.' && document.querySelector('#added').textContent === 'See you tomorrow.');
+  assert.equal(await addedText.evaluate(node => node === document.querySelector('#added').firstChild), true);
+  await addedText.dispose();
   assert.equal(await page.locator('#draft').inputValue(), 'private draft');
   await page.locator('#click').click(); assert.equal(await page.evaluate(() => window.clicks), 1);
   await record('dynamic-insertion-text-node-reuse-and-current-source-restore');
