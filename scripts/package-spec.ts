@@ -61,6 +61,7 @@ export const ENTRIES = [
   'lib/modelstore.js',
   'lib/modelflow.js',
   'lib/ui.js',
+  'lib/components.js',
   'lib/pipelinehost.js',
   'lib/onnxweights.js',
   'lib/kernelmatmul.js',

@@ -7,7 +7,8 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body class="popup">
-    <header class="row spread">
+    <at-shell compact>
+    <header class="row spread popup-head">
       <span class="row">
         <img src="icons/icon-32.png" alt="" width="20" height="20" />
         <strong data-i18n="extensionName"></strong>
@@ -18,18 +19,23 @@
       </label>
     </header>
 
+    <main>
+    <at-panel compact>
     <p class="host" id="host"></p>
     <p class="status" id="status" role="status" data-i18n="popup_idle"></p>
     <p class="hint" id="localStatus" hidden></p>
+    </at-panel>
 
     <section class="field">
       <label for="targetLang" data-i18n="popup_targetLanguage"></label>
       <select id="targetLang"></select>
     </section>
+    </main>
 
-    <footer class="row buttons">
-      <button id="options" type="button" class="ghost" data-i18n="popup_options"></button>
+    <footer class="row">
+      <button id="options" type="button" data-i18n="popup_options"></button>
     </footer>
+    </at-shell>
 
     <script src="vendor/browser-polyfill.js"></script>
     <script src="lib/constants.js"></script>
@@ -38,6 +44,7 @@
     <script src="lib/plamo3.js"></script>
     <script src="lib/local.js"></script>
     <script src="lib/ui.js"></script>
+    <script src="lib/components.js"></script>
     <script src="lib/settings.js"></script>
     <script src="popup.js"></script>
   </body>

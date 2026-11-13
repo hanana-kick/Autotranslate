@@ -36,6 +36,12 @@ Options에서 엔진 선택.
 
 ## 기술 요약
 
+### 확장 UI
+- 팝업·설정·시작 화면은 slate 중립색과 yellow 강조색을 공유하며 시스템의 밝은/어두운 테마를 따름.
+- `src/styles.css`: 색상 토큰, 타이포그래피, 네이티브 버튼·입력·스위치 스타일의 단일 정의. 스위치 thumb는 켜짐·꺼짐 및 밝은·어두운 테마에서 흰색 유지(고대비 모드는 시스템 표시 사용).
+- `src/lib/components.ts`: Shadow DOM 기반 `<at-shell>`(화면 폭·여백), `<at-panel>`(패널 모양·간격). 컨트롤은 light DOM에 두어 기존 이벤트, 다국어 처리와 label 연결을 유지.
+- 좁은 사이드 패널에서는 단일 열로 표시. 키보드 포커스, 고대비 모드, 동작 줄이기 설정 지원. React/Tailwind 런타임 의존성 없음.
+
 ### 모델
 - 기본: PFN PLaMo 3 Translate 0.8B ONNX q4f16, Transformers.js + onnxruntime-web, WebGPU 실행
 - 무압축 fp16 버전도 지원

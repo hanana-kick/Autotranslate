@@ -7,10 +7,13 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body class="options">
+    <at-shell>
     <main>
-      <h1 data-i18n="options_title"></h1>
+      <header class="page-head">
+        <h1 data-i18n="options_title"></h1>
+      </header>
 
-      <section class="card">
+      <at-panel>
         <h2 data-i18n="options_behavior"></h2>
         <p class="host" id="tabHost"></p>
         <p class="hint" id="tabStatus" role="status"></p>
@@ -28,9 +31,9 @@
             <span data-i18n="options_debug"></span>
           </label>
         </div>
-      </section>
+      </at-panel>
 
-      <section class="card">
+      <at-panel>
         <h2 data-i18n="server_engine"></h2>
         <div class="field">
           <label for="engine" data-i18n="server_engine"></label>
@@ -66,11 +69,11 @@
         </div>
         <p class="status" id="testStatus" role="status"></p>
         <p class="hint" data-i18n="server_testHint"></p>
-      </section>
+      </at-panel>
 
-      <section class="card" id="localSection">
+      <at-panel id="localSection">
         <h2 data-i18n="options_local"></h2>
-        <div class="grid">
+        <div class="stack">
           <p class="hint" id="localSupport" data-i18n="options_localHint"></p>
           <div class="field">
             <label for="localModel" data-i18n="options_localModel"></label>
@@ -97,9 +100,9 @@
           <progress id="modelProgress" max="100" value="0" hidden></progress>
           <p class="status" id="modelStatus" role="status"></p>
         </div>
-      </section>
+      </at-panel>
 
-      <section class="card">
+      <at-panel>
         <h2 data-i18n="options_languages"></h2>
         <div class="grid">
           <div class="field">
@@ -111,9 +114,9 @@
             <select id="sourceLang"></select>
           </div>
         </div>
-      </section>
+      </at-panel>
 
-      <section class="card">
+      <at-panel>
         <h2 data-i18n="options_limits"></h2>
         <div class="grid">
           <div class="field">
@@ -121,9 +124,9 @@
             <input type="number" id="maxNodes" min="10" max="5000" step="10" />
           </div>
         </div>
-      </section>
+      </at-panel>
 
-      <section class="card">
+      <at-panel>
         <h2 data-i18n="options_rules"></h2>
         <div class="row wrap">
           <input
@@ -140,14 +143,15 @@
           <button id="addRule" type="button" data-i18n="options_addRule"></button>
         </div>
         <ul class="rules" id="ruleList"></ul>
-      </section>
+      </at-panel>
 
-      <footer class="row">
+      <footer class="row actions">
         <button id="save" type="button" data-i18n="options_save"></button>
         <button id="reset" type="button" class="secondary" data-i18n="options_reset"></button>
         <p class="status" id="saveStatus" role="status"></p>
       </footer>
     </main>
+    </at-shell>
 
     <script src="vendor/browser-polyfill.js"></script>
     <script src="lib/constants.js"></script>
@@ -157,6 +161,7 @@
     <script src="lib/modelstore.js"></script>
     <script src="lib/modelflow.js"></script>
     <script src="lib/settings.js"></script>
+    <script src="lib/components.js"></script>
     <script src="lib/ui.js"></script>
     <script src="options.js"></script>
   </body>
