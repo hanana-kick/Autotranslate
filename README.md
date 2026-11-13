@@ -1,5 +1,7 @@
 # Autotranslate
 
+<img src="src/icons/icon.png" alt="Autotranslate 아이콘" width="128" height="128" />
+
 브라우저 탭을 선택해 페이지 안에서 번역하고 원문을 복원하는 Manifest V3 TypeScript 확장. 번역 엔진은 **온디바이스 PLaMo 3** 또는 **OpenAI 호환 서버** 중 선택.
 
 ## 사용법
@@ -41,6 +43,7 @@ Options에서 엔진 선택.
 - `src/styles.css`: 색상 토큰, 타이포그래피, 네이티브 버튼·입력·스위치 스타일의 단일 정의. 스위치 thumb는 켜짐·꺼짐 및 밝은·어두운 테마에서 흰색 유지(고대비 모드는 시스템 표시 사용).
 - `src/lib/components.ts`: Shadow DOM 기반 `<at-shell>`(화면 폭·여백), `<at-panel>`(패널 모양·간격). 컨트롤은 light DOM에 두어 기존 이벤트, 다국어 처리와 label 연결을 유지.
 - 좁은 사이드 패널에서는 단일 열로 표시. 키보드 포커스, 고대비 모드, 동작 줄이기 설정 지원. React/Tailwind 런타임 의존성 없음.
+- 아이콘 원본은 `src/icons/icon.png`. 교체 후 `npm run icons`로 투명도·비율을 보존한 16·32·48·128px PNG를 생성. 이미지 처리는 개발용 `sharp`로만 수행하며 확장 런타임에는 포함하지 않음.
 
 ### 모델
 - 기본: PFN PLaMo 3 Translate 0.8B ONNX q4f16, Transformers.js + onnxruntime-web, WebGPU 실행
