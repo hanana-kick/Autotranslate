@@ -38,7 +38,10 @@
   // Every code point is one token, so no text is out of vocabulary and the
   // byte-fallback expansion leaves page text exactly as it arrived.
   const tokenizer = (text) => ({ input_ids: { data: Array.from(String(text), (ch) => ch.codePointAt(0)) } });
-  tokenizer.decode = (ids) => String.fromCodePoint(...Array.from(ids, Number));
+  tokenizer.decode = (ids, options = {}) => {
+    const text = String.fromCodePoint(...Array.from(ids, Number));
+    return options.skip_special_tokens ? text.replace(/<\|[^|]*\|>/g, '') : text;
+  };
 
   const INPUT = /<\|plamo:tag\|>input<\|plamo:msg\|>([\s\S]*?)<\|plamo:tag\|>output/;
   const LANG = /<\|plamo:key\|>lang<\|plamo:val\|>([^<]*)/;
@@ -69,7 +72,7 @@
 
   /** What the library hands back: the prompt decoded with special tokens
    *  skipped, so every `<|plamo:...|>` marker is gone, then the generation. */
-  const decoded = (prompt) => prompt.replace(/<\|[^|]*\|>/g, '');
+  const decoded = (prompt) => tokenizer.decode(tokenizer(prompt).input_ids.data, { skip_special_tokens: true });
 
   globalThis.AT_TRANSFORMERS = {
     env: { backends: { onnx: { wasm: {} } } },

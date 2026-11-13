@@ -158,3 +158,8 @@ benchmark or a controlled speedup comparison.
 Optional `YOUTUBE_COMMENTS=1 YOUTUBE_COMMENTS_REPLIES_ONLY=1` additionally runs
 the existing real-site reply scenario. Its whole-comment metric still observes
 canonical committed text, not temporary shadow previews.
+
+The deterministic installed-extension tokenizer double implements
+`decode(ids, { skip_special_tokens: true })` with the same special-marker
+removal as its generated full sequence. This keeps strict prompt extraction
+under test rather than making the production host guess where an answer starts.
