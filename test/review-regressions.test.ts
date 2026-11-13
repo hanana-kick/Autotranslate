@@ -127,7 +127,7 @@ test('review: a CJK translation cannot empty an inline link', async () => {
   assert.equal(linkText.nodeValue, 'プライバシーポリシー');
 });
 
-test('review: partial answers remain eligible and retry from the original text', async () => {
+test('review: partial answers retry only the missing original suffix and restore exact source', async () => {
   const AT = boot();
   const node = text('First. Second.');
   const root = element('p', [node]);
@@ -146,9 +146,11 @@ test('review: partial answers remain eligible and retry from the original text',
   const retryStart = calls.length;
   partial = false;
   await translator.translateRoot(root);
-  assert.deepEqual(calls.slice(retryStart).flat(), ['First.', 'Second.'], 'retry the original unit, not the mixed-language DOM');
+  assert.deepEqual(calls.slice(retryStart).flat(), ['Second.'], 'completed prose is not regenerated or sent back as source');
   assert.equal(node.nodeValue, '첫째. 둘째.');
   assert.equal(translator.has(node), true);
+  translator.restore();
+  assert.equal(node.nodeValue, 'First. Second.');
 });
 
 test('review: a detached translated node is released during restore', async () => {
