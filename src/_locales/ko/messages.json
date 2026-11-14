@@ -48,8 +48,6 @@
   "popup_unavailable": { "message": "이 페이지는 번역할 수 없습니다." },
   "popup_disabled": { "message": "이 탭은 번역 대상이 아닙니다. 스위치를 켜면 번역합니다." },
   "options_title": { "message": "Autotranslate 설정" },
-  "options_behavior": { "message": "이 탭 번역" },
-  "options_enabled": { "message": "이 탭을 번역 대상으로 선택" },
   "options_languages": { "message": "언어" },
   "options_targetLang": { "message": "번역 언어" },
   "options_parallelTranslation": { "message": "동시 번역 조각 수" },
@@ -211,7 +209,5 @@
   "welcome_starting": { "message": "내려받기를 시작합니다…" },
   "welcome_done": { "message": "모델 준비 완료. 탭에서 번역을 켜거나 설정에서 자동 번역을 지정하세요." },
   "options_modelStored": { "message": "모델은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "welcome_modelStored": { "message": "파일은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "tab_noTarget": { "message": "번역할 페이지의 확장 아이콘에서 옵션을 여십시오." },
-  "tab_unavailable": { "message": "대상 탭이 닫혔거나 번역할 수 없는 페이지입니다." }
+  "welcome_modelStored": { "message": "파일은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } }
 }

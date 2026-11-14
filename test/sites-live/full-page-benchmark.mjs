@@ -148,7 +148,7 @@ export async function runFullPageBenchmark({context, options, worker, output, ex
           page.on('pageerror',e=>run.errors.push(errorText(e)));
           await page.goto(`${origin}/${scenario.id}?model=${model.id}&round=${round}`);
           await page.evaluate(observeFullPage);
-          tabId=await tabIdFor(options,page);await prepareTabEnabledUI(options,tabId);
+          tabId=await tabIdFor(options,page);const popup=await prepareTabEnabledUI(options,tabId);
           run.initial=await page.evaluate(()=>__fullPage.snapshot());
           assert.ok(run.initial.targets.some(t=>t.initiallyOffscreen),'must measure below-fold source too');
           assert.equal(run.initial.scrollY,0,'whole-page test must start without scrolling');
@@ -159,9 +159,10 @@ export async function runFullPageBenchmark({context, options, worker, output, ex
             assert.equal(run.beforeEnableModel.status?.state, 'unloaded', 'cold timing requires a nonresident model');
             assert.equal(run.beforeEnableModel.status?.loadedBytes, 0);
           }
-          await options.evaluate(()=>{globalThis.__fullClick=null;document.querySelector('#enabled').addEventListener('click',e=>{globalThis.__fullClick=performance.timeOrigin+e.timeStamp;},{once:true,capture:true});});
-          await options.bringToFront();await clickPreparedTabEnabledUI(options,tabId,true);await page.bringToFront();
-          run.startedAt=await options.evaluate(()=>globalThis.__fullClick);assert.ok(Number.isFinite(run.startedAt));
+          await popup.evaluate(()=>{globalThis.__fullClick=null;document.querySelector('#enabled').addEventListener('click',e=>{globalThis.__fullClick=performance.timeOrigin+e.timeStamp;},{once:true,capture:true});});
+          await clickPreparedTabEnabledUI(popup,tabId,true);
+          run.startedAt=await popup.evaluate(()=>globalThis.__fullClick);assert.ok(Number.isFinite(run.startedAt));
+          await page.bringToFront();
           await page.waitForFunction(()=>__fullPage.snapshot().paintAt!==null,null,{timeout:timeoutMs}).catch(e=>{run.timeout=String(e.message);});
           run.dom=await page.evaluate(()=>__fullPage.snapshot());
           run.host=await worker.evaluate(()=>globalThis.__fullHost);

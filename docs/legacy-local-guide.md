@@ -1,5 +1,10 @@
 # Autotranslate
 
+> Historical guide: engine, tab-bound Options/side-panel behavior and release
+> instructions below describe older versions. Current usage is in
+> [README](../README.md): ONNX only, global settings without a tab binding,
+> and per-tab translation controls in the toolbar popup.
+
 Automatic on-device web-page translation from a single Manifest V3 TypeScript source tree.
 **Chrome is the supported release. Firefox remains experimental:** the native on-device
 model initialization is failing in actual Firefox tests ([issue #2](https://github.com/hanana-kick/Autotranslate/issues/2)).

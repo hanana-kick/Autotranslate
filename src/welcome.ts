@@ -195,7 +195,7 @@ namespace AT.welcome {
     el('modelFile').addEventListener('change', () => void pickFile());
     el('start').addEventListener('click', () => void start());
     el('options').addEventListener('click', () => {
-      void AT.ui.openPage('options.html', 'auto', AT.ui.targetTabId());
+      void AT.ui.openPage('options.html');
     });
   }
 

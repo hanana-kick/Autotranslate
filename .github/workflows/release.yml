@@ -58,8 +58,9 @@ jobs:
           cat > "$notes" <<EOF
           Autotranslate $version — Chrome, built from \`${GITHUB_SHA::12}\`.
 
-          - Translation runs on-device with the published PLaMo 3 Translate ONNX export; page text stays in the browser.
-          - Per-tab ON/OFF, source-bound side panel/separate options window, dynamic DOM translation and current-source restoration are retained.
+          - Translation runs on-device through ONNX only, retaining the q4f16 WebGPU kernels and ONNX Runtime fallback; page text stays in the browser.
+          - The toolbar popup controls per-tab ON/OFF. Settings are global and open without a source-tab binding or side panel.
+          - Whole-page translation, up to eight concurrent fragments, optional immediate/no-animation rendering, dynamic DOM translation and current-source restoration are retained.
           - Type/unit/package, deterministic browser, planner and reproducible-build gates passed. SHA256SUMS.txt identifies this archive.
           - These gates do not certify a fresh native-model run or a local-inference speed benchmark. No Firefox archive is published; its on-device execution remains unverified.
 

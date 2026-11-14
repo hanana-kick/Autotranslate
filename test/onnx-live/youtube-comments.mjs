@@ -264,6 +264,7 @@ export async function runYouTubeComments({ context, options, output, url, warmup
     'Observer overhead includes mutation callbacks, interval/scroll samples, setup and API snapshot/cohort processing; browser protocol serialization is not included. Active presentation hosts are not GPU request counts.'
   ] };
   const page = await context.newPage(); let tabId;
+  await page.setViewportSize(options.viewportSize());
   await page.addInitScript(() => {
     const silence = () => document.querySelectorAll('video,audio').forEach(m => { m.muted = true; m.pause(); });
     document.addEventListener('play', silence, true);
@@ -343,13 +344,13 @@ export async function runYouTubeComments({ context, options, output, url, warmup
     if (report.access.dialogs.length) throw new Error('Visible dialog; no dismissal or bypass attempted');
     await options.evaluate(() => AT.settings.save({ targetLang: 'ko', sourceLang: 'auto' }));
     tabId = await tabIdFor(options, page);
-    await prepareTabEnabledUI(options, tabId);
     await page.bringToFront();
     await page.evaluate(observeComments);
     report.initial = await page.evaluate(() => __commentEvidence.snapshot());
     report.initialScreenshot = await shot('before'); report.baseline = await status();
     const initial = await mark('initial-comments');
-    await clickPreparedTabEnabledUI(options, tabId, true);
+    const popup = await prepareTabEnabledUI(options, tabId);
+    await clickPreparedTabEnabledUI(popup, tabId, true);
     report.enabledMs = await page.evaluate(() => __commentEvidence.enable());
     await page.bringToFront();
     await observePhase(initial);

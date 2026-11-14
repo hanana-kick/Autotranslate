@@ -30,7 +30,7 @@ const ONNX_VENDOR_DIR = join(ROOT, 'vendor-src', 'onnxruntime');
 // 'offscreen' hosts the on-device model; Firefox has no such API and the
 // firefox target strips it, so it never ships in that bundle.
 // The original 3.6 GiB model must survive normal extension storage limits.
-const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel', 'unlimitedStorage'];
+const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'unlimitedStorage'];
 type Manifest = {
   manifest_version?: number;
   name?: string;
@@ -42,8 +42,6 @@ type Manifest = {
   action?: { default_icon?: Record<string, string>; default_popup?: string };
   options_ui?: { page?: string };
   permissions?: string[];
-  /** Chrome only: the page docked to the side of the window. */
-  side_panel?: { default_path?: string };
   browser_specific_settings?: { gecko?: { id?: string; strict_min_version?: string } };
 };
 
@@ -66,11 +64,8 @@ const TARGETS: Record<string, Target> = {
       // No chrome.offscreen in Firefox: the host runs in the background page,
       // so the permission would be a request for an API that does not exist.
       manifest.permissions = (manifest.permissions ?? []).filter(
-        (permission) => permission !== 'offscreen' && permission !== 'sidePanel'
+        (permission) => permission !== 'offscreen'
       );
-      // `side_panel` is a Chrome key; Firefox has `sidebar_action`, which this
-      // extension does not ship (the onboarding page opens in a tab there).
-      delete manifest.side_panel;
       manifest.browser_specific_settings = {
         gecko: { id: GECKO_ID, strict_min_version: GECKO_MIN_VERSION }
       };
@@ -141,8 +136,7 @@ function checkManifest(check: Check, manifest: Manifest, exists: Exists): void {
     ...Object.values(manifest.icons ?? {}),
     ...Object.values(manifest.action?.default_icon ?? {}),
     manifest.action?.default_popup ?? '',
-    manifest.options_ui?.page ?? '',
-    manifest.side_panel?.default_path ?? ''
+    manifest.options_ui?.page ?? ''
   ].filter(Boolean);
   for (const file of referenced) {
     check.fail(exists(file), `manifest: referenced file is missing: ${file}`);

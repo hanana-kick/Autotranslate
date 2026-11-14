@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { setTabEnabledUI, tabIdFor, optionsReady } from '../native-extension/tab-control.mjs';
+import { prepareTabEnabledUI, setTabEnabledUI, tabIdFor, optionsReady } from '../native-extension/tab-control.mjs';
 import { cp, mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -25,6 +25,7 @@ async function until(fn, description, timeout = 10000) {
 async function fixture(path, html) {
   pages.set(path, documentHtml(html));
   const page = await context.newPage();
+  await page.setViewportSize({ width: 1100, height: 800 });
   await page.goto(`${origin}${path}`);
   return page;
 }
@@ -62,7 +63,7 @@ test.before(async () => {
     ...launchOptions,
     ignoreDefaultArgs: ['--disable-extensions'],
     args: [...launchOptions.args, `--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
-    viewport: { width: 1100, height: 800 }, locale: 'en-US'
+    viewport: null, locale: 'en-US'
   });
   context.setDefaultTimeout(10000);
   context.on('page', (page) => page.on('pageerror', (error) => errors.push({ url: page.url(), error: error.message })));
@@ -70,6 +71,7 @@ test.before(async () => {
   const worker = context.serviceWorkers()[0] ?? await context.waitForEvent('serviceworker', { timeout: 15000 });
   extensionId = worker.url().split('/')[2];
   control = await context.newPage();
+  await control.setViewportSize({ width: 1100, height: 800 });
   await control.goto(`chrome-extension://${extensionId}/options.html`);
   await control.waitForFunction(() => !!globalThis.AT?.settings);
   // Compact settings do not start inference merely to render the form.
@@ -99,7 +101,8 @@ function check(name, fn) {
 }
 
 check('onboarding renders and requires a working model before Start', async () => {
-  const page = await context.newPage(); await page.goto(`chrome-extension://${extensionId}/welcome.html`);
+  const page = await context.newPage(); await page.setViewportSize({ width: 1100, height: 800 });
+  await page.goto(`chrome-extension://${extensionId}/welcome.html`);
   await page.waitForFunction(() => document.querySelector('#targetLang').options.length > 1);
   assert.match(await page.title(), /Autotranslate/i);
   assert.ok((await page.locator('main').innerText()).length > 80);
@@ -139,7 +142,8 @@ const graphFile = (name = 'model_q4f16.onnx') => ({ name, mimeType: 'application
 const partFiles = () => ONNX_PARTS.map((name) => ({ name, mimeType: 'application/octet-stream', buffer: Buffer.from('{}') }));
 
 check('file picker installs through the real UI and starts the extension', async () => {
-  const page = await context.newPage(); await page.goto(`chrome-extension://${extensionId}/welcome.html`);
+  const page = await context.newPage(); await page.setViewportSize({ width: 1100, height: 800 });
+  await page.goto(`chrome-extension://${extensionId}/welcome.html`);
   await page.locator('#targetLang').selectOption('ko');
   // `.onnx` must be selectable at all: the input's accept list is what the user
   // hit, and the graph alone is not enough to load.
@@ -271,7 +275,7 @@ check('a terminated service worker restores already translated tabs after restar
   await session.detach();
 });
 
-check('without automatic preferences, same-site tabs require independent consent', async () => {
+check('popup ON/OFF controls only the intended tab and OFF restores its source', async () => {
   const a=await fixture('/consent-a','<p>Original text</p>');
   const b=await fixture('/consent-b','<p>Original text</p>');
   await policy({enabled:true, sourceLang:'en',targetLang:'ko',siteRules:[],alwaysTranslateLanguages:[]});
@@ -285,38 +289,49 @@ check('without automatic preferences, same-site tabs require independent consent
   // Completion commits before the finite visual handoff exposes the slot.
   await b.waitForFunction(() => document.querySelector('p').innerText === '원문 번역');
   await a.reload();await a.waitForTimeout(350);assert.equal(await a.locator('p').innerText(),'Original text');
-  await screenshot(control,'options-bound-tab-off');
+  await screenshot(control,'options-global-after-tab-off');
 });
 
-check('separate options window remains bound to the originating tab and disables a closed target', async () => {
+check('detached global settings never bind to the opening tab, active tab, or a closed tab', async () => {
   const a=await fixture('/window-a','<p>Original text</p>');const b=await fixture('/window-b','<p>Original text</p>');
-  await policy({sourceLang:'en',targetLang:'ko'});
-  const id=await tabIdFor(control,a);
-  const created=context.waitForEvent('page',p=>p!==a&&p!==b&&p!==control);
-  assert.equal(await control.evaluate(id=>AT.ui.openPage('options.html','window',id),id),'window');
+  await policy({enabled:true,sourceLang:'auto',targetLang:'ko'});
+  await select(a,true);await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
+  const before=await control.evaluate(()=>AT.settings.load());
+  const popup=await prepareTabEnabledUI(control,await tabIdFor(control,a));
+  const created=context.waitForEvent('page');
+  await popup.locator('#options').click();
   const panel=await created;await optionsReady(panel);
-  assert.equal(new URL(panel.url()).searchParams.get('tabId'),String(id));
-  // The panel hydrates, then binds: a document that navigates between the two
-  // has no AT yet. Poll for the answer instead of reading it once, so the probe
-  // runs in whichever document ends up being the options page.
-  const kind=await (await panel.waitForFunction(async()=>{
-    if(!globalThis.AT?.api)return null;
-    const t=(await AT.api.tabs.query({active:true,currentWindow:true}))[0];
-    if(!t)return null;
-    return (await AT.api.windows.get(t.windowId)).type;
-  },null,{timeout:15000})).jsonValue();
+  assert.equal(new URL(panel.url()).pathname,'/options.html');
+  assert.equal(new URL(panel.url()).search,'','global settings have no source-tab query');
+  assert.equal(await panel.locator('#enabled').count(),0);
+  const kind=await panel.evaluate(async()=>{
+    const tab=await AT.api.tabs.getCurrent();
+    return (await AT.api.windows.get(tab.windowId)).type;
+  });
   assert.equal(kind,'popup','real separate browser window, not tabs.create');
+  assert.deepEqual(await panel.evaluate(()=>AT.settings.load()),before,'opening settings preserves global preferences');
+  assert.equal(await a.locator('p').textContent(),'원문 번역','opening settings preserves translation');
   await b.bringToFront();await panel.bringToFront();
-  await panel.locator('#enabled').check();await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
-  assert.equal(await b.locator('p').innerText(),'Original text');
+  await panel.locator('#save').click();
+  await panel.waitForFunction(()=>document.querySelector('#saveStatus').dataset.kind==='ok');
+  assert.equal(await panel.locator('#enabled').count(),0);
+  assert.equal(await a.locator('p').textContent(),'원문 번역');
+  assert.equal(await b.locator('p').textContent(),'Original text');
   await panel.setViewportSize({width:390,height:780});assert.ok(await panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   await screenshot(panel,'options-separate-window');
-  await a.close();await panel.waitForFunction(()=>document.querySelector('#enabled').disabled&&!document.querySelector('#enabled').checked);
+  await a.close();await b.bringToFront();await panel.bringToFront();
+  await panel.locator('#save').click();
+  await panel.waitForFunction(()=>document.querySelector('#saveStatus').dataset.kind==='ok');
+  assert.equal(await panel.locator('#enabled').count(),0,'closing the opening tab cannot create a tab control');
+  assert.deepEqual(await panel.evaluate(()=>AT.settings.load()),before);
+  assert.equal(await b.locator('p').textContent(),'Original text','saving global settings cannot enable the newly active tab');
 });
 
-check('unbound options cannot silently choose an active web tab', async () => {
+check('ordinary options contains global preferences but no translation switch', async () => {
   await control.goto('chrome-extension://'+extensionId+'/options.html');await optionsReady(control);
-  assert.equal(await control.locator('#enabled').isDisabled(),true);assert.equal(await control.locator('#enabled').isChecked(),false);
+  assert.equal(await control.locator('#enabled').count(),0);
+  assert.equal(await control.locator('#targetLang').isEnabled(),true);
+  assert.equal(await control.locator('#localModel').count(),1);
 });
 
 check('compact settings enroll matching URLs and respect a tab-level OFF', async () => {

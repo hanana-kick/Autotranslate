@@ -8,7 +8,6 @@ namespace AT.options {
   // The ids are the ones in options.html; the table types every lookup once so
   // the call sites stay as short as the untyped version was.
   type Fields = {
-    enabled: HTMLInputElement;
     targetLang: HTMLSelectElement;
     alwaysTranslateLanguages: HTMLDivElement;
     parallelTranslation: HTMLSelectElement;
@@ -380,9 +379,9 @@ namespace AT.options {
   }
 
   /**
-   * The form is not the only writer: the popup toggles the switch and changes the
-   * language while this page may be open. Repainting from storage keeps the next
-   * Save from writing values the user has not seen for a while.
+   * The form is not the only writer: the popup changes the language while this
+   * page may be open. Repainting from storage keeps the next Save from writing
+   * values the user has not seen for a while.
    */
   function watchStorage(): void {
     AT.storage?.onChanged?.addListener((changes, area) => {
@@ -396,7 +395,6 @@ namespace AT.options {
 
   document.addEventListener('DOMContentLoaded', async () => {
     AT.i18n.apply(document);
-    AT.ui.bindTabSwitch(el('enabled'), document.getElementById('tabHost')!, document.getElementById('tabStatus')!);
     buildSelects();
     settings = await AT.settings.load();
     await AT.modelflow.keepStorage();

@@ -163,9 +163,6 @@ namespace AT.popup {
     view.settings = settings;
     render();
     renderLocal();
-    if (view.tab?.id != null) {
-      await AT.ui.preparePage('options.html', view.tab.id).catch(() => undefined);
-    }
     el('options').disabled = false;
   }
 
@@ -205,10 +202,7 @@ namespace AT.popup {
     });
 
     el('options').addEventListener('click', () => {
-      // A click here is a gesture, which is exactly what the side panel needs.
-      // Without a model the onboarding page is the useful destination; a fully
-      // set-up profile wants the settings page.
-      void AT.ui.openPage('options.html', 'auto', view.tab?.id ?? null)
+      void AT.ui.openPage('options.html')
         .catch((error) => setStatus(String(error?.message ?? error), 'error'));
     });
   }

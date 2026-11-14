@@ -53,12 +53,8 @@
     "scripting",
     "contextMenus",
     "offscreen",
-    "sidePanel",
     "unlimitedStorage"
   ],
-  "side_panel": {
-    "default_path": "options.html"
-  },
   "host_permissions": [
     "<all_urls>"
   ],

@@ -48,8 +48,6 @@
   "popup_unavailable": { "message": "This page cannot be translated." },
   "popup_disabled": { "message": "This tab is not selected. Turn on the switch to translate it." },
   "options_title": { "message": "Autotranslate options" },
-  "options_behavior": { "message": "Translation for this tab" },
-  "options_enabled": { "message": "Translate this tab" },
   "options_languages": { "message": "Languages" },
   "options_targetLang": { "message": "Translate to" },
   "options_parallelTranslation": { "message": "Simultaneous translation fragments" },
@@ -211,7 +209,5 @@
   "welcome_starting": { "message": "Starting the download…" },
   "welcome_done": { "message": "Model ready. Turn on a tab or configure automatic translation in Settings." },
   "options_modelStored": { "message": "Model stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "welcome_modelStored": { "message": "The file is stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } },
-  "tab_noTarget": { "message": "Open options from the extension icon on the page you want to translate." },
-  "tab_unavailable": { "message": "The target tab is closed or cannot be translated." }
+  "welcome_modelStored": { "message": "The file is stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } }
 }

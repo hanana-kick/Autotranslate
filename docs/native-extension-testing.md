@@ -2,8 +2,8 @@
 
 ## Acceptance boundary
 
-The native harnesses install the built extension in a fresh persistent profile and operate the
-shipped onboarding and Options UI. The service worker, offscreen document, message path,
+The current Chrome harnesses install the built extension in a fresh persistent profile and operate
+the shipped onboarding/global Options UI and toolbar popup for per-tab translation. The service worker, offscreen document, message path,
 storage, OPFS and DOM layer are the production ones, and the on-device engine is the shipped
 ONNX host with the published q4f16 graph; only a driver that says so in its own output
 substitutes a pipeline (see `docs/testing.md`). The runners verify vendor and installed-file
@@ -12,6 +12,13 @@ hashes where they compare bytes.
 What is certified by a green native run is the path that run took: install, load, translate,
 restore — on that browser, that GPU adapter and that page. It is not a claim about every site
 layout, every GPU vendor, or linguistic quality.
+
+Firefox remains unverified. `test/firefox-native/webdriver.mjs` and its
+`released.mjs` wrapper are historical runners: they still depend on the removed
+MediaPipe vendor bundle and old Options toggle, so their commands below are not
+a working ONNX verification path. They are not release gates; no Firefox archive
+is published. This settings/popup change does not repair that pre-existing
+Firefox harness limitation.
 
 ## Product safety and scheduling rules the harnesses exercise
 

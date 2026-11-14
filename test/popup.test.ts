@@ -86,8 +86,7 @@ function environment({ state, script = {}, stored = null, storageFails = false }
   const area: ATNamespace = {};
   let storageFailure: string | null = storageFails ? 'storage is unavailable' : null;
   let optionsOpened = 0;
-  // Tabs the popup opened through `AT.ui` (the side panel is absent here, so
-  // every extension page it asks for lands in one).
+  const createdWindows: ATNamespace[] = [];
   const createdTabs: ATNamespace[] = [];
   let tabEnabled = state?.tabEnabled ?? stored?.enabled === true;
 
@@ -132,7 +131,7 @@ function environment({ state, script = {}, stored = null, storageFails = false }
         }
       }
     },
-    windows: { create: async (details: ATNamespace) => { createdTabs.push(details); return {id:9}; } },
+    windows: { create: async (details: ATNamespace) => { createdWindows.push(details); return {id:9}; } },
     tabs: {
       create: async (details: ATNamespace) => {
         createdTabs.push(details);
@@ -223,6 +222,9 @@ const makeField = (tagName: string, hidden = false): StubField => {
     },
     get optionsOpened(): number {
       return optionsOpened;
+    },
+    get createdWindows(): ATNamespace[] {
+      return createdWindows;
     },
     get createdTabs(): ATNamespace[] {
       return createdTabs;
@@ -516,15 +518,28 @@ test('changing language cannot implicitly enroll an untranslated tab', async () 
   assert.ok(!h.types().includes('at/translate-tab'));
 });
 
-test('the settings button opens the options page on a profile that has a model', async () => {
-  const h=environment({stored:{localModelId:'model-a'}}); await h.boot(); await h.click('options');
-  assert.equal(h.optionsOpened,0,'openOptionsPage would open the wrong surface');
-  assert.deepEqual(h.createdTabs,[{url:'chrome-extension://test/options.html?tabId=7',type:'popup',width:520,height:820,focused:true}]);
+test('opening global settings leaves both selected and unselected tabs unchanged', async () => {
+  for (const tabEnabled of [false, true]) {
+    const h = environment({ state: { tabEnabled }, stored: { localModelId: 'model-a' } });
+    await h.boot();
+    const stored = structuredClone(h.stored);
+    const messages = [...h.sends];
+    await h.click('options');
+    assert.equal(h.optionsOpened, 0, 'settings use their own window');
+    assert.deepEqual(h.createdWindows, [{
+      url: 'chrome-extension://test/options.html', type: 'popup', width: 520, height: 820, focused: true
+    }]);
+    assert.deepEqual(h.createdTabs, []);
+    assert.deepEqual(h.sends, messages, 'opening settings sends no translation commands');
+    assert.deepEqual(h.stored, stored);
+    assert.equal(h.fields.enabled.checked, tabEnabled);
+  }
 });
 
 test('the settings button still opens model options when no model is installed', async () => {
   const h=environment(); await h.boot(); await h.click('options');
-  assert.deepEqual(h.createdTabs,[{url:'chrome-extension://test/options.html?tabId=7',type:'popup',width:520,height:820,focused:true}]);
+  assert.deepEqual(h.createdWindows,[{url:'chrome-extension://test/options.html',type:'popup',width:520,height:820,focused:true}]);
+  assert.deepEqual(h.createdTabs, []);
 });
 
 test('a background that answers with nothing surfaces as a status, not a crash', async () => {

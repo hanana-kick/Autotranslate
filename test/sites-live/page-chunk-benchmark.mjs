@@ -45,9 +45,10 @@ export async function runPageChunkBenchmark({ context, options, worker, output }
       await options.evaluate(width => AT.settings.save({ translationConcurrency: width }), width);
       await worker.evaluate(() => { globalThis.__fragmentEvidence = { calls: [], active: 0, maximum: 0 }; });
       const page = await context.newPage();
+      await page.setViewportSize({ width: 1280, height: 1000 });
       await page.goto(`${origin}/${shape}-${width}`);
       const tabId = await tabIdFor(options, page);
-      await prepareTabEnabledUI(options, tabId);
+      const popup = await prepareTabEnabledUI(options, tabId);
       await page.evaluate(() => {
         const sources = [...document.querySelectorAll('main p')].map(p => p.textContent);
         const evidence = { sources, firstPreviewMs: null, firstCompleteMs: null, completeMs: null, updates: 0, previous: '', started: performance.now() };
@@ -65,7 +66,7 @@ export async function runPageChunkBenchmark({ context, options, worker, output }
         }, 16);
         globalThis.__pageFragments = { evidence, stop: () => clearInterval(timer) };
       });
-      await clickPreparedTabEnabledUI(options, tabId, true);
+      await clickPreparedTabEnabledUI(popup, tabId, true);
       await page.bringToFront();
       await page.waitForFunction(() => globalThis.__pageFragments.evidence.firstPreviewMs !== null, null, { timeout: 60000 });
       if (width === 2 && shape === 'single') await page.screenshot({ path: join(output, 'page-fragments-streaming.png') });
@@ -92,6 +93,7 @@ export async function runPageChunkBenchmark({ context, options, worker, output }
       await page.close();
     }
     const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 1000 });
     await page.goto(`${origin}/single-cancel`);
     const sources = await page.locator('main p').allTextContents();
     const tabId = await tabIdFor(options, page);

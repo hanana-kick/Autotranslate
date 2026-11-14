@@ -4,6 +4,10 @@ The current extension ships ONNX only: q4f16 custom WebGPU kernels with the
 existing ONNX Runtime fallback. Historical GGUF comparisons below are retained
 as evidence; their removed scripts/options are not current test commands.
 Model originals and recorded experiment artifacts are not removed by builds.
+Settings are global and do not expose a tab translation switch or source-tab
+binding. Browser/native harnesses operate the shipped toolbar popup for ON/OFF;
+opening settings must not select or restore a web tab. Automatic URL/language
+preferences remain global settings.
 
 ## ONNX-only cutover verification
 

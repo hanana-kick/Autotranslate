@@ -793,14 +793,9 @@ if (typeof self.importScripts === 'function') {
     return await localState();
   }
 
-  /**
-   * The first run is a setup flow, not a settings page: this opens it. A side
-   * panel is the better surface and the page is registered as one, but the
-   * browser only lets it open on a user gesture and an install is not one — so
-   * this opens a separate setup window without guessing a target web tab.
-   */
+  /** First-run setup opens independently of any web tab's translation state. */
   function openWelcome(): void {
-    AT.ui.openPage('welcome.html', 'window', null).catch((error: unknown) => AT.warn('opening the welcome page failed', error));
+    AT.ui.openPage('welcome.html').catch((error: unknown) => AT.warn('opening the welcome page failed', error));
   }
 
   api.runtime.onInstalled.addListener(async (details) => {
@@ -840,16 +835,12 @@ if (typeof self.importScripts === 'function') {
       }
       if (changeInfo.status !== 'complete' && !changeInfo.url) return;
       if (!tab || !isInjectable(tab.url)) { await updateBadge(tabId); return; }
-      void AT.ui.preparePage('options.html', tabId).catch(() => {});
       await reconcileTab(tabId);
     } catch (error) { AT.warn('auto translate failed', error); }
   });
 
   api.tabs.onActivated?.addListener(({ tabId }) => {
-    void api.tabs.get(tabId).then(async (tab) => {
-      if (tab && isInjectable(tab.url)) void AT.ui.preparePage('options.html', tabId).catch(() => {});
-      await reconcileTab(tabId);
-    }).catch((error) => AT.warn('activated tab translation failed', error));
+    void reconcileTab(tabId).catch((error) => AT.warn('activated tab translation failed', error));
   });
 
   api.tabs.onRemoved.addListener((tabId) => {

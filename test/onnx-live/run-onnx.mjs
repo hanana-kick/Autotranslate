@@ -378,7 +378,8 @@ const context = await chromium.launchPersistentContext(profile, {
     '--mute-audio',
     `--load-extension=${extension}`
   ],
-  viewport: { width: 1100, height: 800 },
+  // Native action popups cannot use viewport emulation; source tabs are sized below.
+  viewport: null,
   locale: 'en-US',
   ...(localOrigin ? { ignoreHTTPSErrors: true } : {})
 });
@@ -402,6 +403,7 @@ if (localOrigin) {
 let worker = context.serviceWorkers()[0];
 if (!worker) {
   const blank = await context.newPage();
+  await blank.setViewportSize({ width: 1100, height: 800 });
   await blank.goto('about:blank').catch(() => {});
   try {
     worker = await context.waitForEvent('serviceworker', { timeout: 20000 });
@@ -419,6 +421,7 @@ worker.on('console', (message) => {
 const extensionId = new URL(worker.url()).host;
 
 const options = await context.newPage();
+await options.setViewportSize({ width: 1100, height: 800 });
 await options.goto(`chrome-extension://${extensionId}/options.html`);
 await optionsReady(options);
 summary.chrome = context.browser()?.version() ?? null;
@@ -489,6 +492,7 @@ const target = 'ko';
 await options.evaluate((code) => AT.settings.save({ targetLang: code, sourceLang: 'en' }), target);
 summary.target = target;
 const page = await context.newPage();
+await page.setViewportSize({ width: 1100, height: 800 });
 await page.goto(origin + '/', { waitUntil: 'load' });
 const before = await page.evaluate(() => [...document.querySelectorAll('p')].map((p) => p.textContent));
 const tabId = await tabIdFor(options, page);
@@ -615,6 +619,7 @@ if (AURORA) {
 // intervals must intersect.
 if (process.env.TWO_TABS === '1') {
   const secondPage = await context.newPage();
+  await secondPage.setViewportSize({ width: 1100, height: 800 });
   await secondPage.goto(origin + '/?second', { waitUntil: 'load' });
   await secondPage.bringToFront();
   const secondId = await tabIdFor(options, secondPage);
@@ -662,6 +667,7 @@ if (process.env.TWO_TABS === '1') {
 // 4c. The same shipped extension and real model, on a separate order fixture.
 if (VISUAL_ORDER) {
   const visual = await context.newPage();
+  await visual.setViewportSize({ width: 1100, height: 800 });
   await visual.goto(origin + '/visual-order', { waitUntil: 'load' });
   await visual.bringToFront();
   const visualId = await tabIdFor(options, visual);
@@ -741,6 +747,7 @@ if (process.env.YOUTUBE_COMMENTS === '1') {
 // logging in, or pretending an inaccessible page was a translation success.
 if (process.env.YOUTUBE === '1') {
   const watch = await context.newPage();
+  await watch.setViewportSize({ width: 1100, height: 800 });
   summary.youtube = { status: 'opening', screenshots: {}, mediaSilencedByBrowser: true };
   // Install before navigation so media is stopped even while the page loads.
   // --mute-audio also prevents any sound before these handlers can run.

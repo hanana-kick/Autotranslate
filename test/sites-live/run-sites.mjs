@@ -30,6 +30,7 @@
 // and does not fail it; a site that had Japanese source and translated nothing
 // does.
 import { chromium, launchOptions, ROOT, OUTPUT } from '../browser/support.mjs';
+import { setTabEnabledUI } from '../native-extension/tab-control.mjs';
 import { execFileSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { mkdir, mkdtemp, cp, readFile, stat, writeFile } from 'node:fs/promises';
@@ -116,8 +117,8 @@ const context = await chromium.launchPersistentContext(join(tmp, 'profile'), {
     '--no-first-run', '--no-default-browser-check',
     // Layer one: the browser itself never unmutes a tab, and nothing autoplays.
     '--mute-audio', '--autoplay-policy=user-gesture-required'],
-  // A concrete viewport: a window with none never starts the extension worker.
-  viewport: { width: 1280, height: 1000 },
+  // Native action popups cannot use viewport emulation; size source pages below.
+  viewport: null,
   locale: process.env.SITE_MATRIX === '1' ? 'en-US' : 'ja-JP',
   // The throwaway certificate the model origin presents.
   ...(modelServer ? { ignoreHTTPSErrors: true } : {})
@@ -169,6 +170,7 @@ context.on('page', (page) => page.on('pageerror', (error) => summary.errors.push
 let worker = context.serviceWorkers()[0];
 if (!worker) {
   const blank = await context.newPage();
+  await blank.setViewportSize({ width: 1280, height: 1000 });
   await blank.goto('about:blank').catch(() => {});
   try {
     worker = await context.waitForEvent('serviceworker', { timeout: 20000 });
@@ -184,6 +186,7 @@ if (!worker) {
 const extensionId = new URL(worker.url()).host;
 
 const options = await context.newPage();
+await options.setViewportSize({ width: 1280, height: 1000 });
 await options.goto(`chrome-extension://${extensionId}/options.html`);
 await options.waitForFunction(() => !!globalThis.AT?.settings, null, { timeout: 30000 });
 // Enable the diagnostic overlay through persisted settings, not a removed
@@ -306,16 +309,9 @@ if (process.env.SITE_MATRIX === '1') {
   process.exit(0);
 }
 
-/** Enables the per-tab switch through the shipped options path. */
+/** Enables the source tab through the shipped toolbar popup. */
 async function enable(tabId) {
-  const enabled = await options.evaluate(async (id) => {
-    const reply = await AT.sendMessage({ type: AT.C.MSG.GET_STATE, tabId: id });
-    return reply.tabEnabled === true;
-  }, tabId);
-  if (enabled) return;
-  await options.evaluate(async (id) => {
-    await AT.sendMessage({ type: AT.C.MSG.SET_TAB_ENABLED, tabId: id, enabled: true });
-  }, tabId);
+  await setTabEnabledUI(options, tabId, true);
 }
 
 // --- The sites: one table, one runner, one silence guarantee.
@@ -426,6 +422,7 @@ if (!selected.length) {
 
 for (const site of selected) {
   const page = await context.newPage();
+  await page.setViewportSize({ width: 1280, height: 1000 });
   const record = {
     id: site.id, url: site.url, blocked: false, blockedReason: null, blockedEvidence: null,
     skipped: null, skipEvidence: null,
@@ -601,7 +598,7 @@ for (const site of selected) {
     record.contentError = state?.error ?? null;
   }
 
-  await options.evaluate((id) => AT.sendMessage({ type: AT.C.MSG.SET_TAB_ENABLED, tabId: id, enabled: false }), tabId).catch(() => {});
+  await setTabEnabledUI(options, tabId, false);
   // Two conditions, both about the extension's own change: its Korean output is
   // gone from every node it was asked to translate, and the text on the nodes
   // that are still there is byte-identical to what was captured before enabling.

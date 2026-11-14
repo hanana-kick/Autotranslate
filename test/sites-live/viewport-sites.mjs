@@ -128,6 +128,7 @@ export async function runViewportSites({ context, options, output }) {
       report.sites.push({ id: site.id, ...evidence }); await write(); continue;
     }
     const page = await context.newPage();
+    await page.setViewportSize({ width: 1280, height: 1000 });
     const record = { id: site.id, requestedUrl: site.url, status: 'opening', phases: [], errors: [] };
     let tabId, observer = false;
     page.on('pageerror', error => record.errors.push(error.message));
@@ -175,11 +176,11 @@ export async function runViewportSites({ context, options, output }) {
         record.frames = page.frames().map(frame => frame.url());
         record.pdfViewer = await page.locator('embed[type="application/pdf"], pdf-viewer').count();
         try {
-          await prepareTabEnabledUI(options, tabId);
-          await clickPreparedTabEnabledUI(options, tabId, true);
+          const popup = await prepareTabEnabledUI(options, tabId);
+          await clickPreparedTabEnabledUI(popup, tabId, true);
+          record.popup = await popup.locator('body').innerText();
         } catch (error) { record.enableError = error.message; }
         record.state = await content();
-        record.options = await options.locator('body').innerText();
         await page.bringToFront();
         await page.mouse.move(800, 600); await page.mouse.wheel(0, 900);
         await page.waitForTimeout(1500);
@@ -188,10 +189,10 @@ export async function runViewportSites({ context, options, output }) {
         record.status = record.presentationHosts ? 'observed' : 'no-pdf-translation';
         continue;
       }
-      await prepareTabEnabledUI(options, tabId);
       await page.bringToFront();
       await page.evaluate(observePresentation); observer = true;
-      await clickPreparedTabEnabledUI(options, tabId, true);
+      const popup = await prepareTabEnabledUI(options, tabId);
+      await clickPreparedTabEnabledUI(popup, tabId, true);
       await page.evaluate(() => __siteEvidence.enable());
       await page.bringToFront();
       const initialY = await page.evaluate(() => scrollY);

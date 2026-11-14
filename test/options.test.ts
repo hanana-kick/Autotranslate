@@ -11,7 +11,6 @@ const LIBS = [
   'lib/constants.js',
   'lib/browser.js',
   'lib/rules.js',
-  'lib/ui.js',
   'lib/plamo3.js',
   'lib/local.js',
   'lib/modelstore.js',
@@ -179,9 +178,6 @@ type StubDocument = {
 
 // id, tag and the data-i18n key options.html puts on the button.
 const FIELDS: readonly (readonly [string, string, string?])[] = [
-  ['enabled', 'input'],
-  ['tabHost', 'p'],
-  ['tabStatus', 'p'],
   ['localSection', 'div'],
   ['localModel', 'select'],
   ['modelList', 'ul'],
@@ -631,7 +627,7 @@ test('boot renders the full language catalogue and preserves stored exclusions',
   assert.equal(field('pickModel').textContent, msg('options_pickFile'));
   assert.equal(field('prepareModel').textContent, msg('options_prepare'));
   assert.deepEqual(env.writes, [], 'opening preferences never enables translation');
-  assert.deepEqual(env.runtimeMessages, [], 'opening preferences does not probe the engine');
+  assert.deepEqual(env.runtimeMessages, [], 'opening global preferences neither reads nor changes tab translation state');
 });
 
 test('an empty store starts with no automatic languages or URLs', async () => {
@@ -639,7 +635,6 @@ test('an empty store starts with no automatic languages or URLs', async () => {
   assert.equal(field('targetLang').value, 'en');
   assert.equal(field('localModel').value, '');
   assert.equal(field('localModel').children.length, 1);
-  assert.equal(field('enabled').checked, false);
   assert.ok(field('alwaysTranslateLanguages').querySelectorAll('input').every((input) => !input.checked));
   assert.equal(field('ruleList').children[0]!.textContent, msg('options_noRules'));
 });

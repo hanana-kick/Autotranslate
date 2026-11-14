@@ -174,8 +174,8 @@ export async function runScrollCompletionBenchmark({ context, options, worker, o
     await page.goto(`${report.origin}/${scenario.id}?run=${suffix}`);
     await page.evaluate(observePage);
     const tabId = await tabIdFor(options, page);
-    await prepareTabEnabledUI(options, tabId);
-    return { page, tabId };
+    const popup = await prepareTabEnabledUI(options, tabId);
+    return { page, tabId, popup };
   }
   try {
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
@@ -243,15 +243,15 @@ export async function runScrollCompletionBenchmark({ context, options, worker, o
       const run = { round, scenario: scenario.id, expectedTargets: scenario.units.length,
         status: 'failed', completionMs: null, errors: [], revisits: [], screenshots: {} };
       report.runs.push(run);
-      let page, tabId;
+      let page, tabId, popup;
       const startIndex = (await calls()).length;
       const stem = `scroll-${label}-${scenario.id}-${round}`;
       try {
-        ({ page, tabId } = await openFixture(scenario, `${label}-${round}`));
+        ({ page, tabId, popup } = await openFixture(scenario, `${label}-${round}`));
         page.on('pageerror', error => run.errors.push(errorText(error)));
         run.beforeEnable = await page.evaluate(() => globalThis.__scrollCompletion.snapshot());
         assert.ok(run.beforeEnable.geometry.every(rect => !rect.fullyVisible && rect.y >= VIEWPORT.height), 'targets begin below the fold');
-        await clickPreparedTabEnabledUI(options, tabId, true);
+        await clickPreparedTabEnabledUI(popup, tabId, true);
         await page.bringToFront();
         run.beforeScroll = await page.evaluate(() => globalThis.__scrollCompletion.snapshot());
         run.scroll = await scrollToRegion(page, 'targets');
@@ -315,11 +315,11 @@ export async function runScrollCompletionBenchmark({ context, options, worker, o
       }
     }
     const cancellation = report.cancellation = { status: 'failed', errors: [] };
-    let page, tabId;
+    let page, tabId, popup;
     const cancelStart = (await calls()).length;
     try {
-      ({ page, tabId } = await openFixture(SCENARIOS[0], `${label}-cancel`));
-      await clickPreparedTabEnabledUI(options, tabId, true);
+      ({ page, tabId, popup } = await openFixture(SCENARIOS[0], `${label}-cancel`));
+      await clickPreparedTabEnabledUI(popup, tabId, true);
       await page.bringToFront();
       cancellation.scroll = await scrollToRegion(page, 'targets');
       await page.waitForSelector('at-translation-text[data-state="translating"][data-streaming="true"]', { timeout: timeoutMs });

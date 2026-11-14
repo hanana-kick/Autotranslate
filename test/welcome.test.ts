@@ -6,9 +6,9 @@ import { SRC, load, resetGlobals, deferred, type ATNamespace } from './helpers.t
 
 // welcome.html is a classic script page: constants + browser + local +
 // modelstore + modelflow + settings, then welcome.js. The pure data modules are
-// real; the three modules the page calls into (modelstore, modelflow, settings)
-// plus the message channel are stubs, so a test scripts the transfer instead of
-// streaming gigabytes through a fake IndexedDB.
+// real, including the window opener; modelstore, modelflow, settings and the
+// message channel are stubs, so a test scripts the transfer instead of streaming
+// gigabytes through a fake IndexedDB.
 const LIBS = ['lib/constants.js', 'lib/local.js'];
 
 const host = globalThis as ATNamespace;
@@ -232,13 +232,17 @@ async function boot(options: BootOptions = {}) {
     files: [] as unknown[],
     warnings: [] as unknown[],
     applied: [] as unknown[],
-    opens: 0,
+    windows: [] as ATNamespace[],
     closed: 0
   };
   /** The progress bar and status as the transfer reported each sample. */
   const samples: ATNamespace[] = [];
 
-  const AT = load(...LIBS);
+  host.browser = {
+    runtime: { getURL: (path: string) => `chrome-extension://test/${path}` },
+    windows: { create: async (details: ATNamespace) => { calls.windows.push(details); } }
+  };
+  const AT = load(...LIBS, 'lib/browser.js', 'lib/ui.js');
 
   const field = (id: string): Stub => {
     const node = doc.getElementById(id);
@@ -307,14 +311,6 @@ async function boot(options: BootOptions = {}) {
     calls.warnings.push(args);
   };
 
-  AT.api = {
-    runtime: {
-      openOptionsPage: async () => {
-        calls.opens += 1;
-      }
-    }
-  };
-
   host.window = {
     close: () => {
       calls.closed += 1;
@@ -328,6 +324,18 @@ async function boot(options: BootOptions = {}) {
 
   return { AT, doc, field, calls, samples, stored };
 }
+
+test('setup opens global settings in a separate window without changing translation preferences', async () => {
+  const { field, calls, stored } = await boot();
+  const before = structuredClone(stored);
+  const messages = [...calls.messages];
+  await click(field('options'));
+  assert.deepEqual(calls.windows, [{
+    url: 'chrome-extension://test/options.html', type: 'popup', width: 520, height: 820, focused: true
+  }]);
+  assert.deepEqual(stored, before);
+  assert.deepEqual(calls.messages, messages);
+});
 
 test('boot offers both install routes and asks for a model', async () => {
   const env = await boot();

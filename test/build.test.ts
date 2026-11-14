@@ -237,25 +237,19 @@ test('only the chrome bundle asks for the permissions it can use', () => {
   }
 
   assert.ok(chrome.permissions.includes('offscreen'), 'the model host needs the permission on chrome');
-  assert.ok(chrome.permissions.includes('sidePanel'), 'the side panel needs the permission on chrome');
   assert.ok(chrome.permissions.includes('unlimitedStorage'), 'the multi-gigabyte model needs durable extension storage');
   assert.ok(firefox.permissions.includes('unlimitedStorage'), 'Firefox must not block installation on a persistence prompt');
-  for (const permission of ['offscreen', 'sidePanel']) {
-    assert.equal(
-      firefox.permissions.includes(permission),
-      false,
-      `Firefox has no chrome.${permission} and refuses unknown permissions`
-    );
-  }
+  assert.equal(firefox.permissions.includes('offscreen'), false, 'Firefox has no offscreen API');
   assert.deepEqual(
     firefox.permissions,
-    chrome.permissions.filter((permission: string) => permission !== 'offscreen' && permission !== 'sidePanel'),
+    chrome.permissions.filter((permission: string) => permission !== 'offscreen'),
     'firefox ships the same grant minus the ones it cannot use'
   );
 
-  // The panel page itself is a chrome key; Firefox gets the tab fallback.
-  assert.equal(chrome.side_panel?.default_path, 'options.html', 'the panel shows tab controls and model options');
-  assert.equal('side_panel' in firefox, false, 'there is no side_panel key for firefox');
+  for (const manifest of [chrome, firefox]) {
+    assert.equal(manifest.permissions.includes('sidePanel'), false, 'global settings need no side-panel grant');
+    assert.equal('side_panel' in manifest, false, 'settings open in a separate window');
+  }
 });
 
 test('the packaging gate trades the wasm exception for eval only at the cost of failing', () => {

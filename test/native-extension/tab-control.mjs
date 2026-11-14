@@ -15,10 +15,8 @@ export async function tabIdFor(options, page) {
   assert.ok(Number.isSafeInteger(id) && id >= 0, 'actual browser tab ID');
   return id;
 }
-// UI page creation/hydration is measured separately from the ON-click latency.
-// The benchmark exercises a visible, already opened options UI, just as a user
-// clicking its checkbox does. Reloading the entire options document after the
-// timer starts would time OPFS model-list initialization, not translation.
+// Hydrate the real toolbar popup before measuring its ON click. The source tab
+// stays active; settings are only an extension context for opening the action.
 export async function prepareTabEnabledUI(options, tabId) {
   const modern = await options.evaluate(() => !!AT.C.MSG.SET_TAB_ENABLED);
   if (!modern) {
@@ -26,34 +24,73 @@ export async function prepareTabEnabledUI(options, tabId) {
     assert.equal(await options.evaluate(() => AT.runtime.getManifest().version), '0.1.4');
     await options.reload();
     await optionsReady(options);
-    return;
+    return options;
   }
   assert.ok(Number.isSafeInteger(tabId) && tabId >= 0, 'explicit target is mandatory');
-  const url = new URL(options.url()); url.pathname = '/options.html'; url.search = '?tabId=' + tabId;
-  if (options.url() !== url.href) await options.goto(url.href); else await options.reload();
-  await optionsReady(options);
-  await options.waitForFunction(() => !document.querySelector('#enabled').disabled);
+  const popupURL = new URL('/popup.html', options.url()).href;
+  const context = options.context();
+  for (const page of context.pages()) if (page.url() === popupURL) await page.close();
+  const windowId = await options.evaluate(async tabId => {
+    const tab = await AT.api.tabs.get(tabId);
+    await AT.api.tabs.update(tabId, { active: true });
+    await AT.api.windows.update(tab.windowId, { focused: true });
+    return tab.windowId;
+  }, tabId);
+  // Native window activation can settle after windows.update resolves on macOS.
+  // Wait for the requested state before opening; never retry a side-effecting action.
+  await options.waitForFunction(async windowId =>
+    (await AT.api.windows.get(windowId)).focused, windowId);
+  // Chromium first exposes action popups as CDP "other" targets. Opt Playwright
+  // into attaching only while opening this popup, not for model host documents.
+  // Launchers must use viewport:null: emulating a native popup viewport crashes
+  // Chrome 143. Source tabs retain their own explicit benchmark viewport.
+  const attachOther = process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
+  process.env.PW_CHROMIUM_ATTACH_TO_OTHER = '1';
+  let popup;
+  try {
+    [popup] = await Promise.all([
+      context.waitForEvent('page', page => page.url() === popupURL),
+      options.evaluate(windowId => AT.api.action.openPopup({ windowId }), windowId)
+    ]);
+  } finally {
+    if (attachOther === undefined) delete process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
+    else process.env.PW_CHROMIUM_ATTACH_TO_OTHER = attachOther;
+  }
+  await popup.waitForURL(popupURL);
+  await popup.waitForFunction(async tabId => {
+    if (!globalThis.AT?.settings || document.querySelector('#options')?.disabled ||
+        !document.querySelector('#targetLang')?.options.length) return false;
+    const state = await AT.sendMessage({ type: AT.C.MSG.GET_STATE });
+    const toggle = document.querySelector('#enabled');
+    return state.ok && state.tab?.id === tabId && !toggle?.disabled &&
+      toggle?.checked === state.tabEnabled;
+  }, tabId);
+  return popup;
 }
-export async function clickPreparedTabEnabledUI(options, tabId, enabled) {
-  const modern = await options.evaluate(() => !!AT.C.MSG.SET_TAB_ENABLED);
+export async function clickPreparedTabEnabledUI(popup, tabId, enabled) {
+  const modern = await popup.evaluate(() => !!AT.C.MSG.SET_TAB_ENABLED);
   if (!modern) {
     assert.equal(process.env.SPEED_LABEL, 'baseline', 'only labelled baseline may use the historical global switch');
-    await options.locator('#enabled').setChecked(enabled);
-    await options.locator('#save').click();
-    await options.waitForFunction(async value => document.querySelector('#saveStatus').dataset.kind === 'ok' && (await AT.settings.load()).enabled === value, enabled);
+    await popup.locator('#enabled').setChecked(enabled);
+    await popup.locator('#save').click();
+    await popup.waitForFunction(async value => document.querySelector('#saveStatus').dataset.kind === 'ok' && (await AT.settings.load()).enabled === value, enabled);
     return;
   }
   assert.ok(Number.isSafeInteger(tabId) && tabId >= 0, 'per-tab toggle requires the source browser tab');
-  assert.equal(new URL(options.url()).searchParams.get('tabId'), String(tabId), 'prepared options must be source-tab-bound');
-  const before = await options.evaluate(() => AT.settings.load());
-  await options.locator('#enabled').setChecked(enabled);
-  await options.waitForFunction(async ({tabId,enabled}) => {
-    const state = await AT.sendMessage({type: AT.C.MSG.GET_STATE, tabId});
-    return state.ok && state.tabEnabled === enabled && document.querySelector('#enabled').checked === enabled && !document.querySelector('#enabled').disabled;
+  assert.equal(new URL(popup.url()).pathname, '/popup.html', 'per-tab control is the shipped popup');
+  const active = await popup.evaluate(() => AT.sendMessage({ type: AT.C.MSG.GET_STATE }));
+  assert.equal(active.tab?.id, tabId, 'popup must target the active source tab');
+  const before = await popup.evaluate(() => AT.settings.load());
+  await popup.locator('#enabled').setChecked(enabled);
+  await popup.waitForFunction(async ({tabId,enabled}) => {
+    const state = await AT.sendMessage({type: AT.C.MSG.GET_STATE});
+    return state.ok && state.tab?.id === tabId && state.tabEnabled === enabled &&
+      document.querySelector('#enabled').checked === enabled && !document.querySelector('#enabled').disabled;
   }, {tabId,enabled});
-  assert.equal((await options.evaluate(() => AT.settings.load())).enabled, before.enabled, 'per-tab switch must not change global consent');
+  assert.equal((await popup.evaluate(() => AT.settings.load())).enabled, before.enabled, 'per-tab switch must not change global consent');
 }
 export async function setTabEnabledUI(options, tabId, enabled) {
-  await prepareTabEnabledUI(options, tabId);
-  await clickPreparedTabEnabledUI(options, tabId, enabled);
+  const popup = await prepareTabEnabledUI(options, tabId);
+  try { await clickPreparedTabEnabledUI(popup, tabId, enabled); }
+  finally { if (popup !== options && !popup.isClosed()) await popup.close(); }
 }
