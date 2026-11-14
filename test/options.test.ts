@@ -180,29 +180,11 @@ type StubDocument = {
 // id, tag and the data-i18n key options.html puts on the button.
 const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['enabled', 'input'],
-  ['showBadge', 'input'],
-  ['debug', 'input'],
   ['tabHost', 'p'],
   ['tabStatus', 'p'],
-  ['engine', 'select'],
-  ['serverBaseUrl', 'input'],
-  ['serverApiKey', 'input'],
-  ['serverModel', 'input'],
-  ['serverModels', 'datalist'],
-  ['serverTimeoutMs', 'input'],
-  ['serverSection', 'div'],
   ['localSection', 'div'],
-  ['serverStatus', 'p'],
-  ['loadServerModels', 'button'],
-  ['testEngine', 'button', 'options_test'],
-  ['testStatus', 'p'],
-  // The on-device card, in the order options.html lists them.
-  ['localSupport', 'p'],
   ['localModel', 'select'],
-  ['localMaxTokens', 'input'],
-  ['localUsage', 'p'],
   ['modelList', 'ul'],
-  ['modelUrl', 'input'],
   ['downloadModel', 'button', 'options_download'],
   ['cancelDownload', 'button', 'options_cancel'],
   ['modelFile', 'input'],
@@ -211,14 +193,12 @@ const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['modelProgress', 'progress'],
   ['modelStatus', 'p'],
   ['targetLang', 'select'],
-  ['sourceLang', 'select'],
-  ['maxNodes', 'input'],
+  ['alwaysTranslateLanguages', 'div'],
+  ['parallelTranslation', 'input'],
   ['rulePattern', 'input'],
-  ['ruleAction', 'select'],
   ['addRule', 'button', 'options_addRule'],
   ['ruleList', 'ul'],
   ['save', 'button', 'options_save'],
-  ['reset', 'button', 'options_reset'],
   ['saveStatus', 'p']
 ];
 
@@ -276,12 +256,6 @@ async function settle(): Promise<void> {
   }
   throw new Error('the options page never settled');
 }
-
-/** Drains microtasks deterministically; never a wall-clock wait. */
-const flush = (): Promise<void> =>
-  new Promise<void>((resolve) => {
-    process.nextTick(resolve);
-  });
 
 /**
  * Lets a chain the page started without awaiting (`void startDownload()`) land:
@@ -578,6 +552,12 @@ async function boot(options: BootOptions = {}) {
     installs.push(install);
     return installFromUrl(install);
   };
+  const importFromFiles = AT.modelflow.installFromFiles as (files: File[]) => Promise<unknown>;
+  AT.modelflow.installFromFiles = (files: File[]) => {
+    const completion = importFromFiles(files);
+    pending.push(completion);
+    return completion;
+  };
 
   for (const fn of [...(doc.listeners.DOMContentLoaded ?? [])]) await fn({ type: 'DOMContentLoaded' });
   await settle();
@@ -605,15 +585,17 @@ async function boot(options: BootOptions = {}) {
 /** A full, already-normalised settings blob (what the page stores). */
 function storedSettings(overrides: ATNamespace = {}): ATNamespace {
   return {
-    version: 1,
+    version: 3,
     enabled: true,
     targetLang: 'en',
     sourceLang: 'auto',
     localModelId: '',
     localMaxTokens: 1024,
     maxNodes: 600,
+    translationConcurrency: 2,
     showBadge: true,
     siteRules: [],
+    alwaysTranslateLanguages: [],
     debug: false,
     ...overrides
   };
@@ -631,282 +613,120 @@ const modelItem = (list: Stub, name: string): Stub => {
   return found;
 };
 
-test('boot fills the selects, every field and the button labels from storage', async () => {
-  const env = await boot({
-    stored: storedSettings({
-      enabled: false,
-      showBadge: false,
-      debug: true,
-      targetLang: 'ko',
-      sourceLang: 'ja',
-      localMaxTokens: 2048,
-      maxNodes: 450,
-      siteRules: [
-        { pattern: 'news.example.com', action: 'never' },
-        { pattern: 'example.org/news/*', action: 'always' }
-      ]
-    })
-  });
+test('boot renders the full language catalogue and preserves stored exclusions', async () => {
+  const env = await boot({ stored: storedSettings({
+    targetLang: 'ko',
+    alwaysTranslateLanguages: ['ja', 'de'],
+    siteRules: [{ pattern: 'news.example.com', action: 'never' }]
+  }) });
   const { AT, field } = env;
-
-  assert.equal(field('enabled').checked, false);
-  assert.equal(field('showBadge').checked, false);
-  assert.equal(field('debug').checked, true);
   assert.equal(field('targetLang').value, 'ko');
-  assert.equal(field('sourceLang').value, 'ja');
-  assert.equal(field('localMaxTokens').value, '2048');
-  assert.equal(field('maxNodes').value, '450');
-
-  assert.deepEqual(
-    field('targetLang').children.map((node) => node.value),
-    AT.C.LANGS.map((lang: ATNamespace) => lang.code)
-  );
-  assert.equal(field('targetLang').children[1]!.textContent, '한국어 (ko)');
-  const source = field('sourceLang').children;
-  assert.equal(source[0]!.value, 'auto');
-  assert.equal(source[0]!.textContent, msg('options_sourceAuto'), 'the auto entry comes from the catalogue');
-  assert.equal(source.length, AT.C.LANGS.length + 1);
-
+  assert.deepEqual(field('targetLang').children.map((node) => node.value), AT.C.LANGS.map((lang: ATNamespace) => lang.code));
+  const languages = field('alwaysTranslateLanguages').querySelectorAll('input');
+  assert.deepEqual(languages.map((input) => input.value), AT.C.LANGS.map((lang: ATNamespace) => lang.code));
+  assert.deepEqual(languages.filter((input) => input.checked).map((input) => input.value), ['ja', 'de']);
+  assert.equal(ruleItems(field('ruleList'))[0]!.querySelectorAll('span.tag')[0]!.textContent, msg('options_ruleNever'));
   assert.equal(field('save').textContent, msg('options_save'));
-  assert.equal(field('reset').textContent, msg('options_reset'));
-  assert.equal(field('addRule').textContent, msg('options_addRule'));
-  assert.equal(field('testEngine').textContent, msg('options_test'));
   assert.equal(field('downloadModel').textContent, msg('options_download'));
-  assert.equal(field('cancelDownload').textContent, msg('options_cancel'));
   assert.equal(field('pickModel').textContent, msg('options_pickFile'));
   assert.equal(field('prepareModel').textContent, msg('options_prepare'));
+  assert.deepEqual(env.writes, [], 'opening preferences never enables translation');
+  assert.deepEqual(env.runtimeMessages, [], 'opening preferences does not probe the engine');
+});
 
-  // The on-device card starts from the stored settings: no model selected and
-  // the budget it was saved with.
-  assert.equal(field('localModel').children.length, 1, 'no model is stored, so only the empty choice is offered');
+test('an empty store starts with no automatic languages or URLs', async () => {
+  const { field } = await boot();
+  assert.equal(field('targetLang').value, 'en');
   assert.equal(field('localModel').value, '');
-  assert.equal(field('localMaxTokens').value, '2048');
-
-  const items = ruleItems(field('ruleList'));
-  assert.equal(items.length, 2);
-  assert.deepEqual(items.map((item) => item.querySelectorAll('code')[0]!.textContent), ['news.example.com', 'example.org/news/*']);
-  assert.deepEqual(
-    items.map((item) => item.querySelectorAll('span.tag')[0]!.dataset.action),
-    ['never', 'always']
-  );
-  assert.equal(items[0]!.querySelectorAll('button')[0]!.textContent, msg('options_remove'));
-
-  assert.deepEqual(
-    env.runtimeMessages.map((message) => message.type),
-    [AT.C.MSG.LOCAL_GET_STATUS],
-    'boot reads storage; the single background read is the on-device host status'
-  );
-  assert.deepEqual(env.writes, [], 'boot never writes settings back');
-});
-
-test('junk in storage renders a coerced form, never a half-filled one', async () => {
-  const env = await boot({
-    stored: {
-      enabled: 'yes',
-      targetLang: 'klingon',
-      sourceLang: 'de',
-      localModelId: 42,
-      localMaxTokens: 'abc',
-      maxNodes: {},
-      showBadge: 'true',
-      debug: 'yes',
-      siteRules: [
-        { pattern: '!!!', action: 'never' },
-        { pattern: 'ok.example.com', action: 'maybe' },
-        { pattern: 'good.example.com', action: 'always' }
-      ]
-    }
-  });
-  const { field } = env;
-
-  assert.equal(field('targetLang').value, 'en', 'an unknown language falls back to the default target');
-  assert.equal(field('sourceLang').value, 'de', 'a source in the catalogue is kept as it stands');
-  assert.equal(field('localModel').value, '', 'a non-string model id is dropped');
-  assert.equal(field('localMaxTokens').value, '1024', 'a non-numeric budget falls back');
-  assert.equal(field('maxNodes').value, '600');
-  assert.equal(field('enabled').checked, false, 'enabled is strictly true, a junk value means off');
-  assert.equal(field('showBadge').checked, true);
-  assert.equal(field('debug').checked, false, 'debug is strictly true');
-
-  const items = ruleItems(field('ruleList'));
-  assert.equal(items.length, 1, 'only the rule with a usable pattern and action survives');
-  assert.equal(items[0]!.querySelectorAll('code')[0]!.textContent, 'good.example.com');
-  assert.deepEqual(env.writes, []);
-});
-
-test('an empty store boots the defaults and the empty rule row', async () => {
-  const env = await boot();
-  const { field } = env;
-
-  assert.equal(field('targetLang').value, 'en', 'the default target is the UI language');
-  assert.equal(field('sourceLang').value, 'auto');
-  assert.equal(field('localModel').value, '', 'no model is selected on a fresh install');
   assert.equal(field('localModel').children.length, 1);
-  assert.equal(field('localMaxTokens').value, '1024');
-  assert.equal(field('maxNodes').value, '600');
-  assert.deepEqual([field('enabled').checked, field('showBadge').checked, field('debug').checked], [false, true, false], 'nothing translates until onboarding finishes');
-
-  const list = field('ruleList');
-  assert.equal(list.children.length, 1);
-  assert.equal(list.children[0]!.className, 'empty');
-  assert.equal(list.children[0]!.textContent, msg('options_noRules'));
+  assert.equal(field('enabled').checked, false);
+  assert.ok(field('alwaysTranslateLanguages').querySelectorAll('input').every((input) => !input.checked));
+  assert.equal(field('ruleList').children[0]!.textContent, msg('options_noRules'));
 });
 
-test('saving writes one record with the typed values, coerced', async () => {
-  const env = await boot({ stored: storedSettings({ maxNodes: 600 }) });
-  const { AT, field } = env;
-
-  field('enabled').checked = true;
-  field('showBadge').checked = false;
-  field('debug').checked = true;
-  field('targetLang').value = 'ja';
-  field('sourceLang').value = 'ko';
-  field('localMaxTokens').value = '2048';
-  field('maxNodes').value = '900';
-  await click(field('save'));
-
-  assert.equal(env.writes.length, 1, 'one save is one write');
-  assert.deepEqual(
-    env.runtimeMessages.map((message) => message.type),
-    [AT.C.MSG.LOCAL_GET_STATUS],
-    'the page writes storage itself, no at/set-settings round trip'
-  );
-  const saved = savedSettings(env);
-  assert.equal(saved.targetLang, 'ja');
-  assert.equal(saved.sourceLang, 'ko');
-  assert.equal(saved.enabled, true);
-  assert.equal(saved.showBadge, false);
-  assert.equal(saved.debug, true);
-  assert.equal(saved.version, 1);
-  assert.equal(typeof saved.localMaxTokens, 'number', 'the budget reaches storage as a number');
-  assert.equal(saved.localMaxTokens, 2048);
-  assert.equal(saved.maxNodes, 900);
-  assert.equal(saved.engine, 'local', 'the engine stays local');
-  assert.equal('apiKey' in saved, false);
-  assert.equal(AT.debug, true, 'the debug flag reaches the logger');
-
-  assert.equal(field('saveStatus').textContent, msg('options_saved'));
-  assert.equal(field('saveStatus').dataset.kind, 'ok');
-  assert.equal(field('localMaxTokens').value, '2048', 'the form repaints from what was stored');
-});
-
-test('blank limits are clamped to their floors, never stored as NaN', async () => {
-  const env = await boot({ stored: storedSettings({ maxNodes: 600 }) });
+test('saving real language edits enables autodetection without erasing internal preferences', async () => {
+  const original = storedSettings({
+    enabled: false, sourceLang: 'ko', targetLang: 'ko', maxNodes: 900,
+    localMaxTokens: 2048, debug: true, showBadge: false,
+    alwaysTranslateLanguages: ['ja'],
+    siteRules: [{ pattern: 'blocked.example', action: 'never' }]
+  });
+  const env = await boot({ stored: original });
   const { field } = env;
-
-  field('localMaxTokens').value = '';
-  field('maxNodes').value = '';
+  field('targetLang').value = 'de';
+  for (const input of field('alwaysTranslateLanguages').querySelectorAll('input')) {
+    input.checked = input.value === 'en' || input.value === 'de';
+  }
   await click(field('save'));
+  assert.equal(env.writes.length, 1);
+  assert.deepEqual(savedSettings(env), {
+    ...original, enabled: true, sourceLang: 'auto', targetLang: 'de', alwaysTranslateLanguages: ['en', 'de']
+  }, 'only the explicit preferences change, including a harmless target-language selection');
+  assert.equal(field('saveStatus').dataset.kind, 'ok');
 
-  const saved = savedSettings(env);
-  assert.equal(saved.localMaxTokens, 128, 'an empty budget clamps to its floor instead of becoming NaN');
-  assert.equal(saved.maxNodes, 10);
-  assert.equal(Number.isNaN(saved.localMaxTokens), false);
-  assert.equal(field('localMaxTokens').value, '128');
-  assert.equal(field('maxNodes').value, '10');
+  for (const input of field('alwaysTranslateLanguages').querySelectorAll('input')) input.checked = false;
+  await click(field('save'));
+  assert.deepEqual(savedSettings(env).alwaysTranslateLanguages, [], 'unchecking all languages persists');
+  const reopened = await boot({ stored: savedSettings(env) });
+  assert.equal(reopened.field('targetLang').value, 'de');
+  assert.ok(reopened.field('alwaysTranslateLanguages').querySelectorAll('input').every((input) => !input.checked));
+});
+
+test('parallel translation defaults on and a serial opt-out persists across reopening', async () => {
+  const env = await boot();
+  assert.equal(env.field('parallelTranslation').checked, true);
+  await click(env.field('save'));
+  assert.equal(savedSettings(env).translationConcurrency, 2);
+  env.field('parallelTranslation').checked = false;
+  await click(env.field('save'));
+  assert.equal(savedSettings(env).translationConcurrency, 1);
+  const reopened = await boot({ stored: savedSettings(env) });
+  assert.equal(reopened.field('parallelTranslation').checked, false);
+  reopened.field('targetLang').value = 'ja';
+  await click(reopened.field('save'));
+  assert.equal(savedSettings(reopened).translationConcurrency, 1);
+  reopened.field('parallelTranslation').checked = true;
+  await click(reopened.field('save'));
+  assert.equal(savedSettings(reopened).translationConcurrency, 2);
+  const parallel = await boot({ stored: savedSettings(reopened) });
+  assert.equal(parallel.field('parallelTranslation').checked, true);
+});
+
+test('missing or invalid stored concurrency uses the parallel default', async () => {
+  const missing = storedSettings();
+  delete missing.translationConcurrency;
+  for (const stored of [missing, storedSettings({ translationConcurrency: 0 }), storedSettings({ translationConcurrency: '1' })]) {
+    const env = await boot({ stored });
+    assert.equal(env.field('parallelTranslation').checked, true);
+    await click(env.field('save'));
+    assert.equal(savedSettings(env).translationConcurrency, 2);
+  }
+});
+
+test('saving preserves internal preferences changed by another context', async () => {
+  const env = await boot({ stored: storedSettings() });
+  env.store.settings.maxNodes = 1200;
+  env.store.settings.localMaxTokens = 4096;
+  env.store.settings.showBadge = false;
+  env.field('targetLang').value = 'ja';
+  await click(env.field('save'));
+  assert.equal(savedSettings(env).maxNodes, 1200);
+  assert.equal(savedSettings(env).localMaxTokens, 4096);
+  assert.equal(savedSettings(env).showBadge, false);
 });
 
 test('a failing storage write is not reported as saved', async () => {
   const env = await boot({ stored: storedSettings() });
   const before = clone(env.store.settings);
   env.failWrites('quota exceeded');
-  env.field('localMaxTokens').value = '3000';
+  env.field('targetLang').value = 'ja';
 
   await click(env.field('save'));
 
   assert.deepEqual(env.writes, [], 'nothing was written');
   assert.deepEqual(env.store.settings, before, 'storage still holds the old settings');
-  assert.match(env.field('saveStatus').textContent, /Invalid server URL|quota exceeded/, 'an error message, never a success, on a failed save');
+  assert.match(env.field('saveStatus').textContent, /quota exceeded/, 'an error message, never a success, on a failed save');
   assert.equal(env.field('saveStatus').dataset.kind, 'error');
-});
-
-test('testing the engine probes with exactly the typed target language', async () => {
-  const env = await boot({
-    stored: storedSettings({ targetLang: 'ko' }),
-    replies: { 'at/test-engine': () => ({ ok: true, result: { output: 'ok', detected: 'ko', ms: 1 } }) }
-  });
-  const { field } = env;
-
-  field('targetLang').value = 'ja';
-  await click(field('testEngine'));
-
-  const probes = env.runtimeMessages.filter((message) => message.type === 'at/test-engine');
-  assert.equal(probes.length, 1, 'one click is one probe');
-  assert.equal(probes[0]!.type, 'at/test-engine');
-  assert.equal(probes[0]!.target, 'ja');
-  assert.equal((probes[0] as ATNamespace).draft.targetLang, 'ja');
-  assert.equal(probes[0]!.type, 'at/test-engine');
-  assert.equal(probes[0]!.target, 'ja');
-  assert.equal((probes[0] as ATNamespace).draft.targetLang, 'ja', 'the probe carries what is typed, not what is stored');
-  assert.deepEqual(env.writes, [], 'testing must not save anything');
-});
-
-test('a successful probe renders the output and the elapsed time, no leftover placeholders', async () => {
-  let resolveProbe!: (value: ATNamespace) => void;
-  const probe = new Promise<ATNamespace>((resolve) => {
-    resolveProbe = resolve;
-  });
-  const env = await boot({
-    stored: storedSettings(),
-    replies: { 'at/test-engine': () => probe }
-  });
-  const { field } = env;
-
-  const flying = click(field('testEngine'));
-  await flush();
-  assert.equal(field('testStatus').textContent, msg('options_testing'), 'the row reports the running probe');
-  assert.equal(field('testStatus').dataset.kind, 'info');
-
-  resolveProbe({ ok: true, result: { output: 'Hallo Welt', detected: 'ja', ms: 42 } });
-  await flying;
-
-  const rendered = field('testStatus').textContent;
-  assert.equal(rendered, 'Hallo Welt (42 ms)');
-  assert.ok(rendered.includes('Hallo Welt'), 'the probe output is shown');
-  assert.ok(/42 ms/.test(rendered), 'the elapsed time is shown');
-  assert.doesNotMatch(rendered, /\$\d\$/, 'no unexpanded substitution placeholder survives');
-  assert.ok(!rendered.includes('$'), 'no dollar sign at all in the rendered status');
-  assert.equal(field('testStatus').dataset.kind, 'ok');
-});
-
-test('a probe the model answered with nothing is not reported as a success', async () => {
-  const env = await boot({
-    stored: storedSettings(),
-    replies: { 'at/test-engine': { ok: true, result: { output: '   ', detected: null, ms: 7 } } }
-  });
-  await click(env.field('testEngine'));
-
-  const status = env.field('testStatus');
-  assert.match(status.textContent, /ms\)/, 'the timing line renders even for an empty answer');
-  assert.ok(!String(status.textContent).includes('undefined'), 'a missing output is not spelled out');
-});
-
-test('a failed probe renders the error and never claims success', async () => {
-  const env = await boot({ stored: storedSettings() });
-  const { field } = env;
-
-  env.replies['at/test-engine'] = { ok: false, error: 'Rate limit exceeded', code: 'rate-limit' };
-  await click(field('testEngine'));
-  assert.equal(field('testStatus').textContent, '[rate-limit] Rate limit exceeded');
-  assert.equal(field('testStatus').dataset.kind, 'error');
-  assert.ok(!/ms\)/.test(field('testStatus').textContent), 'a failure never shows a timing line');
-
-  env.replies['at/test-engine'] = { ok: false, error: 'boom' };
-  await click(field('testEngine'));
-  assert.equal(field('testStatus').textContent, 'boom', 'no empty code bracket without a code');
-  assert.equal(field('testStatus').dataset.kind, 'error');
-  assert.ok(!field('testStatus').textContent.includes('['));
-
-  delete env.replies['at/test-engine'];
-  await click(field('testEngine'));
-  assert.equal(
-    field('testStatus').textContent,
-    `[no-response] no listener answered ${env.AT.C.MSG.TEST_ENGINE}`,
-    'a closed channel is reported, not swallowed'
-  );
-  assert.equal(field('testStatus').dataset.kind, 'error');
-  assert.notEqual(field('testStatus').textContent, msg('options_saved'));
-  assert.deepEqual(env.writes, [], 'a failed probe writes nothing');
 });
 
 test('the rule list renders stored rules and an empty-state row', async () => {
@@ -937,7 +757,6 @@ test('adding a rule canonicalises the pattern, persists it and re-renders the li
   const { field } = env;
 
   field('rulePattern').value = 'News.Example.com/News/*';
-  field('ruleAction').value = 'always';
   await click(field('addRule'));
 
   assert.equal(env.writes.length, 1, 'adding a rule is one save');
@@ -946,7 +765,7 @@ test('adding a rule canonicalises the pattern, persists it and re-renders the li
     { pattern: 'news.example.com', action: 'never' },
     // Hosts fold to lower case; a path keeps the casing the server uses.
     { pattern: 'news.example.com/News/*', action: 'always' }
-  ], 'the host is folded, the path and the typed action are kept');
+  ], 'the host is folded, the path is kept and new rules always translate');
   assert.equal(field('rulePattern').value, '', 'the input is cleared for the next rule');
   assert.equal(field('saveStatus').dataset.kind, 'ok');
   assert.deepEqual(
@@ -959,26 +778,31 @@ test('adding a rule canonicalises the pattern, persists it and re-renders the li
   );
 });
 
-test('re-adding a pattern replaces its action, a scheme-qualified one is its own rule', async () => {
+test('adding an existing exclusion cannot silently turn it into automatic translation', async () => {
   const env = await boot({ stored: storedSettings({ siteRules: [{ pattern: 'news.example.com', action: 'never' }] }) });
   const { field } = env;
-
-  field('rulePattern').value = 'news.example.com/';
-  field('ruleAction').value = 'always';
+  field('rulePattern').value = 'news.example.com';
   await click(field('addRule'));
-  assert.deepEqual(savedSettings(env).siteRules, [{ pattern: 'news.example.com', action: 'always' }], 'one rule, flipped action');
-  assert.equal(ruleItems(field('ruleList')).length, 1);
-  assert.equal(ruleItems(field('ruleList'))[0]!.querySelectorAll('span.tag')[0]!.textContent, msg('options_ruleAlways'));
-
-  field('rulePattern').value = 'https://news.example.com';
-  field('ruleAction').value = 'never';
+  assert.deepEqual(env.writes, []);
+  assert.equal(field('saveStatus').textContent, msg('options_blockedRule'));
+  assert.equal(ruleItems(field('ruleList'))[0]!.querySelectorAll('span.tag')[0]!.dataset.action, 'never');
+  await click(ruleItems(field('ruleList'))[0]!.querySelectorAll('button')[0]!);
+  field('rulePattern').value = 'news.example.com';
   await click(field('addRule'));
-  assert.deepEqual(
-    savedSettings(env).siteRules.map((rule: ATNamespace) => rule.pattern),
-    ['news.example.com', 'https://news.example.com'],
-    'the scheme is part of the rule, so it is kept next to the bare host'
-  );
-  assert.equal(env.writes.length, 2);
+  assert.deepEqual(savedSettings(env).siteRules, [{ pattern: 'news.example.com', action: 'always' }]);
+});
+
+test('single and recursive globs persist distinctly with an optional scheme', async () => {
+  const env = await boot({ stored: storedSettings() });
+  for (const pattern of ['example.com/news/*', 'example.com/news/**', 'https://*.example.org/**']) {
+    env.field('rulePattern').value = pattern;
+    await click(env.field('addRule'));
+  }
+  assert.deepEqual(savedSettings(env).siteRules, [
+    { pattern: 'example.com/news/*', action: 'always' },
+    { pattern: 'example.com/news/**', action: 'always' },
+    { pattern: 'https://*.example.org/**', action: 'always' }
+  ]);
 });
 
 test('a junk rule pattern is refused without touching storage', async () => {
@@ -986,7 +810,6 @@ test('a junk rule pattern is refused without touching storage', async () => {
   const { field } = env;
 
   field('rulePattern').value = '   ';
-  field('ruleAction').value = 'always';
   await click(field('addRule'));
 
   assert.deepEqual(env.writes, [], 'nothing is saved for a pattern that cannot be parsed');
@@ -1000,13 +823,12 @@ test('Enter in the pattern field adds the rule, any other key does not', async (
   const { field } = env;
 
   field('rulePattern').value = 'example.com';
-  field('ruleAction').value = 'never';
   await fire(field('rulePattern'), 'keydown', { key: 'a' });
   assert.deepEqual(env.writes, [], 'typing a character must not add anything');
 
   await fire(field('rulePattern'), 'keydown', { key: 'Enter' });
   assert.equal(env.writes.length, 1, 'Enter goes through the Add rule button');
-  assert.deepEqual(savedSettings(env).siteRules, [{ pattern: 'example.com', action: 'never' }]);
+  assert.deepEqual(savedSettings(env).siteRules, [{ pattern: 'example.com', action: 'always' }]);
 });
 
 test('removing a rule drops it from storage and from the list', async () => {
@@ -1031,83 +853,12 @@ test('removing a rule drops it from storage and from the list', async () => {
   assert.equal(field('saveStatus').dataset.kind, 'ok');
   assert.deepEqual(
     env.runtimeMessages.map((message) => message.type),
-    [env.AT.C.MSG.LOCAL_GET_STATUS],
+    [],
     'the removal is a storage write, no at/remove-site-rule'
   );
 });
 
-test('reset writes the defaults and repaints the form', async () => {
-  const env = await boot({
-    uiLang: 'ja',
-    stored: storedSettings({
-      targetLang: 'ko',
-      sourceLang: 'ja',
-      localMaxTokens: 2048,
-      maxNodes: 900,
-      enabled: false,
-      showBadge: false,
-      debug: true,
-      siteRules: [{ pattern: 'news.example.com', action: 'never' }]
-    })
-  });
-  const { AT, field } = env;
-
-  field('debug').checked = true;
-  await click(field('save'));
-  assert.equal(AT.debug, true, 'the saved debug flag turns the logger on');
-  env.writes.length = 0;
-
-  await click(field('reset'));
-
-  assert.equal(env.writes.length, 1, 'reset is one write');
-  const saved = savedSettings(env);
-  assert.equal(saved.localModelId, '', 'a reset forgets the chosen model');
-  assert.equal(saved.targetLang, 'ja', 'the default target follows the UI language');
-  assert.equal(saved.sourceLang, 'auto');
-  assert.equal(saved.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS);
-  assert.equal(saved.maxNodes, AT.C.DEFAULT_MAX_NODES);
-  assert.deepEqual(saved.siteRules, []);
-  assert.equal(saved.engine, 'local', 'the defaults keep the local engine');
-  assert.equal('endpoints' in saved, false, 'no legacy endpoint blob is resurrected');
-  assert.deepEqual([field('enabled').checked, field('showBadge').checked, field('debug').checked], [false, true, false], 'nothing translates until onboarding finishes');
-  assert.equal(field('localModel').value, '');
-  assert.equal(field('localMaxTokens').value, '1024');
-  assert.equal(field('maxNodes').value, '600');
-  assert.equal(field('ruleList').children[0]!.className, 'empty', 'the rule list goes back to the empty row');
-  assert.equal(field('saveStatus').textContent, msg('options_resetDone'));
-  assert.equal(field('saveStatus').dataset.kind, 'ok');
-  assert.equal(AT.debug, false, 'the restored debug flag turns the logger back off');
-});
-
-// --- on-device models ------------------------------------------------------
-
-test('the local support line describes the host state', async () => {
-  const offline = await boot();
-  assert.equal(
-    offline.field('localSupport').textContent,
-    msg('options_localUnsupported'),
-    'a host that never answers counts as unsupported'
-  );
-
-  const env = await boot({
-    stored: storedSettings(),
-    replies: {
-      'at/local-get-status': {
-        ok: true,
-        supported: true,
-        status: { state: 'ready', modelName: 'plamo-3-translate-0.8b-Q4_K_M.gguf', loadMs: 12 }
-      }
-    }
-  });
-
-  assert.equal(
-    env.field('localSupport').textContent,
-    `${msg('options_stateReady')} · plamo-3-translate-0.8b-Q4_K_M.gguf (12 ms)`,
-    'the host describes itself through the catalogue'
-  );
-});
-
-test('the injected models render in the picker, the list and the usage line', async () => {
+test('the installed models render in the picker and the list', async () => {
   const empty = await boot({ stored: storedSettings() });
   assert.equal(empty.field('modelList').children[0]!.className, 'empty');
   assert.equal(empty.field('modelList').children[0]!.textContent, msg('options_noModels'));
@@ -1139,7 +890,6 @@ test('the injected models render in the picker, the list and the usage line', as
     true,
     'the stored model is offered in the picker'
   );
-  assert.equal(field('localMaxTokens').value, '1024', 'the budget is the stored number');
 
   const items = field('modelList').querySelectorAll('li.rule');
   assert.deepEqual(items.map((item) => item.querySelectorAll('code')[0]!.textContent), ['beta.task', 'alpha.task']);
@@ -1148,10 +898,9 @@ test('the injected models render in the picker, the list and the usage line', as
     ['547 MiB', '● 547 MiB'],
     'the chosen model carries the bullet'
   );
-  assert.equal(field('localUsage').textContent, msg('options_usage', ['5.0 GiB', '20.0 GiB', '2', '1.1 GiB']));
 });
 
-test('the usage line admits when the browser may evict the model', async () => {
+test('model status warns when the browser may evict the model', async () => {
   const env = await boot({
     models: {
       rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' })],
@@ -1159,8 +908,8 @@ test('the usage line admits when the browser may evict the model', async () => {
     }
   });
   assert.equal(
-    env.field('localUsage').textContent,
-    `${msg('options_usage', ['5.0 GiB', '20.0 GiB', '1', '547 MiB'])} · ${msg('options_notPersisted')}`,
+    env.field('modelStatus').textContent,
+    msg('options_notPersisted'),
     'an unpinned store is named, not left to vanish between visits'
   );
 });
@@ -1246,7 +995,6 @@ test('downloading the ONNX card fetches the graph and its parts, then registers 
   });
   const { AT, field } = env;
 
-  assert.equal(field('modelUrl').value, card.url, 'the card the extension can fetch is prefilled');
   assert.equal(field('modelProgress').hidden, true, 'nothing is in flight before the click');
   assert.equal(env.installs.length, 0, 'boot never downloads');
   assert.equal(env.model.downloads.length, 0, 'boot never downloads');
@@ -1306,27 +1054,84 @@ test('downloading the ONNX card fetches the graph and its parts, then registers 
   );
 });
 
-test('saving stores the on-device choices, clamping the budget', async () => {
+test('selecting an installed model persists it without exposing its token budget', async () => {
   const env = await boot({
-    stored: storedSettings(),
+    stored: storedSettings({ localMaxTokens: 2048 }),
     models: { rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' })] }
   });
-  const { AT, field } = env;
+  env.field('localModel').value = 'alpha-task';
+  await click(env.field('save'));
+  assert.equal(savedSettings(env).localModelId, 'alpha-task');
+  assert.equal(savedSettings(env).localMaxTokens, 2048);
+});
 
-  field('localModel').value = 'alpha-task';
-  field('localMaxTokens').value = '2048';
-  await click(field('save'));
+test('loading an installed model selects it only after preparation succeeds', async () => {
+  const env = await boot({
+    stored: storedSettings({ localModelId: 'alpha-task' }),
+    models: { rows: [modelRow({ id: 'alpha-task' }), modelRow({ id: 'beta-task' })] },
+    replies: { 'at/local-prepare': { ok: false, error: 'cannot load' } }
+  });
+  env.field('localModel').value = 'beta-task';
+  await click(env.field('prepareModel'));
+  await idle();
+  assert.equal(env.field('modelStatus').textContent, 'cannot load');
+  assert.deepEqual(env.writes, []);
+  env.replies['at/local-prepare'] = { ok: true };
+  await click(env.field('prepareModel'));
+  await idle();
+  assert.equal(savedSettings(env).localModelId, 'beta-task');
+  assert.equal(env.field('localModel').value, 'beta-task');
+  assert.equal(env.field('modelStatus').textContent, msg('options_prepared'));
+});
 
-  assert.equal(env.writes.length, 1, 'one save is one write');
-  const saved = savedSettings(env);
-  assert.equal(saved.localModelId, 'alpha-task');
-  assert.equal(typeof saved.localMaxTokens, 'number', 'the budget reaches storage as a number');
-  assert.equal(saved.localMaxTokens, 2048);
+test('disk import uses the real model validation and stored-file workflow', async () => {
+  const env = await boot({ replies: { 'at/local-prepare': { ok: true } } });
+  const graph = new File([new Uint8Array(3_000_000)], 'model_q4f16.onnx');
+  env.field('modelFile').files = [graph];
+  await fire(env.field('modelFile'), 'change');
+  await idle();
+  assert.equal(env.field('modelStatus').dataset.kind, 'error');
+  assert.match(env.field('modelStatus').textContent, /missing-tokenizer/);
+  assert.deepEqual(env.model.rows(), [], 'incomplete selections do not register a model');
+  assert.deepEqual(env.writes, [], 'validation failures do not alter preferences');
+  assert.equal(env.field('modelFile').value, '', 'the same selection can be tried again');
 
-  field('localMaxTokens').value = '999999';
-  await click(field('save'));
+  env.field('modelFile').files = [
+    graph,
+    ...['tokenizer.json', 'tokenizer_config.json', 'config.json'].map((name) => new File(['{}'], name))
+  ];
+  await fire(env.field('modelFile'), 'change');
+  await idle();
+  const rows = env.model.rows();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.sourceUrl, '', 'local imports carry no download URL');
+  assert.equal(savedSettings(env).localModelId, rows[0]!.id);
+  assert.equal(env.field('localModel').value, rows[0]!.id);
+  for (const name of ['tokenizer.json', 'tokenizer_config.json', 'config.json']) {
+    assert.equal((await env.AT.modelstore.readPart(rows[0]!.id, name)).size, 2);
+  }
+  assert.equal(env.field('modelStatus').dataset.kind, 'ok');
+  assert.equal(env.field('modelProgress').hidden, true);
+  assert.equal(env.field('pickModel').disabled, false);
+  assert.deepEqual(env.model.fetchedUrls, [], 'disk import never downloads replacement bytes');
+});
 
-  const second = savedSettings(env);
-  assert.equal(second.localMaxTokens, AT.local.MAX_MAX_TOKENS, 'an oversized budget clamps to the ceiling');
-  assert.equal(field('localMaxTokens').value, String(AT.local.MAX_MAX_TOKENS), 'the form repaints from storage');
+test('a stored import that fails to load preserves the working selection', async () => {
+  const env = await boot({
+    stored: storedSettings({ localModelId: 'working-model' }),
+    models: { rows: [modelRow({ id: 'working-model', name: 'working.onnx' })] },
+    replies: { 'at/local-prepare': { ok: false, error: 'invalid graph' } }
+  });
+  env.field('modelFile').files = [
+    new File([new Uint8Array(3_000_000)], 'broken.onnx'),
+    new File(['{}'], 'tokenizer.json'),
+    new File(['{}'], 'tokenizer_config.json')
+  ];
+  await fire(env.field('modelFile'), 'change');
+  await idle();
+  assert.equal(env.model.rows().length, 2, 'the failed import remains removable without replacing the working model');
+  assert.equal(env.store.settings.localModelId, 'working-model');
+  assert.equal(env.field('localModel').value, 'working-model');
+  assert.equal(env.field('modelStatus').textContent, msg('options_modelStored', 'invalid graph'));
+  assert.equal(env.field('modelStatus').dataset.kind, 'error');
 });

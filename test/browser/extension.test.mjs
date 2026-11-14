@@ -36,7 +36,7 @@ async function stopPolicy() {
       await AT.sendMessage({type:AT.C.MSG.SET_TAB_ENABLED,tabId:tab.id,enabled:false});
     }
   });
-  await policy({ enabled: false, siteRules: [] });
+  await policy({ enabled: false, siteRules: [], alwaysTranslateLanguages: [], translationConcurrency: 1 });
   await model({ release: true, failWarmup: false }).catch(() => {});
   for (const page of context.pages()) if (page !== control) await page.close();
 }
@@ -72,7 +72,8 @@ test.before(async () => {
   control = await context.newPage();
   await control.goto(`chrome-extension://${extensionId}/options.html`);
   await control.waitForFunction(() => !!globalThis.AT?.settings);
-  // Wait for the actual host listener, created by the options status probe.
+  // Compact settings do not start inference merely to render the form.
+  await control.evaluate(() => AT.sendMessage({ type: AT.C.MSG.LOCAL_GET_STATUS }));
   await until(async () => (await model().catch(() => null))?.ok === true, 'offscreen host');
 }, { timeout: 30000 });
 
@@ -193,6 +194,47 @@ check('native MutationObserver catches content inserted during the initial infer
   await page.waitForFunction(() => document.querySelector('#inserted').textContent === '추론 중 추가된 문단');
 });
 
+check('nested viewport scroll finishes in-flight text and admits newly visible prose', async () => {
+  const page = await fixture('/nested-scroll', `
+    <div id="pane" style="height:180px;overflow:auto;border:1px solid;padding:8px">
+      <div id="first">Original text</div>
+      <div style="height:1600px"></div>
+      <div id="second">First paragraph</div>
+      <div style="height:1600px"></div>
+      <div id="third">Hello world</div>
+    </div>`);
+  await page.evaluate(() => {
+    globalThis.originalNodes = ['first', 'second', 'third'].map(id => document.getElementById(id).firstChild);
+  });
+  await model({ hold: true });
+  await policy({ sourceLang: 'en', targetLang: 'ko' });
+  await select(page, true);
+  await until(async () => (await model()).pending === 1, 'first viewport request held');
+  await page.evaluate(() => {
+    const pane = document.querySelector('#pane');
+    pane.scrollTop = document.querySelector('#second').offsetTop - pane.offsetTop - 30;
+  });
+  await page.waitForFunction(() => document.querySelector('#first').getBoundingClientRect().bottom < document.querySelector('#pane').getBoundingClientRect().top);
+  await model({ release: true });
+  await page.waitForFunction(() => originalNodes[0].data === '원문 번역' && originalNodes[1].data === '첫 문단');
+  assert.equal(await page.locator('#third').textContent(), 'Hello world', 'unseen prose remains parked');
+  await page.evaluate(() => {
+    const pane = document.querySelector('#pane');
+    pane.scrollTop = pane.scrollHeight;
+  });
+  await page.waitForFunction(() => originalNodes[2].data === '안녕하세요');
+  await page.evaluate(() => { document.querySelector('#pane').scrollTop = 0; });
+  assert.equal(await page.locator('#first').textContent(), '원문 번역', 'scrolling back does not restore completed text');
+  await screenshot(page, 'extension-nested-scroll-retained');
+  await select(page, false);
+  await page.waitForFunction(() => originalNodes[0].data === 'Original text');
+  assert.deepEqual(await page.evaluate(() => ({
+    source: originalNodes.map(node => node.data),
+    identity: originalNodes.every((node, index) => node === document.getElementById(['first', 'second', 'third'][index]).firstChild),
+    hosts: document.querySelectorAll('at-translation-text').length
+  })), { source: ['Original text', 'First paragraph', 'Hello world'], identity: true, hosts: 0 });
+});
+
 check('failed replacement keeps the selected model and both native files recoverable', async () => {
   const before = await control.evaluate(() => AT.settings.load());
   await model({ failWarmup: true });
@@ -229,10 +271,10 @@ check('a terminated service worker restores already translated tabs after restar
   await session.detach();
 });
 
-check('two same-site tabs require independent consent, including after activation and reload', async () => {
+check('without automatic preferences, same-site tabs require independent consent', async () => {
   const a=await fixture('/consent-a','<p>Original text</p>');
   const b=await fixture('/consent-b','<p>Original text</p>');
-  await policy({enabled:true, sourceLang:'en',targetLang:'ko',siteRules:[{pattern:'127.0.0.1',action:'always'}]});
+  await policy({enabled:true, sourceLang:'en',targetLang:'ko',siteRules:[],alwaysTranslateLanguages:[]});
   await a.bringToFront(); await b.bringToFront(); await b.waitForTimeout(350);
   assert.equal(await a.locator('p').innerText(),'Original text'); assert.equal(await b.locator('p').innerText(),'Original text');
   await select(a,true); await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
@@ -240,7 +282,8 @@ check('two same-site tabs require independent consent, including after activatio
   await a.reload(); await a.bringToFront();await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
   await select(b,true);await b.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
   await select(a,false);await a.waitForFunction(()=>document.querySelector('p').textContent==='Original text');
-  assert.equal(await b.locator('p').innerText(),'원문 번역');
+  // Completion commits before the finite visual handoff exposes the slot.
+  await b.waitForFunction(() => document.querySelector('p').innerText === '원문 번역');
   await a.reload();await a.waitForTimeout(350);assert.equal(await a.locator('p').innerText(),'Original text');
   await screenshot(control,'options-bound-tab-off');
 });
@@ -274,6 +317,83 @@ check('separate options window remains bound to the originating tab and disables
 check('unbound options cannot silently choose an active web tab', async () => {
   await control.goto('chrome-extension://'+extensionId+'/options.html');await optionsReady(control);
   assert.equal(await control.locator('#enabled').isDisabled(),true);assert.equal(await control.locator('#enabled').isChecked(),false);
+});
+
+check('compact settings enroll matching URLs and respect a tab-level OFF', async () => {
+  await control.goto(`chrome-extension://${extensionId}/options.html`); await optionsReady(control);
+  await control.locator('#targetLang').selectOption('ko');
+  await control.locator('#rulePattern').fill(`${origin}/automatic/**`);
+  await control.locator('#addRule').click();
+  await until(async () => (await control.evaluate(() => AT.settings.load())).siteRules.length === 1, 'saved URL rule');
+  await screenshot(control, 'options-compact-desktop');
+  const a = await fixture('/automatic/a/b', '<p>Original text</p>');
+  await a.bringToFront(); await a.waitForFunction(() => document.querySelector('p').textContent === '원문 번역');
+  await select(a, false);
+  await a.reload(); await a.waitForTimeout(350);
+  assert.equal(await a.locator('p').innerText(), 'Original text');
+  const b = await fixture('/automatic/c', '<p>Original text</p>');
+  await b.bringToFront(); await b.waitForFunction(() => document.querySelector('p').textContent === '원문 번역');
+  await policy({siteRules:[]});
+  await b.waitForFunction(() => document.querySelector('p').textContent === 'Original text');
+});
+
+check('source-language checklist enrolls an English page without a URL rule', async () => {
+  await control.goto(`chrome-extension://${extensionId}/options.html`); await optionsReady(control);
+  await control.locator('#targetLang').selectOption('ko');
+  await control.locator('#alwaysTranslateLanguages input[value="en"]').check();
+  await control.locator('#save').click();
+  await until(async () => (await control.evaluate(() => AT.settings.load())).alwaysTranslateLanguages.includes('en'), 'saved language preference');
+  const english = 'This article explains how people read information on the internet. Readers usually begin with the title and continue through the main text before looking at related stories. The translation should follow this order and preserve the original information.';
+  const page = await fixture('/language-auto', `<p translate="no">${english.repeat(5)}</p><p id="translated">Original text</p>`);
+  await page.bringToFront();
+  await page.waitForFunction(() => document.querySelector('#translated').textContent === '원문 번역');
+  await control.setViewportSize({width:390,height:844});
+  assert.ok(await control.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+  await screenshot(control, 'options-compact-mobile');
+  await control.setViewportSize({width:1100,height:800});
+});
+
+check('parallel option admits two visible units while excluding identity and numeric metadata', async () => {
+  await control.goto(`chrome-extension://${extensionId}/options.html`); await optionsReady(control);
+  assert.equal(await control.locator('#parallelTranslation').isChecked(), false);
+  await control.locator('#parallelTranslation').check();
+  await control.locator('#targetLang').selectOption('ko');
+  await control.locator('#save').click();
+  await until(async () => (await control.evaluate(() => AT.settings.load())).translationConcurrency === 2, 'saved parallel option');
+  await control.reload(); await optionsReady(control);
+  assert.equal(await control.locator('#parallelTranslation').isChecked(), true);
+  await screenshot(control, 'options-parallel-enabled');
+  const page = await fixture('/parallel-generic', `
+    <article><a rel="author" href="/people/alice">Alice Smith</a>
+    <p id="handle">@reader_123</p><p id="number">12345 !!!</p>
+    <p id="one">Original text</p><p id="two">First paragraph</p></article>`);
+  await model({hold:true});
+  await select(page, true); await page.bringToFront();
+  await page.waitForFunction(() => ['one','two'].every(id =>
+    document.getElementById(id).querySelector('at-translation-text[aria-busy="true"]')));
+  assert.equal(await page.locator('[rel="author"]').textContent(), 'Alice Smith');
+  assert.equal(await page.locator('#handle').textContent(), '@reader_123');
+  assert.equal(await page.locator('#number').textContent(), '12345 !!!');
+  assert.equal(await page.locator('[rel="author"] at-translation-text, #handle at-translation-text, #number at-translation-text').count(), 0);
+  await screenshot(page, 'parallel-visible-units');
+  await select(page, false);
+  assert.equal(await page.locator('at-translation-text').count(), 0);
+  await model({release:true});
+  await page.waitForTimeout(150);
+  assert.equal(await page.locator('#one').textContent(), 'Original text');
+  assert.equal(await page.locator('#two').textContent(), 'First paragraph');
+});
+
+check('idle active page pretranslates distant prose after visible text completes', async () => {
+  const page = await fixture('/idle-prefetch', `
+    <p id="visible">Original text</p><div style="height:3000px"></div><p id="future">First paragraph</p>`);
+  await policy({sourceLang:'en',targetLang:'ko'});
+  await select(page, true); await page.bringToFront();
+  await page.waitForFunction(() => document.querySelector('#visible').textContent === '원문 번역');
+  await page.waitForFunction(() => document.querySelector('#future').textContent === '첫 문단');
+  assert.equal(await page.evaluate(() => scrollY), 0);
+  await select(page, false);
+  assert.equal(await page.locator('#future').textContent(), 'First paragraph');
 });
 
 test('extension UI and injected pages have no uncaught JavaScript errors', () => { assert.deepEqual(errors, []); });

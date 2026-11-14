@@ -443,10 +443,9 @@ const reuse = PROFILE_DIR
 if (reuse) {
   console.log('[install] reusing', reuse, 'from the profile');
 } else {
-  await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, MODEL_URL, { timeout: 15000 });
+  await options.waitForFunction(() => document.body.dataset.ready === 'true', null, { timeout: 15000 });
   console.log('[install] downloading', MODEL_URL, localOrigin ? '(from ' + localOrigin + ')' : '');
-  // The page sets the URL field before it wires its handlers, so a click that
-  // lands in between does nothing: click until the status starts moving.
+  // The ready marker is published after controls and handlers are initialized.
   await options.locator('#downloadModel').click();
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const started = await options

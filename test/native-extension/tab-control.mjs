@@ -6,7 +6,6 @@ export async function optionsReady(page) {
     if (!globalThis.AT?.settings) return false;
     const s = await AT.settings.load();
     return document.querySelector('#localModel')?.value === s.localModelId &&
-      document.querySelector('#sourceLang')?.value === s.sourceLang &&
       document.querySelector('#targetLang')?.value === s.targetLang &&
       (AT.C.MSG.SET_TAB_ENABLED ? document.body.dataset.ready === 'true' : document.querySelector('#enabled')?.checked === s.enabled);
   });

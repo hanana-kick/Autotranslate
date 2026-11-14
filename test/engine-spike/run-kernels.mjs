@@ -12,13 +12,15 @@
 // WARM_STEPS=4, HETERO_REQUESTS=16, RUN_TIMEOUT_MS=1800000 are configurable.
 // VARIANT_OPTIONS='{"current":{"prefillPositions":64},"tile32":{"prefillPositions":32}}'
 // computeMs is host-observed submission/queue wait, NOT a GPU timestamp.
-// CHECK_LOGITS=1 BATCHES=1 compares all vocabulary logits after the final step;
-// its diagnostic copy happens outside the timed workload.
+// CHECK_LOGITS=1 compares all active rows' vocabulary logits after the final
+// uniform-batch step; its diagnostic copy happens outside the timed workload.
 // UNSAFE_WEBGPU=1 opts into experimental browser features; default uses ordinary WebGPU.
 // VARIANT_OPTIONS can select matmul:"portable"|"f16"|"matrix" or attention:"decode"|"tiled".
 // mixedPositions:8..64 independently caps total tokens in mixed prefill/decode steps.
 // VARIANT_SHADERS='{"baseline":{"kernelmatmul":"path.ts","kernelattention":"path.ts"}}'
 // Each variant gets isolated shader namespaces; hashes include its exact modules.
+// PROFILE_DISPATCH=1 enables intrusive per-pass GPU timestamps and a bandwidth probe;
+// use it for attribution only, never as the final throughput comparison.
 import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -27,6 +29,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import ts from 'typescript';
 import { chromium, launchOptions, ROOT } from '../browser/support.mjs';
+import { installKernelProfiler } from './kernel-profiler.mjs';
 
 function integer(name, fallback, min = 1, max = Number.MAX_SAFE_INTEGER) {
   const value = Number(process.env[name] ?? fallback);
@@ -54,12 +57,13 @@ const config = {
   profileRun: process.env.PROFILE_RUN === '1',
   checkLogits: process.env.CHECK_LOGITS === '1',
   unsafeWebgpu: process.env.UNSAFE_WEBGPU === '1',
+  profileDispatch: process.env.PROFILE_DISPATCH === '1',
   timeoutMs: integer('RUN_TIMEOUT_MS', 1800000)
 };
 if (!['uniform', 'heterogeneous', 'all'].includes(config.mode)) throw new Error('MODE must be uniform, heterogeneous or all');
 if (config.lengths.some((n) => n + Math.max(config.steps, config.warmSteps) > config.maxTokens)) throw new Error('Prompt length + STEPS/WARM_STEPS must not exceed 2048');
-if (config.checkLogits && (config.batches.some((n) => n !== 1) || config.mode !== 'uniform')) {
-  throw new Error('CHECK_LOGITS requires BATCHES=1 MODE=uniform');
+if (config.checkLogits && config.mode !== 'uniform') {
+  throw new Error('CHECK_LOGITS requires MODE=uniform');
 }
 const modelPath = resolve(process.env.MODEL_FILE || join(process.env.MODEL_DIR || join(ROOT, 'weight/plamo-3-translate-0.8b-onnx'), 'model_q4f16.onnx'));
 const sources = [];
@@ -127,10 +131,12 @@ for (const [index, source] of sources.entries()) {
   })();`);
 }
 scripts.set('/bench.js', `(${installBenchmark.toString()})();`);
+if (config.profileDispatch) scripts.set('/profile.js', `(${installKernelProfiler.toString()})();`);
 const html = '<!doctype html><meta charset="utf-8"><title>Kernel benchmark</title>' +
   '<script>window.kernelVariants = Object.create(null)</script><script src="/weights.js"></script>' +
   // Kernel scripts own their shader namespaces so a candidate cannot alter the baseline.
-  sources.map((_, index) => `<script src="/kernel-${index}.js"></script>`).join('') + '<script src="/bench.js"></script>';
+  sources.map((_, index) => `<script src="/kernel-${index}.js"></script>`).join('') +
+  (config.profileDispatch ? '<script src="/profile.js"></script>' : '') + '<script src="/bench.js"></script>';
 const modelStat = await stat(modelPath);
 const qaDir = resolve(process.env.QA_DIR || join(ROOT, 'test-results/engine-spike'));
 await mkdir(qaDir, { recursive: true });
@@ -341,7 +347,13 @@ function installBenchmark() {
   const openDevice = async () => {
     adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
     if (!adapter) throw new Error('No WebGPU adapter');
-    ({ device, matrixSubgroupSize } = await window.kernelVariants.current.openDevice(adapter));
+    if (settings.profileDispatch && !adapter.features.has('timestamp-query')) throw new Error('timestamp-query unavailable');
+    const opening = settings.profileDispatch ? {
+      features: adapter.features, info: adapter.info,
+      requestDevice: options => adapter.requestDevice({ ...options,
+        requiredFeatures: [...options.requiredFeatures, 'timestamp-query'] })
+    } : adapter;
+    ({ device, matrixSubgroupSize } = await window.kernelVariants.current.openDevice(opening));
     const current = device;
     current.addEventListener('uncapturederror', (event) => errors.push({ type: event.error.constructor.name, message: event.error.message }));
     current.lost.then((info) => {
@@ -369,7 +381,18 @@ function installBenchmark() {
     const fetchMs = now() - fetched;
     const parsed = now();
     model = AT.onnxweights.parse(buffer);
-    return { deviceMs, fetchMs, parseMs: now() - parsed, totalMs: now() - started, modelBytes: buffer.byteLength,
+    const parseMs = now() - parsed;
+    const matrixInfo = (name, matrix) => ({ name, n: matrix.N, k: matrix.K, block: matrix.block,
+      packedBytes: matrix.q4.byteLength, scaleBytes: matrix.scales.byteLength });
+    const matrices = model.layers.flatMap((layer, index) => ['qkv', 'o', 'gateUp', 'down']
+      .map(name => matrixInfo(`layer${index}.${name}`, layer[name])));
+    matrices.push(matrixInfo('head', model.head));
+    const normsAndFrequenciesBytes = model.finalNorm.byteLength + model.layers.reduce((sum, layer) =>
+      sum + ['preMixer', 'postMixer', 'preMlp', 'postMlp', 'qNorm', 'kNorm', 'invFreq']
+        .reduce((bytes, name) => bytes + layer[name].byteLength, 0), 0);
+    const bandwidth = settings.profileDispatch ? await window.kernelProfiler.bandwidth(device) : null;
+    return { deviceMs, fetchMs, parseMs, totalMs: now() - started, modelBytes: buffer.byteLength,
+      weightInventory: { matrices, normsAndFrequenciesBytes, embeddingBytes: model.embed.byteLength }, bandwidth,
       vocab: model.vocab, hidden: model.hidden, layers: model.layers.length,
       adapter: Object.fromEntries(['vendor', 'architecture', 'device', 'description', 'isFallbackAdapter'].map((key) => [key, info?.[key] ?? adapter[key] ?? null])),
       matrixSubgroupSize,
@@ -423,7 +446,9 @@ function installBenchmark() {
     let logitsBuffer;
     // Observe allocation only; every buffer and operation remains a real WebGPU
     // object. The full vocabulary output has a unique size in this model.
-    const measuredDevice = settings.checkLogits ? new Proxy(device, {
+    const profiler = settings.profileDispatch ? window.kernelProfiler.wrap(device) : null;
+    const sourceDevice = profiler?.device ?? device;
+    const measuredDevice = settings.checkLogits ? new Proxy(sourceDevice, {
       get(target, key) {
         if (key === 'createBuffer') return (descriptor) => {
           const buffer = target.createBuffer(descriptor);
@@ -435,7 +460,7 @@ function installBenchmark() {
         return typeof value === 'function' ? value.bind(target) : value;
       },
       set(target, key, value) { return Reflect.set(target, key, value, target); }
-    }) : device;
+    }) : sourceDevice;
     device.pushErrorScope('validation');
     device.pushErrorScope('out-of-memory');
     device.pushErrorScope('internal');
@@ -446,12 +471,13 @@ function installBenchmark() {
         matrixSubgroupSize,
         ...(settings.prefillPositions !== null && variant !== 'baseline' ? { prefillPositions: settings.prefillPositions } : {}),
         ...options,
-        onStep: (sample) => samples.push({ ...sample }),
+        onStep: (sample) => { samples.push({ ...sample }); profiler?.sample(sample); },
         onDone: (outcome) => {
           outcomes.push({ ...outcome, ...(outcome.ok ? { tokens: [...outcome.tokens] } : {}) });
           onComplete?.(outcome);
         } });
       await device.queue.onSubmittedWorkDone();
+      if (profiler) record.gpuInitialization = await profiler.initialization();
       record.createMs = now() - created;
       record.runnerRows = activeRunner.rows();
       record.execution = activeRunner.execution?.() ?? null;
@@ -477,6 +503,7 @@ function installBenchmark() {
       await execute(warmRequests, schedule === 'individual');
       validate(outcomes, warmRequests, samples);
       record.warmup.wallMs = now() - warmStarted;
+      if (profiler) await profiler.flush();
       samples = record.samples;
       outcomes = record.outputs;
       const statsBefore = activeRunner.stats();
@@ -485,13 +512,18 @@ function installBenchmark() {
       record.wallMs = now() - started;
       await device.queue.onSubmittedWorkDone();
       validate(outcomes, record.requests, samples);
+      if (profiler) record.gpuProfile = await profiler.flush();
       if (settings.checkLogits) {
         if (!logitsBuffer) throw new Error('Vocabulary output buffer not found');
-        const staging = device.createBuffer({ size: model.vocab * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        if (samples.at(-1)?.outputTokens !== condition.batch) {
+          throw new Error('Final step did not produce logits for the full uniform batch');
+        }
+        const logitBytes = condition.batch * model.vocab * 4;
+        const staging = device.createBuffer({ size: logitBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
         let values;
         try {
           const encoder = device.createCommandEncoder();
-          encoder.copyBufferToBuffer(logitsBuffer, 0, staging, 0, model.vocab * 4);
+          encoder.copyBufferToBuffer(logitsBuffer, 0, staging, 0, logitBytes);
           device.queue.submit([encoder.finish()]);
           await staging.mapAsync(GPUMapMode.READ);
           values = new Float32Array(staging.getMappedRange().slice(0));
@@ -502,7 +534,7 @@ function installBenchmark() {
         const reference = referenceLogits.get(key);
         if (!reference) {
           referenceLogits.set(key, { variant, values });
-          record.logits = { referenceVariant: variant, count: values.length };
+          record.logits = { referenceVariant: variant, rows: condition.batch, count: values.length };
         } else {
           let dot = 0, aa = 0, bb = 0, error2 = 0, absolute = 0, maxAbs = 0;
           for (let i = 0; i < values.length; i++) {
@@ -512,7 +544,7 @@ function installBenchmark() {
           }
           const cosine = dot / Math.sqrt(aa * bb);
           const relativeL2 = Math.sqrt(error2 / aa);
-          record.logits = { referenceVariant: reference.variant, count: values.length,
+          record.logits = { referenceVariant: reference.variant, rows: condition.batch, count: values.length,
             cosine, relativeL2, meanAbs: absolute / values.length, maxAbs };
           if (!Number.isFinite(cosine) || cosine < 0.99999 || relativeL2 > 0.005) {
             throw new Error(`Logits differ: ${JSON.stringify(record.logits)}`);

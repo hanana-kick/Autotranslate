@@ -5,9 +5,10 @@ namespace AT.translationtext {
     preview(node: Text, text: string): void;
     clearPreview(node: Text): void;
     applied(node: Text, complete: boolean): void;
-    settled(node: Text, status: 'translated' | 'partial' | 'failed'): void;
+    settled(node: Text, status: 'translated' | 'partial' | 'failed', interrupted?: boolean): void;
     forget(node: Text): void;
     restore(root?: Node): void;
+    measureSource?<T>(node: Text, read: () => T): T;
     ownsMutation(record: MutationRecord): boolean;
   };
 
@@ -41,6 +42,7 @@ namespace AT.translationtext {
     }
     .surface {
       display: inline;
+      position: relative;
       color: inherit;
       font: inherit;
       padding: 0;
@@ -55,45 +57,29 @@ namespace AT.translationtext {
         rgba(216, 180, 254, .10), rgba(103, 232, 249, .10));
       background-size: 240% 100%;
       box-shadow: 0 0 7px rgba(139, 164, 245, .13);
+    }
+    :host([data-state="translating"]) .surface,
+    :host([data-state="partial"]) .surface {
+      /* Keep the timeline across quanta, but paint progress only while active. */
       animation: at-aurora 3.4s ease-in-out infinite;
     }
-    :host([data-reveal="a"]) .surface {
-      animation: at-reveal-a 200ms ease-out;
-    }
-    :host([data-reveal="b"]) .surface {
-      animation: at-reveal-b 200ms ease-out;
-    }
-    :host([data-state="translating"][data-reveal="a"]) .surface {
-      animation: at-aurora 3.4s ease-in-out infinite, at-reveal-a 200ms ease-out;
-    }
-    :host([data-state="translating"][data-reveal="b"]) .surface {
-      animation: at-aurora 3.4s ease-in-out infinite, at-reveal-b 200ms ease-out;
-    }
+    :host([data-state="partial"]) .surface { animation-play-state: paused; }
     @keyframes at-aurora {
       0%, 100% { background-position: 0% 50%; }
       50% { background-position: 100% 50%; }
     }
-    @keyframes at-reveal-a { from { opacity: .84; } to { opacity: 1; } }
-    @keyframes at-reveal-b { from { opacity: .84; } to { opacity: 1; } }
     .preview { display: none; }
     :host([data-streaming="true"]) slot { display: none; }
     :host([data-streaming="true"]) .preview { display: inline; }
-    :host([data-streaming="true"]) .surface {
-      animation: none;
-      background: none;
-      box-shadow: none;
+    :host([data-measuring]) slot { display: contents !important; }
+    :host([data-measuring]) .preview {
+      position: absolute !important;
+      visibility: hidden !important;
     }
     .preview > span {
       animation: at-stream-reveal 160ms ease-out;
       -webkit-box-decoration-break: clone;
       box-decoration-break: clone;
-    }
-    .preview > span:last-child {
-      background-image: linear-gradient(110deg,
-        rgba(103, 232, 249, .10), rgba(167, 139, 250, .14),
-        rgba(216, 180, 254, .10), rgba(103, 232, 249, .10));
-      background-size: 240% 100%;
-      animation: at-stream-reveal 160ms ease-out, at-aurora 3.4s ease-in-out infinite;
     }
     @keyframes at-stream-reveal { from { opacity: .35; } to { opacity: 1; } }
     @media (prefers-reduced-motion: reduce), (forced-colors: active) {
@@ -115,11 +101,19 @@ namespace AT.translationtext {
     rendered: string;
     element: HTMLElement;
     stable: Text;
+    tail: Text;
     spans: { element: HTMLElement; text: string; born: number }[];
     timer: number | undefined;
     frame: number | undefined;
   };
-  type Entry = { node: Text; host: HTMLElement; preview?: Preview | undefined; streamed?: boolean };
+  type Entry = {
+    node: Text;
+    host: HTMLElement;
+    previous: string;
+    preview?: Preview | undefined;
+    finishTimer?: number | undefined;
+    settleTimer?: number | undefined;
+  };
   type ExpectedMutation = {
     target: Node;
     added: Node | null;
@@ -183,6 +177,8 @@ namespace AT.translationtext {
     }
 
     function clear(entry: Entry): void {
+      if (entry.finishTimer !== undefined) view!.clearTimeout(entry.finishTimer);
+      entry.finishTimer = undefined;
       const preview = entry.preview;
       if (!preview) return;
       if (preview.timer !== undefined) view!.clearTimeout(preview.timer);
@@ -202,13 +198,24 @@ namespace AT.translationtext {
       }
       const text = preview.pending;
       if (text === preview.rendered) return;
-      const previous = preview.rendered;
+      const previous = preview.rendered || entry.previous;
+      // Diff the painted flow, not just decoded output: the untouched source
+      // suffix stays opaque in its own Text, never as a paragraph-sized overlay.
       let prefix = 0;
       while (prefix < previous.length && prefix < text.length &&
           previous.charCodeAt(prefix) === text.charCodeAt(prefix)) prefix++;
-      // Do not divide a surrogate pair between the stable and fading regions.
-      if (prefix && prefix < previous.length &&
-          previous.charCodeAt(prefix - 1) >= 0xD800 && previous.charCodeAt(prefix - 1) <= 0xDBFF) prefix--;
+      const boundaries = new Set([...AT.dom.graphemes(text)].map(({ index }) => index));
+      boundaries.add(text.length);
+      const oldBoundaries = new Set([...AT.dom.graphemes(previous)].map(({ index }) => index));
+      oldBoundaries.add(previous.length);
+      while (prefix && (!boundaries.has(prefix) || !oldBoundaries.has(prefix))) prefix--;
+      let end = text.length, oldEnd = previous.length;
+      while (end > prefix && oldEnd > prefix && text.charCodeAt(end - 1) === previous.charCodeAt(oldEnd - 1)) {
+        end--; oldEnd--;
+      }
+      while (end < text.length && (!boundaries.has(end) || !oldBoundaries.has(oldEnd))) {
+        end++; oldEnd++;
+      }
       let offset = preview.stable.length;
       if (offset > prefix) preview.stable.deleteData(prefix, offset - prefix);
       for (let index = 0; index < preview.spans.length;) {
@@ -226,12 +233,23 @@ namespace AT.translationtext {
           index++;
         }
       }
+      // A later quantum may commit formerly untouched source unchanged.
+      // Promote that shared prefix without starting a reveal on it.
+      const retained = preview.stable.length + preview.spans.reduce((sum, span) => sum + span.text.length, 0);
+      if (retained < prefix) {
+        for (const span of preview.spans) {
+          preview.stable.appendData(span.text);
+          span.element.remove();
+        }
+        preview.spans.length = 0;
+        preview.stable.appendData(previous.slice(retained, prefix));
+      }
       const now = view!.performance.now();
-      const suffix = text.slice(prefix);
-      // Completed regions become one unanimated Text. Keep the last region's
-      // aurora while waiting for more output, with at most five fading spans.
+      const suffix = text.slice(prefix, end);
+      // Completed regions become one unanimated Text; at most five fading
+      // spans exist. The aurora belongs to the persistent surface, not a token.
       while (preview.spans.length && (
-        (preview.spans[0]!.born + 160 <= now && (preview.spans.length > 1 || suffix.length > 0)) ||
+        preview.spans[0]!.born + 160 <= now ||
         (suffix.length > 0 && preview.spans.length >= 5))) {
         const span = preview.spans.shift()!;
         preview.stable.appendData(span.text);
@@ -240,14 +258,27 @@ namespace AT.translationtext {
       if (suffix) {
         const element = doc.createElement('span');
         element.textContent = suffix;
-        preview.element.appendChild(element);
+        preview.element.insertBefore(element, preview.tail);
         preview.spans.push({ element, text: suffix, born: now });
       }
+      preview.tail.data = text.slice(end);
       preview.rendered = text;
       if (!preview.element.parentNode) entry.host.shadowRoot!.querySelector('.surface')!.appendChild(preview.element);
-      entry.host.removeAttribute('data-reveal');
       entry.host.setAttribute('data-streaming', 'true');
-      entry.streamed = true;
+    }
+
+    function startPreview(entry: Entry, text: string): Preview {
+      const element = doc.createElement('span');
+      element.className = 'preview';
+      const stable = doc.createTextNode('');
+      const tail = doc.createTextNode('');
+      element.append(stable, tail);
+      const preview: Preview = { source: entry.node.data, parent: entry.host.parentNode!, pending: text,
+        rendered: '', element, stable, tail, spans: [], timer: undefined, frame: undefined };
+      entry.preview = preview;
+      if (!previews.size) observer.observe(doc, { subtree: true, childList: true, characterData: true });
+      previews.add(entry);
+      return preview;
     }
 
     function remember(mutations: ExpectedMutation[]): void {
@@ -284,9 +315,9 @@ namespace AT.translationtext {
 
     function unwrap(entry: Entry): void {
       clear(entry);
+      if (entry.settleTimer !== undefined) view!.clearTimeout(entry.settleTimer);
       entries.delete(entry.node);
       entry.host.removeAttribute('data-state');
-      entry.host.removeAttribute('data-reveal');
       entry.host.removeAttribute('aria-busy');
       const parent = entry.host.parentNode;
       if (!parent) return;
@@ -307,11 +338,21 @@ namespace AT.translationtext {
     }
 
     const presentation: Presentation = {
+      measureSource(node, read) {
+        const entry = owned(node);
+        if (!entry?.preview || entry.host.hasAttribute('data-measuring')) return read();
+        entry.host.setAttribute('data-measuring', '');
+        try { return read(); }
+        finally { entry.host.removeAttribute('data-measuring'); }
+      },
       begin(node) {
         const active = owned(node);
         if (active) {
-          clear(active);
-          active.streamed = false;
+          if (active.finishTimer === undefined &&
+              (active.preview?.pending !== node.data || active.preview.rendered !== node.data)) clear(active);
+          active.previous = node.data;
+          if (active.settleTimer !== undefined) view!.clearTimeout(active.settleTimer);
+          active.settleTimer = undefined;
           active.host.setAttribute('data-state', 'translating');
           active.host.setAttribute('aria-busy', 'true');
           return;
@@ -326,7 +367,7 @@ namespace AT.translationtext {
         if (!registry) attachSurface(host);
         host.setAttribute('data-state', 'translating');
         host.setAttribute('aria-busy', 'true');
-        entries.set(node, { node, host });
+        entries.set(node, { node, host, previous: node.data });
         move(host, parent, node);
         move(node, host, null);
       },
@@ -342,18 +383,10 @@ namespace AT.translationtext {
           unwrap(entry);
           return;
         }
-        if (!preview) {
-          const element = doc.createElement('span');
-          element.className = 'preview';
-          const stable = doc.createTextNode('');
-          element.appendChild(stable);
-          preview = { source: node.data, parent: entry.host.parentNode!, pending: text,
-            rendered: '', element, stable, spans: [], timer: undefined, frame: undefined };
-          entry.preview = preview;
-          if (!previews.size) observer.observe(doc, { subtree: true, childList: true, characterData: true });
-          previews.add(entry);
-        }
+        if (!preview) preview = startPreview(entry, text);
         preview.pending = text;
+        if (entry.finishTimer !== undefined) view!.clearTimeout(entry.finishTimer);
+        entry.finishTimer = undefined;
         if (preview.timer !== undefined || preview.frame !== undefined) return;
         const scheduled = preview;
         scheduled.timer = view!.setTimeout(() => {
@@ -371,26 +404,57 @@ namespace AT.translationtext {
       applied(node, complete) {
         const entry = owned(node);
         if (!entry) return;
-        clear(entry);
-        if (!entry.streamed) {
-          entry.host.setAttribute('data-reveal', entry.host.getAttribute('data-reveal') === 'a' ? 'b' : 'a');
+        const instant = view!.matchMedia('(prefers-reduced-motion: reduce), (forced-colors: active)').matches;
+        if (instant) clear(entry);
+        const preview = instant ? undefined :
+          entry.preview ?? (node.data !== entry.previous ? startPreview(entry, node.data) : undefined);
+        if (preview) {
+          if (preview.timer !== undefined) view!.clearTimeout(preview.timer);
+          if (preview.frame !== undefined) view!.cancelAnimationFrame(preview.frame);
+          preview.timer = undefined;
+          preview.frame = undefined;
+          // Canonical ownership has committed. Keep partial flows mounted
+          // across quanta/pauses; only the final reveal hands back to the slot.
+          preview.source = node.data;
+          preview.pending = node.data;
+          render(entry, preview);
+          if (entry.preview === preview) {
+            if (entry.finishTimer !== undefined) view!.clearTimeout(entry.finishTimer);
+            entry.finishTimer = complete ? view!.setTimeout(() => clear(entry), 160) : undefined;
+          }
         }
-        entry.streamed = false;
+        entry.previous = node.data;
         if (complete) {
           entry.host.setAttribute('data-state', 'translated');
           entry.host.removeAttribute('aria-busy');
         }
       },
-      settled(node, status) {
+      settled(node, status, interrupted = false) {
         const entry = owned(node);
         if (!entry) return;
-        clear(entry);
+        if (entry.settleTimer !== undefined) view!.clearTimeout(entry.settleTimer);
+        entry.settleTimer = undefined;
+        // Discard uncommitted progress, not the already committed partial flow.
+        // A final reveal owns its independent handoff timer.
+        if (entry.finishTimer === undefined &&
+            (entry.preview?.pending !== node.data || entry.preview.rendered !== node.data)) clear(entry);
         if (status === 'failed') {
           unwrap(entry);
           return;
         }
-        entry.host.setAttribute('data-state', status);
-        entry.host.removeAttribute('aria-busy');
+        if (status === 'partial' && !interrupted) {
+          // Bridge adjacent quanta without blinking. A genuinely parked unit
+          // loses its paint after this bounded grace, retaining only its phase.
+          entry.settleTimer = view!.setTimeout(() => {
+            if (entries.get(node) !== entry) return;
+            entry.settleTimer = undefined;
+            entry.host.setAttribute('data-state', 'partial');
+            entry.host.removeAttribute('aria-busy');
+          }, 180);
+        } else {
+          entry.host.setAttribute('data-state', status);
+          entry.host.removeAttribute('aria-busy');
+        }
       },
       forget(node) {
         const entry = entries.get(node);

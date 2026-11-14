@@ -167,6 +167,246 @@ namespace AT.kernelattention {
     `;
   }
 
+  /** Long decode only: 256 keys per independently normalized partition.
+   * Keep the original single-dispatch kernel through 512 visible tokens.
+   * Each partial stores {maximum, exponential sum, 0, 0} and 128 unnormalized
+   * weighted values, all f32. Scratch is shared across layers, not KV slots.
+   * Dispatch (ceil(heads / headsPerGroup) * parts, rows); Info adds parts.
+   * Partition-major ordering, 128 threads: each lane reuses K/V across 2 or
+   * 4 heads. Per-head four-lane QK dots and four V streams keep their sum order.
+   * Shared storage is 7184 / 14352 bytes, both within the default 16 KiB limit.
+   * Binding 3 is partial scratch; the other decode bindings are unchanged.
+   */
+  export const DECODE_PARTITION = 256;
+  export const DECODE_SPLIT_MIN = 512;
+  export const DECODE_PARTIAL_FLOATS = 132;
+  /** Shader specialization and launch geometry must use the same head count. */
+  export const DECODE_HEADS_PER_GROUP = 2;
+  export const DECODE_WIDE_HEADS_PER_GROUP = 4;
+
+  export function decodePartial(cacheStride: number, headsPerGroup: 2 | 4 = DECODE_HEADS_PER_GROUP): string {
+    const headIndices = Array.from({ length: headsPerGroup }, (_unused, head) => head);
+    const eachHead = (code: (head: number) => string): string => headIndices.map(code).join('\n');
+    const guarded = (head: number, code: string): string => head === 0
+      ? code : `if (head + ${head}u < info.heads) { ${code} }`;
+    const components = ['x', 'y', 'z', 'w'];
+    const vector = `vec${headsPerGroup}<f32>`;
+    const scratchVector = (value: string): string => headsPerGroup === 2
+      ? `vec4<f32>(${value}, 0.0, 0.0)` : value;
+    return `
+      const CACHE_VECTORS: u32 = ${cacheStride / 4}u;
+      const MAX_TOKENS: u32 = ${cacheStride / 128}u;
+      const PARTITION: u32 = ${DECODE_PARTITION}u;
+      const MAX_PARTS: u32 = ${Math.ceil(cacheStride / 128 / DECODE_PARTITION)}u;
+      struct Info { heads: u32, rows: u32, window: u32, mode: u32, parts: u32 };
+      struct Partial { stats: vec4<f32>, values: array<vec4<f32>, 32> };
+      @group(0) @binding(0) var<storage, read> q: array<vec4<f32>>;
+      @group(0) @binding(1) var<storage, read> kcache: array<vec4<f32>>;
+      @group(0) @binding(2) var<storage, read> vcache: array<vec4<f32>>;
+      @group(0) @binding(3) var<storage, read_write> partials: array<Partial>;
+      @group(0) @binding(4) var<uniform> info: Info;
+      @group(0) @binding(5) var<storage, read> positions: array<u32>;
+      @group(0) @binding(6) var<storage, read> cacheRows: array<u32>;
+
+      var<workgroup> queries: array<vec4<f32>, ${32 * headsPerGroup}>;
+      var<workgroup> probs: array<${vector}, PARTITION>;
+      ${eachHead(h => `var<workgroup> scratch${h}: array<vec4<f32>, 128>;`)}
+      var<workgroup> metadata: vec4<u32>;
+
+      @compute @workgroup_size(128)
+      fn main(@builtin(workgroup_id) wg: vec3<u32>,
+              @builtin(local_invocation_index) tid: u32) {
+        if (info.parts == 0u || info.heads == 0u || wg.y >= info.rows) { return; }
+        let headGroups = (info.heads + ${headsPerGroup - 1}u) / ${headsPerGroup}u;
+        let head = (wg.x % headGroups) * ${headsPerGroup}u;
+        let part = wg.x / headGroups;
+        if (part >= min(info.parts, MAX_PARTS)) { return; }
+        let queryIndex = wg.y * info.heads + head;
+        let partialIndex = queryIndex * MAX_PARTS + part;
+        if (tid < 32u && info.mode != 2u) {
+          ${eachHead(h => `
+          ${h === 0 ? '' : `queries[tid + ${h * 32}u] = vec4<f32>(0.0);`}
+          ${guarded(h, `queries[tid + ${h * 32}u] = q[(queryIndex + ${h}u) * 32u + tid];`)}`)}
+        }
+        if (tid == 0u) {
+          metadata = vec4<u32>(0u);
+          let position = positions[wg.y];
+          if (position < MAX_TOKENS) {
+            let causalEnd = position + 1u;
+            var causalStart = 0u;
+            if (info.window != 0u && causalEnd > info.window) {
+              causalStart = causalEnd - info.window;
+            }
+            let start = min(causalStart + part * PARTITION, causalEnd);
+            metadata = vec4<u32>(
+              cacheRows[wg.y], start, min(start + PARTITION, causalEnd), 0u);
+          }
+        }
+        let queryInfo = workgroupUniformLoad(&metadata);
+        let cacheBase = queryInfo.x * CACHE_VECTORS;
+        let start = queryInfo.y;
+        let end = queryInfo.z;
+        let count = end - start;
+        // Clear every real head on invalid rows and empty partitions.
+        if (count == 0u) {
+          if (tid == 0u) {
+            ${eachHead(h => guarded(h, `partials[partialIndex + ${h}u * MAX_PARTS].stats = vec4<f32>(0.0);`))}
+          }
+          if (tid < 32u) {
+            ${eachHead(h => guarded(h, `partials[partialIndex + ${h}u * MAX_PARTS].values[tid] = vec4<f32>(0.0);`))}
+          }
+          return;
+        }
+
+        if (info.mode != 2u) {
+          let keyLane = tid / 4u;
+          let dotLane = tid % 4u;
+          for (var base = 0u; base < count; base = base + 128u) {
+            let localToken = base + keyLane;
+            let token = start + localToken;
+            ${eachHead(h => `var dots${h} = vec4<f32>(0.0);`)}
+            for (var d = dotLane; d < 32u; d = d + 4u) {
+              ${eachHead(h => `let query${h} = queries[d + ${h * 32}u];`)}
+              ${components.map((component, i) => `
+              if (token + ${i * 32}u < end) {
+                let key = kcache[cacheBase + (token + ${i * 32}u) * 32u + d];
+                ${eachHead(h => `dots${h}.${component} = dots${h}.${component} + dot(query${h}, key);`)}
+              }`).join('\n')}
+            }
+            ${eachHead(h => `scratch${h}[tid] = dots${h};`)}
+            workgroupBarrier();
+            if (dotLane == 0u) {
+              ${eachHead(h => `
+              let scores${h} = (scratch${h}[tid] + scratch${h}[tid + 1u]) +
+                (scratch${h}[tid + 2u] + scratch${h}[tid + 3u]);`)}
+              ${components.map((component, i) => `
+              if (localToken + ${i * 32}u < count) {
+                probs[localToken + ${i * 32}u] = ${vector}(${headIndices.map(h => `scores${h}.${component}`).join(', ')});
+              }`).join('\n')}
+            }
+            workgroupBarrier();
+          }
+        } else {
+          for (var token = tid; token < count; token = token + 128u) {
+            probs[token] = ${vector}(0.0);
+          }
+          workgroupBarrier();
+        }
+
+        var localMax = ${vector}(-3.402823466e+38);
+        for (var token = tid; token < count; token = token + 128u) {
+          localMax = max(localMax, probs[token]);
+        }
+        scratch0[tid] = ${scratchVector('localMax')};
+        workgroupBarrier();
+        if (tid < 64u) { scratch0[tid] = max(scratch0[tid], scratch0[tid + 64u]); }
+        workgroupBarrier();
+        for (var stride = 16u; stride > 0u; stride = stride / 4u) {
+          if (tid < stride) {
+            scratch0[tid] = max(
+              max(scratch0[tid], scratch0[tid + stride]),
+              max(scratch0[tid + stride * 2u], scratch0[tid + stride * 3u]));
+          }
+          workgroupBarrier();
+        }
+        let top = scratch0[0]${headsPerGroup === 2 ? '.xy' : ''};
+        workgroupBarrier();
+        var localSum = ${vector}(0.0);
+        for (var token = tid; token < count; token = token + 128u) {
+          let probability = exp(probs[token] - top);
+          probs[token] = probability;
+          localSum = localSum + probability;
+        }
+        scratch0[tid] = ${scratchVector('localSum')};
+        workgroupBarrier();
+        if (tid < 64u) { scratch0[tid] = scratch0[tid] + scratch0[tid + 64u]; }
+        workgroupBarrier();
+        for (var stride = 16u; stride > 0u; stride = stride / 4u) {
+          if (tid < stride) {
+            scratch0[tid] = (scratch0[tid] + scratch0[tid + stride]) +
+              (scratch0[tid + stride * 2u] + scratch0[tid + stride * 3u]);
+          }
+          workgroupBarrier();
+        }
+        if (tid == 0u) {
+          ${eachHead(h => guarded(h, `partials[partialIndex + ${h}u * MAX_PARTS].stats = vec4<f32>(top.${components[h]}, scratch0[0].${components[h]}, 0.0, 0.0);`))}
+        }
+        workgroupBarrier();
+        let contextPart = tid / 32u;
+        let dimension = tid % 32u;
+        ${eachHead(h => `var accumulator${h} = vec4<f32>(0.0);`)}
+        if (info.mode != 1u) {
+          for (var token = contextPart; token < count; token = token + 4u) {
+            let value = vcache[cacheBase + (start + token) * 32u + dimension];
+            let probability = probs[token];
+            ${eachHead(h => `accumulator${h} = accumulator${h} + probability.${components[h]} * value;`)}
+          }
+        }
+        ${eachHead(h => `scratch${h}[tid] = accumulator${h};`)}
+        workgroupBarrier();
+        if (tid < 64u) {
+          ${eachHead(h => `scratch${h}[tid] = scratch${h}[tid] + scratch${h}[tid + 64u];`)}
+        }
+        workgroupBarrier();
+        if (tid < 32u) {
+          ${eachHead(h => guarded(h, `partials[partialIndex + ${h}u * MAX_PARTS].values[tid] = scratch${h}[tid] + scratch${h}[tid + 32u];`))}
+        }
+      }
+    `;
+  }
+
+  /** Dispatch (heads, rows), 32 lanes. Merge exp(max_i - global_max) times
+   * each partial's numerator and denominator, then divide once. Empty
+   * partitions are excluded before exponentiation, including all-empty rows.
+   * Bindings: 0 partial scratch, 1 output, 2 the same decode Info.
+   */
+  export function decodeMerge(cacheStride: number): string {
+    return `
+      const MAX_PARTS: u32 = ${Math.ceil(cacheStride / 128 / DECODE_PARTITION)}u;
+      struct Info { heads: u32, rows: u32, window: u32, mode: u32, parts: u32 };
+      struct Partial { stats: vec4<f32>, values: array<vec4<f32>, 32> };
+      @group(0) @binding(0) var<storage, read> partials: array<Partial>;
+      @group(0) @binding(1) var<storage, read_write> out: array<vec4<f32>>;
+      @group(0) @binding(2) var<uniform> info: Info;
+      var<workgroup> weights: array<f32, MAX_PARTS>;
+      var<workgroup> denominator: f32;
+
+      @compute @workgroup_size(32)
+      fn main(@builtin(workgroup_id) wg: vec3<u32>,
+              @builtin(local_invocation_index) tid: u32) {
+        if (wg.x >= info.heads || wg.y >= info.rows) { return; }
+        let queryIndex = wg.y * info.heads + wg.x;
+        let base = queryIndex * MAX_PARTS;
+        let parts = min(info.parts, MAX_PARTS);
+        if (tid == 0u) {
+          var top = -3.402823466e+38;
+          for (var part = 0u; part < parts; part = part + 1u) {
+            let stats = partials[base + part].stats;
+            if (stats.y > 0.0) { top = max(top, stats.x); }
+          }
+          var total = 0.0;
+          for (var part = 0u; part < parts; part = part + 1u) {
+            let stats = partials[base + part].stats;
+            var weight = 0.0;
+            if (stats.y > 0.0) { weight = exp(stats.x - top); }
+            weights[part] = weight;
+            total = total + weight * stats.y;
+          }
+          denominator = total;
+        }
+        let total = workgroupUniformLoad(&denominator);
+        var accumulator = vec4<f32>(0.0);
+        if (total > 0.0) {
+          for (var part = 0u; part < parts; part = part + 1u) {
+            accumulator = accumulator + weights[part] * partials[base + part].values[tid];
+          }
+          accumulator = accumulator / total;
+        }
+        out[queryIndex * 32u + tid] = accumulator;
+      }
+    `;
+  }
+
   export const PREFILL_ROWS = 8;
 
   /**
@@ -512,31 +752,32 @@ namespace AT.kernelattention {
   }
 
   /**
-   * Fuse the one-head K RoPE and both KV cache writes without a K intermediate.
-   * Dispatch (1, rows, 1), workgroup_size(64), no shared memory or optional
-   * features. cacheStride is maxTokens * 128 f32 elements, not bytes.
-   * Bindings: 0 normalised K [rows,128], 1 inverse frequencies [64], 2 K cache,
+   * Fuse one-head K RMSNorm, RoPE and both KV cache writes.
+   * Dispatch (1, rows, 1), workgroup_size(128), 1 KiB shared FP32 storage.
+   * Bindings: 0 K norm weights [128], 1 inverse frequencies [64], 2 K cache,
    * 3 V cache, 4 fused QKV [rows,qkvWidth], 5 positions, 6 cacheRows, 7 RoPE Info.
-   * Info matches the original RoPE uniform: {heads,rows,half,scale,stride,start,
-   * pad,pad2}, with heads=1 and half=64. stride=0 selects contiguous normalised
-   * K; otherwise stride/start select its source in binding 0, as in RoPE.
-   * qkvWidth and heads specialize the fused V offset (heads * 128 + 128).
-   * Each lane rotates a split-half K pair and copies the corresponding V pair.
-   * Each active row must have a unique (cacheRows[row], positions[row]) pair,
-   * with valid cache slots; no atomic ordering is defined for duplicates.
-   * Encode after K normalisation and before attention in the same stream.
+   * Seven storage bindings fit the ordinary-browser limit of eight.
+   * Info retains {heads,rows,half,scale,stride,start,pad,pad2}; heads=1, half=64.
+   * QKV offsets are specialised by qkvWidth and heads; stride/start are unused.
+   * Preserve RMS lane ownership, the 64..1 sum tree and x*inv*w ordering.
+   * Shared normalised values replace kN without changing the RoPE arithmetic.
+   * Lanes 0..63 rotate split-half pairs and copy V after all 128 lanes reduce.
+   * Each active row must have a unique (cacheRows[row], positions[row]) pair
+   * and a valid cache slot. Invalid positions skip writes after all barriers.
+   * Encode after QKV projection and before attention in the same stream.
    */
   export function ropeKV(cacheStride: number, qkvWidth: number, heads: number): string {
     return `
       const CACHE_STRIDE: u32 = ${cacheStride}u;
       const MAX_TOKENS: u32 = ${cacheStride / 128}u;
       const QKV_WIDTH: u32 = ${qkvWidth}u;
+      const KEY_OFFSET: u32 = ${heads * 128}u;
       const VALUE_OFFSET: u32 = ${heads * 128 + 128}u;
       struct Info {
         heads: u32, rows: u32, half: u32, scale: f32,
         stride: u32, start: u32, pad: u32, pad2: u32
       };
-      @group(0) @binding(0) var<storage, read> kN: array<f32>;
+      @group(0) @binding(0) var<storage, read> norm: array<f32>;
       @group(0) @binding(1) var<storage, read> frequencies: array<f32>;
       @group(0) @binding(2) var<storage, read_write> kcache: array<f32>;
       @group(0) @binding(3) var<storage, read_write> vcache: array<f32>;
@@ -544,20 +785,37 @@ namespace AT.kernelattention {
       @group(0) @binding(5) var<storage, read> positions: array<u32>;
       @group(0) @binding(6) var<storage, read> cacheRows: array<u32>;
       @group(0) @binding(7) var<uniform> info: Info;
-      @compute @workgroup_size(64)
+      var<workgroup> sums: array<f32, 128>;
+      var<workgroup> normalised: array<f32, 128>;
+      @compute @workgroup_size(128)
       fn main(@builtin(workgroup_id) wg: vec3<u32>,
               @builtin(local_invocation_index) d: u32) {
         let row = wg.y;
         if (wg.x != 0u || row >= info.rows) { return; }
+        let source = row * QKV_WIDTH + KEY_OFFSET;
+        let v = qkv[source + d];
+        var acc: f32 = 0.0;
+        acc = acc + v * v;
+        sums[d] = acc;
+        workgroupBarrier();
+        var stride: u32 = 64u;
+        loop {
+          if (stride == 0u) { break; }
+          if (d < stride) { sums[d] = sums[d] + sums[d + stride]; }
+          workgroupBarrier();
+          stride = stride / 2u;
+        }
+        let normInv = 1.0 / sqrt(sums[0] / 128.0 + 1e-6);
+        normalised[d] = v * normInv * norm[d];
+        workgroupBarrier();
+        // Storage-derived position checks must not precede the RMS barriers.
         let position = positions[row];
-        if (position >= MAX_TOKENS) { return; }
-        var source = row * 128u;
-        if (info.stride != 0u) { source = row * info.stride + info.start; }
+        if (d >= info.half || position >= MAX_TOKENS) { return; }
         let angle = f32(position) * frequencies[d];
         let c = cos(angle);
         let s = sin(angle);
-        let low = kN[source + d];
-        let high = kN[source + d + info.half];
+        let low = normalised[d];
+        let high = normalised[d + info.half];
         let destination = cacheRows[row] * CACHE_STRIDE + position * 128u + d;
         kcache[destination] = (low * c - high * s) * info.scale;
         kcache[destination + info.half] = (high * c + low * s) * info.scale;

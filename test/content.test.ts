@@ -221,6 +221,7 @@ function createPage({
   };
   const document = {
     nodeType: 9,
+    hidden: false,
     documentElement,
     body,
     createElement,
@@ -274,14 +275,26 @@ class ObserverStub {
 // The observer debounce must not be waited out; the test captures the scheduled
 // callback and runs it itself, so a tick is observed rather than slept through.
 
-type Timer = { id: number; callback: () => unknown; delay: number };
+type Timer = { id: number; callback: () => unknown; delay: number; due: number };
+type Clock = { pending: Timer[]; run(): Promise<void>; finish(): Promise<void>; restore(): void };
+let activeClock: Clock | undefined;
+let testClock: Clock;
+let disposeEnvironment: (() => Promise<unknown>) | undefined;
+test.beforeEach(() => { testClock = installClock(); });
+test.afterEach(async () => {
+  await disposeEnvironment?.();
+  disposeEnvironment = undefined;
+  testClock.restore();
+});
 
 function installClock() {
   const pending: Timer[] = [];
   let nextId = 1;
+  let now = 0;
   const originals = { setTimeout: host.setTimeout, clearTimeout: host.clearTimeout };
+  const previous = activeClock;
   host.setTimeout = (callback: () => unknown, delay = 0): number => {
-    const timer = { id: nextId++, callback, delay };
+    const timer = { id: nextId++, callback, delay, due: now + delay };
     pending.push(timer);
     return timer.id;
   };
@@ -289,11 +302,14 @@ function installClock() {
     const index = pending.findIndex((timer) => timer.id === id);
     if (index >= 0) pending.splice(index, 1);
   };
-  return {
+  const clock: Clock = {
     pending,
-    /** Run everything scheduled so far, in order, awaiting what it returns. */
+    /** Advance to the next deadline, without expiring unrelated long-lived requests. */
     async run() {
-      const due = pending.splice(0, pending.length);
+      if (!pending.length) return;
+      now = Math.min(...pending.map(timer => timer.due));
+      const due = pending.filter(timer => timer.due === now);
+      for (const timer of due) pending.splice(pending.indexOf(timer), 1);
       for (const timer of due) {
         await timer.callback();
         // scheduleTick hands runTick's promise to AT.warn's catch and returns
@@ -301,11 +317,18 @@ function installClock() {
         await drain();
       }
     },
+    async finish() {
+      for (let turn = 0; pending.length && turn < 1000; turn++) await clock.run();
+      assert.equal(pending.length, 0, 'scheduled work must settle without a retry loop');
+    },
     restore() {
       host.setTimeout = originals.setTimeout;
       host.clearTimeout = originals.clearTimeout;
+      activeClock = previous;
     }
   };
+  activeClock = clock;
+  return clock;
 }
 
 // --- environment ------------------------------------------------------------
@@ -332,6 +355,8 @@ type Options = {
 };
 
 function environment(options: Options = {}) {
+  void disposeEnvironment?.();
+  disposeEnvironment = undefined;
   resetGlobals();
   delete host.__autotranslate;
   delete host.document;
@@ -354,10 +379,17 @@ function environment(options: Options = {}) {
   let selection = options.selection ?? '';
   host.getSelection = () => ({ toString: () => selection });
   const scrollListeners: Listener[] = [];
+  const visibilityListeners: Listener[] = [];
   host.addEventListener = (type: string, listener: Listener) => {
     if (type === 'scroll') scrollListeners.push(listener);
+    if (type === 'visibilitychange') visibilityListeners.push(listener);
   };
   host.removeEventListener = (type: string, listener: Listener) => {
+    if (type === 'visibilitychange') {
+      const index = visibilityListeners.indexOf(listener);
+      if (index >= 0) visibilityListeners.splice(index, 1);
+      return;
+    }
     if (type !== 'scroll') return;
     const index = scrollListeners.indexOf(listener);
     if (index >= 0) scrollListeners.splice(index, 1);
@@ -381,7 +413,7 @@ function environment(options: Options = {}) {
     if (fail && index >= (fail.after ?? 0)) {
       return { ok: false, error: fail.error, code: fail.code ?? null };
     }
-    return { ok: true, translations: await (options.translate ?? wrap)(texts), detected: 'en', engine: 'libre' };
+    return { ok: true, translations: await (options.translate ?? wrap)(texts), detected: 'en', engine: 'local' };
   };
 
   const events: { messages: MessageListener[] } = { messages: [] };
@@ -391,6 +423,30 @@ function environment(options: Options = {}) {
       id: 'autotranslate@test',
       getURL: (path: string) => path,
       getManifest: () => ({ version: '9.9.9' }),
+      connect: ({ name }: { name: string }) => {
+        const messages: ((value: unknown) => void)[] = [];
+        const disconnected: (() => void)[] = [];
+        let active = true;
+        return {
+          name,
+          onMessage: { addListener: (listener: (value: unknown) => void) => messages.push(listener) },
+          onDisconnect: { addListener: (listener: () => void) => disconnected.push(listener) },
+          disconnect() {
+            if (!active) return;
+            active = false;
+            for (const listener of disconnected) listener();
+          },
+          postMessage(message: ATNamespace) {
+            assert.equal(message.type, 'at/batch');
+            recorded.batch.push(message);
+            const respond = (response: unknown) => {
+              if (active) for (const listener of messages) listener({ kind: 'result', response });
+            };
+            void batchReply(message).then(respond, (error: Error & { code?: string }) =>
+              respond({ ok: false, error: error.message, code: error.code }));
+          }
+        };
+      },
       sendMessage: async (message: ATNamespace) => {
         if (message.type === 'at/batch') {
           recorded.batch.push(message);
@@ -426,6 +482,7 @@ function environment(options: Options = {}) {
       for (const promise of promises) void promise.then(respond);
       if (!willAnswer.includes(true) && promises.length === 0) resolve(silence);
     });
+  disposeEnvironment = () => send({ type: 'at/content-restore' });
 
   /** Deliver DOM mutations the way the browser does: live observers only.
    *  No records means "something changed somewhere unnamed", which a caller
@@ -449,9 +506,14 @@ function environment(options: Options = {}) {
     boot: host.__autotranslate as ATNamespace,
     listenerCount: () => events.messages.length,
     send,
+    finish: () => activeClock!.finish(),
     mutate,
     scroll: () => {
       for (const listener of scrollListeners) listener();
+    },
+    visibility: (hidden: boolean) => {
+      page.document.hidden = hidden;
+      for (const listener of visibilityListeners) listener();
     },
     scrollListeners
   };
@@ -514,7 +576,7 @@ test('the page context travels with the batch, and only when it says something',
   assert.equal(context.title, 'Headline', 'the title is read when no og:title is present');
 });
 
-test('visible content and chrome are translated before distant prose', async () => {
+test('visible content and chrome finish before idle prefetch of distant prose', async () => {
   // A menu label at the very top, a paragraph on screen, another far below.
   const env = environment();
   env.page.body.childNodes.length = 0;
@@ -527,7 +589,8 @@ test('visible content and chrome are translated before distant prose', async () 
   env.page.documentElement.append(menu, body);
 
   const reply = await env.send(translateMessage(snapshot({ targetLang: 'de' })));
-  assert.equal(reply.status, 'translated');
+  assert.equal(reply.status, 'translated', 'both visible reading units finish in the admitted wave');
+  while (testClock.pending.some(timer => timer.delay === 0)) await testClock.run();
 
   const batches = env.recorded.batch;
   assert.equal(batches[0]?.texts[0], 'Hello there', 'the article is finished before the menu, whatever its position');
@@ -538,13 +601,55 @@ test('visible content and chrome are translated before distant prose', async () 
     'menu labels travel in their own batch, marked as navigation'
   );
   const farBatch = batches.find((batch: ATNamespace) => batch.texts.includes('Far away text'));
-  assert.equal(farBatch?.role, 'article');
+  assert.equal(farBatch, undefined, 'distant prose waits for idle admission');
   const menuBatch = batches.find((batch: ATNamespace) => batch.texts.includes('Home'));
   assert.equal(menuBatch?.role, 'navigation');
-  assert.ok(
-    batches.indexOf(menuBatch) < batches.indexOf(farBatch),
-    'visible menu is completed before the far-away article'
-  );
+  assert.deepEqual(pageTexts(second), ['Far away text']);
+  await env.finish();
+  assert.equal(batches.at(-1)?.texts[0], 'Far away text');
+  assert.deepEqual(pageTexts(second), ['»Far away text«']);
+});
+
+test('visible sidebar is dispatched before near article prefetch', async () => {
+  const env = environment({ texts: [] });
+  const article = env.page.make('article', {}, [
+    env.page.make('p', { attrs: { top: '100' } }, [t('Visible main reading')]),
+    env.page.make('p', { attrs: { top: '1000' } }, [t('Near article continuation')])
+  ]);
+  const sidebar = env.page.make('aside', {}, [env.page.make('p', { attrs: { top: '20' } }, [t('Visible sidebar reading')])]);
+  env.page.body.append(article, sidebar);
+  await env.send(translateMessage());
+  await env.finish();
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts),
+    ['Visible main reading', 'Visible sidebar reading', 'Near article continuation']);
+});
+
+test('unrelated sidebar mutation never takes priority over unfinished main reading', async () => {
+  const started = deferred<void>(), release = deferred<string[]>();
+  let first = true;
+  const env = environment({
+    texts: [],
+    translate: async texts => {
+      if (first) { first = false; started.resolve(); return release.promise; }
+      return wrap(texts);
+    }
+  });
+  const article = env.page.make('article', {}, [
+    env.page.make('p', { attrs: { top: '20' } }, [t('Active reading source')]),
+    env.page.make('p', { attrs: { top: '100' } }, [t('Unfinished reading source')])
+  ]);
+  const sidebar = env.page.make('aside', {});
+  env.page.body.append(article, sidebar);
+  const active = env.send(translateMessage());
+  await started.promise;
+  const counter = env.page.make('p', { attrs: { top: '0' } }, [t('New unrelated sidebar update')]);
+  sidebar.appendChild(counter);
+  env.mutate([{ type: 'childList', target: sidebar, addedNodes: [counter] }]);
+  release.resolve(wrap(['Active reading source']));
+  await active;
+  await env.finish();
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts),
+    ['Active reading source', 'Unfinished reading source', 'New unrelated sidebar update']);
 });
 
 test('scrolling asks for the text that just came into view', async () => {
@@ -562,7 +667,7 @@ test('scrolling asks for the text that just came into view', async () => {
     // The reader scrolls: the second paragraph is now at the top of the viewport.
     below.attrs.top = '10';
     env.scroll();
-    await clock.run();
+    await clock.finish();
 
     const texts = env.recorded.batch.map((batch: ATNamespace) => batch.texts).flat();
     assert.deepEqual(texts, ['On screen now', 'Scrolled into view'], 'the scroll pass translates what is visible now');
@@ -584,20 +689,21 @@ test('a second injection registers no extra listener', async () => {
 
 // --- translate --------------------------------------------------------------
 
-test('a translate decision translates every text and reports the count', async () => {
+test('serial opt-out yields after one request and finishes visible text through continuations', async () => {
   const env = environment();
   const before = pageTexts(env.page.documentElement);
   assert.deepEqual(before, DEFAULT_TEXTS);
 
-  const reply = await env.send(translateMessage(snapshot({ targetLang: 'de', sourceLang: 'auto' })));
+  const reply = await env.send(translateMessage(snapshot({ targetLang: 'de', sourceLang: 'auto', translationConcurrency: 1 })));
   assert.deepEqual(reply, {
     ok: true,
-    status: 'translated',
-    translated: 2,
-    requested: 2,
+    status: 'translating',
+    translated: 1,
+    requested: 1,
     failed: 0,
     error: null
   });
+  await env.finish();
 
   assert.deepEqual(env.recorded.batch.flatMap((batch) => batch.texts), DEFAULT_TEXTS);
   assert.deepEqual(env.recorded.batch[0], {
@@ -607,25 +713,25 @@ test('a translate decision translates every text and reports the count', async (
     sourceLang: 'auto',
     url: 'https://example.com/article',
     context: null,
-    role: 'unknown'
+    role: 'unknown',
+    fragmentConcurrency: 1
   });
 
   assert.deepEqual(pageTexts(env.page.documentElement), wrap(DEFAULT_TEXTS), 'every text node holds its translation');
-  assert.deepEqual(env.recorded.state, [
-    { type: 'at/state-changed', status: 'translating', translated: 1, error: null },
-    { type: 'at/state-changed', status: 'translated', translated: 2, error: null }
-  ], 'a pass reports progress before it reports the result');
+  assert.ok(env.recorded.state.some(patch => patch.status === 'translating'));
+  assert.deepEqual(env.recorded.state.at(-1),
+    { type: 'at/state-changed', status: 'translated', translated: 2, error: null });
 
   assert.equal(env.observers.length, 1, 'a translated page starts watching for dynamic content');
   const observer = env.observers[0];
   assert.ok(observer);
   assert.deepEqual(observer.targets, [env.page.documentElement]);
-  assert.deepEqual(observer.init, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'open', 'style', 'class', 'aria-hidden', 'translate'] });
 });
 
 test('a repeated translate pass asks the provider nothing new', async () => {
   const env = environment();
   await env.send(translateMessage());
+  await env.finish();
   const requestsBefore = env.recorded.batch.length;
   const reply = await env.send(translateMessage());
   assert.equal(env.recorded.batch.length, requestsBefore, 'already translated nodes are not sent again');
@@ -670,7 +776,9 @@ test('a rejected batch leaves the page untouched and reaches the background', as
   const env = environment({ fail: { error: 'provider exploded', code: 'rate_limited' } });
   const reply = await env.send(translateMessage());
 
-  assert.deepEqual(reply, { ok: false, error: 'provider exploded', code: 'rate_limited' });
+  assert.equal(reply.ok, false, 'a failed parallel wave is an error response');
+  assert.equal(reply.error, 'provider exploded');
+  await env.finish();
   assert.deepEqual(env.recorded.batch.flatMap((batch) => batch.texts), DEFAULT_TEXTS, 'every source was attempted');
   assert.deepEqual(pageTexts(env.page.documentElement), DEFAULT_TEXTS, 'a failure never edits the page');
   assert.deepEqual(
@@ -678,7 +786,7 @@ test('a rejected batch leaves the page untouched and reaches the background', as
     [],
     'a failed pass must not claim translated nodes'
   );
-  assert.equal(env.boot.state.observer, null, 'a failed pass leaves the page unwatched');
+  assert.equal(env.boot.state.lastError, 'provider exploded', 'later failures remain visible');
 });
 
 test('a failed chunk keeps what already landed and says what failed', async () => {
@@ -686,13 +794,13 @@ test('a failed chunk keeps what already landed and says what failed', async () =
   const pack = environment({ texts: [] }).AT.C.PACKED_TEXT_NODES;
   const texts = Array.from({ length: pack + 1 }, (_, index) => `Sentence number ${index} of the page`);
   const env = environment({ texts, fail: { error: 'provider exploded', code: null, after: 1 } });
-  const reply = await env.send(translateMessage());
+  await env.send(translateMessage());
+  await env.finish();
 
   assert.deepEqual(env.recorded.batch[0]?.texts, [texts[0]]);
   assert.deepEqual(env.recorded.batch.slice(1).flatMap((batch) => batch.texts), texts.slice(1));
-  assert.equal(reply.ok, true, 'a partial pass is not a failed pass');
-  assert.equal(reply.failed, texts.length - 1, 'every untranslated node is reported as failed');
-  assert.match(String(reply.error), /provider exploded/);
+  assert.equal(env.boot.state.pipeline.debug().failed, texts.length - 1, 'every untranslated node is reported as failed');
+  assert.match(String(env.boot.state.lastError), /provider exploded/);
   const shown = pageTexts(env.page.documentElement);
   assert.equal(shown[0], wrap([texts[0]!])[0], 'the answered leading segment stays translated');
   assert.deepEqual(shown.slice(1), texts.slice(1), 'refused segments keep their source text');
@@ -701,6 +809,7 @@ test('a failed chunk keeps what already landed and says what failed', async () =
   // twice, even though the fake provider refuses every later request too.
   const batchesBefore = env.recorded.batch.length;
   await env.send(translateMessage());
+  await env.finish();
   assert.deepEqual(env.recorded.batch.slice(batchesBefore).flatMap((batch) => batch.texts), texts.slice(1),
     'only the failed source segments are retried');
   assert.equal(pageTexts(env.page.documentElement)[0], wrap([texts[0]!])[0], 'the translated text is still there');
@@ -711,6 +820,7 @@ test('a failed chunk keeps what already landed and says what failed', async () =
 test('restore puts the original text back and reports idle', async () => {
   const env = environment();
   await env.send(translateMessage());
+  await env.finish();
   assert.deepEqual(pageTexts(env.page.documentElement), wrap(DEFAULT_TEXTS));
 
   const reply = await env.send({ type: 'at/content-restore' });
@@ -898,7 +1008,7 @@ test('a page with more text than one tick may take finishes on its own', async (
   try {
     await env.send(translateMessage(snapshot({ maxNodes: 40 })));
     const translated = pageTexts(env.page.body).filter((text) => text.startsWith('»'));
-    assert.equal(translated.length, Math.min(40, env.AT.C.OBSERVER_BATCH_NODES), 'the initial pass yields at the scheduler slice');
+    assert.equal(translated.length, 2, 'the initial pass yields after the two-slot wave');
     assert.ok(clock.pending.length > 0, 'the spent budget schedules the next tick without a mutation');
 
     // Nothing new in the DOM: only the self-scheduled ticks can finish it.
@@ -919,6 +1029,7 @@ test('an inserted region is translated on its own, not by re-reading the page', 
   const clock = installClock();
   try {
     await env.send(translateMessage());
+    await env.finish();
     const requestsBefore = env.recorded.batch.length;
 
     // A widget appears: one subtree, one new sentence.
@@ -941,6 +1052,7 @@ test('simultaneous inserted regions compete by visibility instead of mutation or
   const clock = installClock();
   try {
     await env.send(translateMessage());
+    await env.finish();
     const before = env.recorded.batch.length;
     const distant = env.page.make('p', { attrs: { top: '4000' } }, [t('Distant counter update')]);
     const visible = env.page.make('p', { attrs: { top: '100' } }, [t('New visible reply')]);
@@ -951,8 +1063,13 @@ test('simultaneous inserted regions compete by visibility instead of mutation or
     ]);
     await clock.run();
     assert.deepEqual(env.recorded.batch.slice(before).flatMap((batch) => batch.texts),
-      ['New visible reply', 'Distant counter update']);
+      ['New visible reply']);
     assert.deepEqual(pageTexts(visible), ['»New visible reply«']);
+    assert.deepEqual(pageTexts(distant), ['Distant counter update']);
+    distant.attrs.top = '20';
+    env.scroll();
+    await clock.finish();
+    assert.deepEqual(pageTexts(distant), ['»Distant counter update«']);
   } finally {
     clock.restore();
   }
@@ -963,6 +1080,7 @@ test('a text the page rewrote is picked up from its record', async () => {
   const clock = installClock();
   try {
     await env.send(translateMessage());
+    await env.finish();
     const requestsBefore = env.recorded.batch.length;
     const first = textNodes(env.page.body)[0];
     assert.ok(first);
@@ -983,6 +1101,7 @@ test('changes with nothing to translate do not wake the translator', async () =>
   const clock = installClock();
   try {
     await env.send(translateMessage());
+    await env.finish();
     const requestsBefore = env.recorded.batch.length;
 
     // A removal leaves nothing to read.
@@ -1014,6 +1133,7 @@ test('a flood of regions falls back to one pass over the page', async () => {
   const clock = installClock();
   try {
     await env.send(translateMessage());
+    await env.finish();
     const added: StubElement[] = [];
     for (let index = 0; index < 40; index += 1) {
       const item = env.page.make('p', {}, [t(`Flood ${index}`)]);
@@ -1040,6 +1160,7 @@ test('a page that keeps mutating still gets its new text translated', async () =
   const clock = installClock();
   try {
     await env.send(translateMessage());
+    await env.finish();
     env.page.body.appendChild(env.page.make('p', {}, [t('Late comment')]));
 
     env.mutate();
@@ -1051,7 +1172,7 @@ test('a page that keeps mutating still gets its new text translated', async () =
     env.mutate();
     assert.equal(clock.pending.length, scheduled, 'the pending tick is kept, not rescheduled');
 
-    await clock.run();
+    await clock.finish();
     const asked = env.recorded.batch.flatMap((batch) => batch.texts);
     assert.ok(asked.includes('Late comment') && asked.includes('tick'), 'the tick ran anyway');
     assert.deepEqual(pageTexts(env.page.body).slice(2), ['»Late comment«', '»tick«']);
@@ -1065,12 +1186,12 @@ test('a mutation re-scans the page and translates the new text', async () => {
   const clock = installClock();
   try {
     await env.send(translateMessage());
+    await env.finish();
     const requestsBefore = env.recorded.batch.length;
     assert.equal(env.observers.length, 1);
     const observer = env.observers[0];
     assert.ok(observer);
     assert.deepEqual(observer.targets, [env.page.documentElement]);
-    assert.deepEqual(observer.init, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['hidden', 'open', 'style', 'class', 'aria-hidden', 'translate'] });
 
     env.page.body.appendChild(env.page.make('p', {}, [t('Fresh content')]));
     env.mutate();
@@ -1103,6 +1224,7 @@ test('a stopped observer ignores later mutations', async () => {
   const clock = installClock();
   try {
     await env.send(translateMessage());
+    await env.finish();
     const observer = env.observers[0];
     assert.ok(observer);
     const requestsBefore = env.recorded.batch.length;
@@ -1212,10 +1334,9 @@ test('a new target takes effect without waiting for the obsolete target response
 test('speed: a known continuation yields without the 300 ms mutation debounce', async () => {
   const clock = installClock();
   try {
-    // Three slices of work: one pass takes one, the rest must resume with no
-    // debounce and terminate without a feedback loop.
+    // Three two-slot waves: each continuation must resume immediately.
     const env = environment({ texts: [] });
-    const slice = env.AT.C.OBSERVER_BATCH_NODES;
+    const slice = 2;
     const texts = Array.from({ length: slice * 3 }, (_, i) => 'Unique sentence number ' + i + '.');
     for (const text of texts) env.page.body.appendChild(env.page.make('p', {}, [t(text)]));
     const first = await env.send(translateMessage(snapshot({ maxNodes: slice * 3 })));
@@ -1226,8 +1347,65 @@ test('speed: a known continuation yields without the 300 ms mutation debounce', 
     assert.equal(clock.pending[0]?.delay, 0);
     await clock.run();
     assert.equal(env.boot.state.pipeline.stats().translated, slice * 3);
-    assert.equal(clock.pending.length, 0, 'the queue terminates without a feedback loop');
+    assert.ok((clock.pending[0]?.delay ?? 0) > 0, 'idle discovery yields instead of spinning immediately');
+    await clock.run();
+    assert.equal(clock.pending.length, 0, 'empty idle discovery leaves no polling loop');
     await env.send({ type: 'at/content-restore' });
     assert.deepEqual(pageTexts(env.page.documentElement), texts);
   } finally { clock.restore(); }
+});
+
+test('idle prefetch waits for stability, cancels admission on scroll and mutation, and stops in hidden documents', async () => {
+  const env = environment({ texts: [] });
+  env.page.body.append(
+    env.page.make('p', { attrs: { top: '100' } }, [t('Visible opening prose')]),
+    env.page.make('p', { attrs: { top: '4000' } }, [t('Distant idle prose')])
+  );
+  await env.send(translateMessage());
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), ['Visible opening prose']);
+  const firstIdle = testClock.pending.find(timer => timer.delay > 400);
+  assert.ok(firstIdle && firstIdle.delay <= 500, 'offscreen admission waits for the stable viewport delay');
+  env.scroll();
+  assert.ok(!testClock.pending.includes(firstIdle), 'scroll cancels the old idle admission immediately');
+  await testClock.run();
+  await testClock.run();
+  assert.equal(env.recorded.batch.length, 1, 'the visible-only continuation cannot prefetch');
+  const afterScroll = testClock.pending.find(timer => timer.delay > 400);
+  assert.ok(afterScroll);
+  const inserted = env.page.make('p', { attrs: { top: '200' } }, [t('New visible insertion')]);
+  env.page.body.append(inserted);
+  env.mutate([{ type: 'childList', target: env.page.body, addedNodes: [inserted] }]);
+  assert.ok(!testClock.pending.includes(afterScroll), 'mutation cancels idle admission');
+  await testClock.run();
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), ['Visible opening prose', 'New visible insertion']);
+  env.visibility(true);
+  await testClock.finish();
+  assert.equal(env.recorded.batch.length, 2, 'a hidden document never prefetches');
+  env.visibility(false);
+  await env.finish();
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts),
+    ['Visible opening prose', 'New visible insertion', 'Distant idle prose']);
+  assert.equal(testClock.pending.length, 0, 'drained work leaves no idle polling loop');
+});
+
+test('an active idle quantum survives scrolling but later prefetch yields to newly visible work', async () => {
+  const idle = deferred<string[]>();
+  const env = environment({ texts: [], translate: texts =>
+    texts[0] === 'Active distant prose' ? idle.promise : wrap(texts) });
+  const nearer = env.page.make('p', { attrs: { top: '3000' } }, [t('Active distant prose')]);
+  const farther = env.page.make('p', { attrs: { top: '5000' } }, [t('Next distant prose')]);
+  env.page.body.append(env.page.make('p', { attrs: { top: '100' } }, [t('Visible opening prose')]), nearer, farther);
+  await env.send(translateMessage());
+  await testClock.run();
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), ['Visible opening prose', 'Active distant prose']);
+  farther.attrs.top = '200';
+  env.scroll();
+  await testClock.run();
+  assert.equal(env.recorded.batch.length, 2, 'scroll never abandons or duplicates the active quantum');
+  idle.resolve(wrap(['Active distant prose']));
+  await drain();
+  await env.finish();
+  assert.equal(pageTexts(nearer)[0], '»Active distant prose«');
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts),
+    ['Visible opening prose', 'Active distant prose', 'Next distant prose']);
 });

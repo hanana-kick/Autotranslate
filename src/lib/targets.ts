@@ -69,7 +69,7 @@ namespace AT.targets {
     navigation: false,
     aside: false,
     footer: false,
-    unknown: false
+    unknown: true
   };
 
   export function isContent(role: TextRole): boolean {
@@ -90,14 +90,14 @@ namespace AT.targets {
     const role = (info.ariaRole ?? '').toLowerCase();
     if (info.inForm || info.tag === 'button' || role === 'form' || role === 'search' || role === 'button') return 'form';
     if (info.inCommentMetadata) return 'metadata';
+    if (info.inNav || role === 'navigation' || role === 'menu' || role === 'menubar') return 'navigation';
+    if (info.inFooter || role === 'contentinfo') return 'footer';
+    if (info.inAside || role === 'complementary' || role === 'note') return 'aside';
     if (info.inComment || role === 'comment' || COMMENT_MARKERS.test(info.markers ?? '')) {
       if (info.tag === 'time' || info.tag === 'address' ||
           /(^|[\s_-])(author|byline|dateline|timestamp|published|vote-count)([\s_-]|$)/.test(info.markers ?? '')) return 'metadata';
       return 'comment';
     }
-    if (info.inNav || role === 'navigation' || role === 'menu' || role === 'menubar') return 'navigation';
-    if (info.inFooter || role === 'contentinfo') return 'footer';
-    if (info.inAside || role === 'complementary' || role === 'note') return 'aside';
     if (info.inHeading || info.tag === 'h1' || /^h[1-6]$/.test(info.tag) || role === 'heading') return 'heading';
     if (info.inArticle || role === 'article' || role === 'main') return 'article';
     if (info.inList || role === 'list' || role === 'listitem' || info.tag === 'li') return 'list';
@@ -127,6 +127,17 @@ namespace AT.targets {
     return 'far';
   }
 
+  /** A reading flow inferred from semantic containers and layout evidence. */
+  export type ReadingRegion = {
+    /** Stable within one snapshot; distinct columns must not interleave. */
+    id: number;
+    top: number;
+    inlineStart: number;
+    order: number;
+    /** CSS columns flow through DOM order, not across rendered rows. */
+    documentFlow: boolean;
+  };
+
   /** One text node, as the planner sees it. `id` is opaque to this module. */
   export type Candidate = {
     id: string;
@@ -138,6 +149,11 @@ namespace AT.targets {
     top?: number;
     /** Position along a rendered line; negative right edge for RTL text. */
     inlineStart?: number;
+    region?: ReadingRegion | undefined;
+    /** A recent, explicit reader interaction, never mutation recency. */
+    engaged?: boolean;
+    /** Finish an ordinary reading unit; only pathological long units yield. */
+    continuation?: 'preferred' | 'yielding' | undefined;
     /** A clipped node's visible prefix is done; its hidden continuation can wait. */
     deferred?: boolean;
   };
@@ -145,10 +161,10 @@ namespace AT.targets {
   export type Group = { role: TextRole; priority: Priority; ids: string[] };
 
   /**
-   * Read visible primary content and its next-screen continuation before the
-   * sidebar. Then supporting UI, then distant text. Sort individual text boxes
-   * before grouping: a role bucket must never pull a later paragraph or comment
-   * ahead of an intervening heading. DOM order only breaks geometry ties.
+   * Visibility is a hard boundary: all visible text precedes prefetch.
+   * Within it, a bounded reader-selected region precedes main reading, then
+   * support. Read each region/column before moving sideways; ordinary single
+   * columns still use rendered geometry (including CSS-reordered headings).
    */
   export function plan(candidates: Candidate[], options?: { limit?: number; band?: number }): Group[] {
     const limit = Number(options?.limit);
@@ -164,22 +180,26 @@ namespace AT.targets {
       return candidate.priority === 'visible' ? Math.max(0, top) : top;
     };
     const bandOf = (candidate: Candidate): number => Math.floor(topOf(candidate) / band);
-    const readingRank = (candidate: Candidate): number => {
-      if (candidate.deferred) return 5;
-      if (candidate.priority === 'far') return 4;
-      if (isContent(candidate.role)) {
-        if (candidate.priority === 'visible') return 0;
-        if (topOf(candidate) >= 0) return 1;
-      }
-      return 2 + PRIORITY_RANK[candidate.priority];
-    };
+    const readingRank = (candidate: Candidate): number =>
+      candidate.deferred ? 3 : PRIORITY_RANK[candidate.priority];
+    const continuationRank = (candidate: Candidate): number =>
+      candidate.priority !== 'visible' ? 1 : candidate.continuation === 'preferred' ? 0 :
+        candidate.continuation === 'yielding' ? 2 : 1;
+    const regionTop = (region: ReadingRegion | undefined, candidate: Candidate): number =>
+      region ? (candidate.priority === 'visible' ? Math.max(0, region.top) : region.top) : 0;
     usable.sort((left, right) => {
       const a = topOf(left), b = topOf(right);
+      const l = left.region, r = right.region;
       return readingRank(left) - readingRank(right) ||
+        Number(!(left.engaged && left.priority === 'visible')) - Number(!(right.engaged && right.priority === 'visible')) ||
         Number(!isContent(left.role)) - Number(!isContent(right.role)) ||
-        // Continue down the page before revisiting text above the viewport.
         Number(a < 0) - Number(b < 0) ||
         (a < 0 && b < 0 ? bandOf(right) - bandOf(left) : 0) ||
+        continuationRank(left) - continuationRank(right) ||
+        regionTop(l, left) - regionTop(r, right) ||
+        (l?.inlineStart ?? 0) - (r?.inlineStart ?? 0) ||
+        (l?.order ?? 0) - (r?.order ?? 0) ||
+        (l?.documentFlow && r?.documentFlow && l.id === r.id ? left.order - right.order : 0) ||
         a - b ||
         (Number(left.inlineStart) || 0) - (Number(right.inlineStart) || 0) ||
         (Number(left.order) || 0) - (Number(right.order) || 0);

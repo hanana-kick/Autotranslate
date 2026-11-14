@@ -253,12 +253,12 @@ export function summarizeCommentSlo(evidence) {
     presentationHostMeaning: 'Connected aria-busy=true presentation hosts, not GPU requests or GPU concurrency.' };
 }
 
-export async function runYouTubeComments({ context, options, output, url }) {
+export async function runYouTubeComments({ context, options, output, url, warmup = 'the four-paragraph smoke page' }) {
   const report = { url, status: 'opening', phases: [], limitations: [
     'Single live browsing session; content, reply counts and layout can change.',
     'Dispatch times observe presentation hosts, not GPU start. Commit latency includes queueing and ordered DOM writes.',
     'Whole-text completion means all observed letter-bearing Text nodes changed and no host stayed busy or partial. Already-Korean units are excluded from waiting, not counted as translated; unchanged names or links can leave this conservative metric incomplete.',
-    'Comments were loaded before enabling translation; model was warm from the four-paragraph smoke page.',
+    `Comments were loaded before enabling translation; model was warm from ${warmup}.`,
     'The 1s clock begins at observed viewport entry after enable confirmation, not page load or the UI click. Entries already complete at confirmation are separate; cached-complete returns and already-Korean sources are excluded from translation latency.',
     'Viewport observations use scroll animation frames, mutations and 100ms sampling; latency and exit times are observation bounds, not engine timestamps. Short unfinished exits are explicitly censored, not counted as passes.',
     'Observer overhead includes mutation callbacks, interval/scroll samples, setup and API snapshot/cohort processing; browser protocol serialization is not included. Active presentation hosts are not GPU request counts.'

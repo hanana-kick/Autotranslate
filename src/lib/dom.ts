@@ -22,7 +22,15 @@ namespace AT.dom {
     STYLE: true, TEMPLATE: true, TEXTAREA: true, TRACK: true, VIDEO: true
   };
 
-  export type Provider = (texts: string[], onProgress?: AT.TranslationProgress) => Promise<string[]>;
+  export type Provider = (texts: string[], onProgress?: AT.TranslationProgress, signal?: AbortSignal) => Promise<string[]>;
+
+  /** Immutable dispatch metadata and commit barrier for an independent unit. */
+  export type Execution = {
+    translate: Provider;
+    cacheScope: string;
+    shouldYield: () => boolean;
+    ready: Promise<void>;
+  };
 
   /** Only what the engine touches; tests inject a duck-typed document. */
   export type DocumentRoot = { nodeType: number; documentElement: Element | null };
@@ -88,7 +96,7 @@ namespace AT.dom {
   export type Translator = {
     collect(root: Node | null | undefined, limit?: number): Text[];
     translateRoot(root?: Node | null | undefined, options?: { limit?: number }): Promise<Result>;
-    translateNodes(nodes: Iterable<Text> | ArrayLike<Text>): Promise<Result>;
+    translateNodes(nodes: Iterable<Text> | ArrayLike<Text>, execution?: Execution): Promise<Result>;
     /** Whether this node currently holds a translation of its own text. A node
      *  the model failed to answer for is not "done", so a later pass retries
      *  it instead of skipping it forever. */
@@ -103,13 +111,35 @@ namespace AT.dom {
   };
 
   export function hasText(text: unknown): boolean {
-    return typeof text === 'string' && text.trim().length > 1 && /[\p{L}\p{N}]/u.test(text);
+    if (typeof text !== 'string') return false;
+    const value = text.trim();
+    if (!/\p{L}/u.test(value)) return false;
+    // Whole identifiers only: ordinary short prose and title-case names without
+    // semantic metadata remain eligible. Never strip tokens from a sentence.
+    return !/^(?:[a-z][a-z\d+.-]*:\/\/|www\.)\S+$/iu.test(value) &&
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(value) &&
+      !/^@[\p{L}\p{N}_.-]+$/u.test(value) &&
+      !/^[\p{L}\p{N}_.-]+#\d{4,}$/u.test(value) &&
+      !/^(?:[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}|0x[a-f\d]+)$/iu.test(value) &&
+      !/^(?:[A-Z]{2,}[-_]\d[\w-]*|[\p{L}\p{N}]+(?:_[\p{L}\p{N}]+)+)$/u.test(value);
   }
 
   export function isIgnoredElement(element: Element | null | undefined): boolean {
     if (!element || element.nodeType !== 1) return true;
     if (isEditable(element)) return true;
-    return Boolean(element.closest(AT.C.IGNORE_SELECTOR));
+    if (element.closest(AT.C.IGNORE_SELECTOR) || element.closest(
+      '[rel~="author"], [itemprop~="author"], [itemprop~="givenName"], [itemprop~="familyName"], ' +
+      '[itemprop~="alternateName"], [itemtype$="/Person"] [itemprop~="name"], ' +
+      '.author, .author-name, .author-text, .authorName, .byline, .username, .user-name, .profile-name, .display-name, ' +
+      '[id="author"], [id="author-name"], [id="author-text"], [id="username"], [id="profile-name"]'
+    )) return true;
+    // Match explicit name fields in prefixed/BEM/generated markup, not whole
+    // author containers: those can also contain biographies and footnotes.
+    for (let current: Element | null = element; current; current = current.parentElement) {
+      const marker = `${current.getAttribute?.('class') ?? ''} ${current.id ?? ''}`;
+      if (/(?:^|[\s_-])(?:person|author|user|profile|display)[_-]?name(?=$|\s)/i.test(marker)) return true;
+    }
+    return false;
   }
 
   function isEditable(element: Element): boolean {
@@ -145,6 +175,28 @@ namespace AT.dom {
     return parts.length === count && parts.every(Boolean) ? parts : null;
   }
 
+  const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === 'function'
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : undefined;
+
+  /** Older supported Firefox versions lack Segmenter. Their fallback only
+   * splits between known standalone bases; uncertain scripts, combining marks,
+   * flags and joiner sequences stay together, sometimes more coarsely than one
+   * grapheme. Never trade Unicode integrity for finer display progress. */
+  export function* graphemes(text: string): Generator<{ segment: string; index: number }> {
+    if (GRAPHEME_SEGMENTER) { yield* GRAPHEME_SEGMENTER.segment(text); return; }
+    const standalone = /^[\x20-\x7e\u3041-\u3096\u30a1-\u30fa\u4e00-\u9fff\uac00-\ud7a3]$/u;
+    let start = 0, index = 0, previous = '';
+    for (const character of text) {
+      if (standalone.test(previous) && standalone.test(character)) {
+        yield { segment: text.slice(start, index), index: start };
+        start = index;
+      }
+      previous = character;
+      index += character.length;
+    }
+    if (start < text.length) yield { segment: text.slice(start), index: start };
+  }
+
   export function createTranslator(options: Options): Translator {
     const {
       doc,
@@ -153,7 +205,6 @@ namespace AT.dom {
       mergeInline = true,
       sentences,
       shouldAbort,
-      shouldYield,
       workLimit,
       shouldTranslate,
       onApply,
@@ -170,6 +221,8 @@ namespace AT.dom {
     const originals = new Map<Text, Original>();
     // Offsets refer to the original core, never the translated DOM value.
     const progress = new Map<Text, { source: string; value: string; offset: number; prefix: string; chunk: number }>();
+    // A late request must never settle a newer presentation of the same Text.
+    const presenting = new Map<Text, Set<Text>>();
     let completed = 0;
     /** Answers written back unchanged: a real failure with no exception of its
      *  own, counted so a pass that changed nothing cannot report success. */
@@ -177,6 +230,7 @@ namespace AT.dom {
     const cache = new Map<string, { answers: string[]; bytes: number }>();
     let cacheBytes = 0;
     let generation = 0;
+    const controllers = new Set<AbortController>();
     const MAX_CACHE_BYTES = 4 * 1024 * 1024;
     const MAX_CACHE_ENTRIES = 2048;
 
@@ -202,6 +256,15 @@ namespace AT.dom {
         cacheBytes -= cache.get(oldest)!.bytes;
         cache.delete(oldest);
       }
+    }
+
+    function settlePresentation(node: Text, interrupted = false): void {
+      presenting.delete(node);
+      const record = originals.get(node);
+      const status = record && record.applied === node.nodeValue
+        ? record.complete ? 'translated' : 'partial'
+        : 'failed';
+      presentation?.settled(node, status, interrupted);
     }
 
     function forget(node: Text): void {
@@ -243,6 +306,14 @@ namespace AT.dom {
      * Suffix-range intersection stays monotonic even for bidi runs and newlines,
      * where testing individual character rects with binary search does not. */
     function visibleEnd(node: Text, start = 0): number {
+      // A final preview can outlive its commit until the fade completes. Read
+      // canonical source offsets, not the hidden slot or translated preview.
+      return presentation?.measureSource
+        ? presentation.measureSource(node, () => sourceVisibleEnd(node, start))
+        : sourceVisibleEnd(node, start);
+    }
+
+    function sourceVisibleEnd(node: Text, start: number): number {
       const length = node.nodeValue?.length ?? 0;
       const document = node.ownerDocument;
       const view = document?.defaultView;
@@ -323,7 +394,7 @@ namespace AT.dom {
       if (!end) return text.codePointAt(0)! > 0xFFFF ? 2 : 1;
       const prefix = text.slice(0, end);
       let sentence = 0;
-      for (const match of prefix.matchAll(/[.!?。！？](?=\s|$)|\n+/gu)) {
+      for (const match of prefix.matchAll(/[。！？]|[.!?](?=\s|$)|\n+/gu)) {
         sentence = match.index! + match[0].length;
       }
       if (sentence && /\S/u.test(prefix.slice(0, sentence))) return sentence;
@@ -513,10 +584,53 @@ namespace AT.dom {
       if (/\S/u.test(item.core.slice(offset))) return null;
       return { parts, ends, gaps };
     }
+    /** A display estimate, never an alignment or a committed source offset.
+     * Script-weighted graphemes approximate token cost without a tokenizer in
+     * the content script. Keep at least the final 10% (and a readable grapheme)
+     * until the provider commits; shorter corrections cannot reveal old source
+     * again. Each request segment has an independent monotonic frontier. */
+    function sourcePreview(source: string): (text: string) => string {
+      const weight = (text: string): number =>
+        /^\s+$/u.test(text) ? 0.125 :
+        /[\p{Script=Han}\p{Script=Hangul}\p{Script=Hiragana}\p{Script=Katakana}\p{Extended_Pictographic}]/u.test(text) ? 1 :
+        /[\p{Script=Latin}\p{N}]/u.test(text) ? 0.25 : /[\p{L}]/u.test(text) ? 0.5 : 0.25;
+      let total = 0, lastReadable = 0;
+      const boundaries = [...graphemes(source)].map(({ segment, index }) => {
+        total += weight(segment);
+        if (/[\p{L}\p{N}\p{Extended_Pictographic}]/u.test(segment)) lastReadable = index;
+        return { end: index + segment.length, cost: total };
+      });
+      let consumed = 0;
+      return (text) => {
+        if (!text) return '';
+        let decoded = 0;
+        for (const { segment } of graphemes(text)) decoded += weight(segment);
+        const budget = Math.min(decoded, total * 0.9);
+        while (consumed < boundaries.length && boundaries[consumed]!.end <= lastReadable &&
+            boundaries[consumed]!.cost <= budget) consumed++;
+        const end = consumed ? boundaries[consumed - 1]!.end : 0;
+        return text + source.slice(end);
+      };
+    }
 
-    async function run(nodes: readonly Text[]): Promise<Result> {
+    async function run(nodes: readonly Text[], execution?: Execution): Promise<Result> {
+      const provider = execution?.translate ?? translate;
+      const shouldYield = execution?.shouldYield ?? options.shouldYield;
+      const ownedControllers = new Set<AbortController>();
       const epoch = generation;
-      const cancelled = () => epoch !== generation || shouldAbort?.() === true;
+      const presented = new Set<Text>();
+      let aborted = false;
+      const cancelled = (): boolean => {
+        const abortRequested = shouldAbort?.() === true;
+        if (!aborted && epoch === generation && !abortRequested) return false;
+        aborted = true;
+        for (const controller of abortRequested && epoch === generation ? controllers : ownedControllers) controller.abort();
+        for (const node of presented) {
+          if (presenting.get(node) === presented) settlePresentation(node, true);
+        }
+        presented.clear();
+        return true;
+      };
       const incoming = new Set(nodes);
       const claimed = new Set<Text>();
       const jobs: Item[][] = [];
@@ -566,21 +680,41 @@ namespace AT.dom {
         }
       };
       mergedRuns = 0;
-      const scope = cacheScope?.() ?? '';
+      const scope = execution?.cacheScope ?? cacheScope?.() ?? '';
       const keyFor = (kind: string, sources: string[]) => JSON.stringify([scope, kind, sources]);
       const ask = async (texts: string[], onProgress?: AT.TranslationProgress): Promise<string[]> => {
         if (cancelled()) return [];
         requested += texts.length;
         let active = true;
+        const controller = new AbortController();
+        controllers.add(controller);
+        ownedControllers.add(controller);
+        let canPreview = !execution;
+        const queuedPreviews = new Map<number, string>();
+        if (execution) void execution.ready.then(() => {
+          canPreview = true;
+          if (!active || cancelled()) return;
+          for (const [index, text] of queuedPreviews) onProgress?.(index, text);
+          queuedPreviews.clear();
+        });
+        const previews = new Map<number, (text: string) => string>();
         let answers: string[];
         try {
-          answers = await translate(texts, presentation && onProgress ? (index, text) => {
+          answers = await provider(texts, presentation && onProgress ? (index, text) => {
             if (!active || cancelled() || !Number.isInteger(index) || index < 0 || index >= texts.length) return;
             if (text && AT.outputIssue(texts[index]!, text, true)) return;
-            onProgress(index, text);
-          } : undefined);
+            let compose = previews.get(index);
+            if (!compose) { compose = sourcePreview(texts[index]!); previews.set(index, compose); }
+            const value = compose(text);
+            if (canPreview) onProgress(index, value);
+            else queuedPreviews.set(index, value);
+          } : undefined, controller.signal);
+          if (execution) await execution.ready;
         } finally {
           active = false;
+          controllers.delete(controller);
+          ownedControllers.delete(controller);
+          queuedPreviews.clear();
         }
         if (!Array.isArray(answers) || answers.length !== texts.length) {
           throw new Error('the model returned an unexpected number of results');
@@ -598,7 +732,8 @@ namespace AT.dom {
         if (!cancelled() && apply(item, answer, complete)) wrote++;
       };
       const preview = (item: Item, text: string): void => {
-        if (cancelled() || !owns(item)) {
+        if (cancelled()) return;
+        if (!owns(item)) {
           presentation?.clearPreview(item.node);
           return;
         }
@@ -618,7 +753,7 @@ namespace AT.dom {
         const whitespace = splitWhitespace(work.item.core);
         if (!split) parts[0] = whitespace.core;
         const key = textKey(work.item, parts, namespace);
-        const hit = work.offset === 0 && !work.bounded ? cached(key) : null;
+        const hit = cached(key);
         const answers: string[] = [];
         let prefix = progress.get(item.node)?.prefix ?? '';
         for (let offset = 0; offset < parts.length;) {
@@ -648,6 +783,7 @@ namespace AT.dom {
                 work.item.core.length - whitespace.trail.length);
               preview(item, body + item.core.slice(sourceEnd));
             }) : [];
+          if (execution) await execution.ready;
           if (cancelled() || !owns(item)) return;
           let valid = offset, replyAt = 0;
           for (; valid < end; valid++) {
@@ -679,9 +815,9 @@ namespace AT.dom {
             firstError ??= new Error(error);
             return;
           }
-          if (complete && work.offset === 0 && !work.bounded && !cancelled() && owns(item)) remember(key, answers);
           offset = end;
         }
+        if (!cancelled() && owns(item) && answers.length === parts.length) remember(key, answers);
         if (owns(item) && progress.has(item.node)) pending.add(item.node);
       };
 
@@ -757,12 +893,13 @@ namespace AT.dom {
             const value = (reply[at] ?? '').trim();
             for (const slot of group) {
               answers[slot] = value;
-              if (value) remember(keys[slot]!, [value]);
+              if (value && value !== live[slot]!.core && owns(live[slot]!)) remember(keys[slot]!, [value]);
             }
           });
         }
         // Inference remains concurrent; only DOM commits wait for earlier jobs.
         await ready;
+        if (execution) await execution.ready;
         if (cancelled()) return;
         live.forEach((item, index) => {
           if (!owns(item)) return;
@@ -782,26 +919,22 @@ namespace AT.dom {
       const inFlight: Promise<void>[] = [];
       let committed = Promise.resolve();
       let firstPack = true;
-      const presented = new Set<Text>();
       const begin = (items: Item[]): void => {
-        if (!presentation) return;
+        if (!presentation || cancelled()) return;
         for (const item of items) {
           const part = fragment(item).item;
           if (owns(item) && (sentenceJob(part)?.parts ?? [part.core]).some(eligible)) {
             presentation.begin(item.node);
             presented.add(item.node);
+            presenting.set(item.node, presented);
           }
         }
       };
       const settle = (items: Item[]): void => {
-        if (!presentation) return;
+        if (!presentation || cancelled()) return;
         for (const item of items) {
-          if (!presented.delete(item.node)) continue;
-          const record = originals.get(item.node);
-          const status = record && record.applied === item.node.nodeValue
-            ? record.complete ? 'translated' : 'partial'
-            : 'failed';
-          presentation.settled(item.node, status);
+          if (!presented.delete(item.node) || presenting.get(item.node) !== presented) continue;
+          settlePresentation(item.node, failedNodes.has(item.node));
         }
       };
       /** Runs one job, keeping the per-job accounting the pass reports on. */
@@ -863,6 +996,7 @@ namespace AT.dom {
         // A numbered run and a sentence split read the page's own structure, so
         // they start once every pack has landed.
         await drainAll();
+        if (cancelled()) break;
         if (shouldYield?.()) {
           for (const remaining of jobs.slice(job)) for (const item of remaining) pending.add(item.node);
           break;
@@ -943,8 +1077,8 @@ namespace AT.dom {
       async translateRoot(root?: Node | null | undefined, options?: { limit?: number }): Promise<Result> {
         return run(collect(root ?? doc.documentElement, options?.limit ?? maxNodes));
       },
-      translateNodes(nodes: Iterable<Text> | ArrayLike<Text>): Promise<Result> {
-        return run(Array.from(nodes));
+      translateNodes(nodes: Iterable<Text> | ArrayLike<Text>, execution?: Execution): Promise<Result> {
+        return run(Array.from(nodes), execution);
       },
       has(node: Text): boolean {
         const entry = originals.get(node);
@@ -956,6 +1090,11 @@ namespace AT.dom {
       },
       restore(root?: Node | null | undefined): { restored: number } {
         generation++;
+        for (const controller of controllers) controller.abort();
+        controllers.clear();
+        // A scoped restore cancels the whole pass, including active units outside
+        // its subtree. Park their committed text before restoring the scope.
+        for (const node of presenting.keys()) settlePresentation(node, true);
         prune();
         let restored = 0;
         for (const [node, entry] of [...originals]) {

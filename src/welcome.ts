@@ -1,4 +1,4 @@
-// First run: choose an on-device model or configure a compatible server.
+// First run: choose and prepare an on-device model.
 // Setup never opts a tab in: translation still requires explicit per-tab ON.
 // Compiled as a classic script next to welcome.html; loads after
 // lib/constants.js, lib/browser.js, lib/local.js, lib/modelstore.js,
@@ -18,7 +18,6 @@ namespace AT.welcome {
     status: HTMLParagraphElement;
     start: HTMLButtonElement;
     options: HTMLButtonElement;
-    serverOptions: HTMLButtonElement;
   };
 
   function el<K extends keyof Fields>(id: K): Fields[K] {
@@ -166,14 +165,13 @@ namespace AT.welcome {
     }
   }
 
-  /** Finish provider setup without selecting a tab for translation. */
+  /** Finish model setup without selecting a tab for translation. */
   async function start(): Promise<void> {
-    const remote = settings?.engine === 'openai' && AT.settings.serverConfigured(settings);
-    if (!readyModel && !remote) return;
+    if (!readyModel) return;
     el('start').disabled = true;
     settings = await AT.settings.save({
       enabled: false,
-      localModelId: readyModel?.id ?? settings!.localModelId,
+      localModelId: readyModel.id,
       targetLang: el('targetLang').value
     });
     document.body.dataset.done = 'true';
@@ -191,9 +189,6 @@ namespace AT.welcome {
   }
 
   function wire(): void {
-    el('serverOptions').addEventListener('click', () => {
-      void AT.settings.save({ engine: 'openai' }).then(() => AT.ui.openPage('options.html', 'auto', AT.ui.targetTabId()));
-    });
     el('download').addEventListener('click', () => void download());
     el('cancel').addEventListener('click', () => inflight?.abort());
     el('pick').addEventListener('click', () => el('modelFile').click());
@@ -217,11 +212,6 @@ namespace AT.welcome {
     );
     el('targetLang').value = settings.targetLang;
     wire();
-    if (settings.engine === 'openai') {
-      el('start').disabled = !AT.settings.serverConfigured(settings);
-      setStatus(AT.i18n.msg('server_needConfig'), 'info');
-      return;
-    }
     await showSupport();
     // A profile that already has the file (a reinstall, a second browser) skips
     // the transfer and only has to confirm.

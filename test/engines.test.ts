@@ -311,11 +311,8 @@ test('local: no model selected fails without waking the host', async () => {
 test('local: the host failure code decides who is at fault', async () => {
   const cases: [ATNamespace, string][] = [
     [{ ok: false, code: 'config', error: 'this browser has no WebGPU' }, 'config'],
-    [{ ok: false, code: 'network', error: 'the message channel died' }, 'network'],
     [{ ok: false, code: 'timeout', error: 'the generation ran too long' }, 'timeout'],
-    [{ ok: false, code: 'rate-limit', error: 'too many generations' }, 'rate-limit'],
     [{ ok: false, code: 'provider', error: 'the model crashed' }, 'provider'],
-    [{ ok: false, code: 'http', error: 'the download failed' }, 'http'],
     [{ ok: false, code: 'format', error: 'the prompt was malformed' }, 'format'],
     [{ ok: false, code: 'made-up', error: 'the wasm died' }, 'provider'],
     [{}, 'provider']
@@ -471,4 +468,103 @@ test('local: cancellation clears previews even when the host completes later', a
     signal: controller.signal, onProgress: (_index: number, text: string) => seen.push(text)
   }), /cancelled/);
   assert.deepEqual(seen, ['안녕', '']);
+});
+
+test('local: cancellation during counting never packs estimates or dispatches generation', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const controller = new AbortController();
+  const calls: string[] = [];
+  AT.local.callHost = async (message: ATNamespace, _progress: unknown, signal: AbortSignal) => {
+    calls.push(message.type);
+    assert.equal(signal, controller.signal);
+    controller.abort();
+    return { ok: false, code: 'cancelled' };
+  };
+  await assert.rejects(localModel({ signal: controller.signal }), { code: 'cancelled' });
+  assert.deepEqual(calls, [AT.C.MSG.LOCAL_COUNT]);
+});
+
+test('local: preaborted requests do not count and cancellation skips subsequent chunks', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const controller = new AbortController();
+  const calls: string[] = [];
+  AT.local.callHost = async (message: ATNamespace, _progress: unknown, signal: AbortSignal) => {
+    calls.push(message.type);
+    assert.equal(signal, controller.signal);
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, counts: [500, 500], overhead: 90 };
+    controller.abort();
+    return { ok: true, translations: ['번역'] };
+  };
+  await assert.rejects(localModel({ texts: ['Hello there', 'Good morning'], localMaxTokens: 128, signal: controller.signal }), { code: 'cancelled' });
+  assert.deepEqual(calls, [AT.C.MSG.LOCAL_COUNT, AT.C.MSG.LOCAL_TRANSLATE]);
+  await assert.rejects(localModel({ signal: controller.signal }), { code: 'cancelled' });
+  assert.equal(calls.length, 2);
+});
+
+test('interactive fragments hide out-of-order completion and preserve duplicate source order', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const parts = ['図書館を開きます。', '本を借りられます。', '予約もできます。'];
+  const source = parts.join('');
+  const gates: { progress: ((index: number, text: string) => void) | undefined; resolve: (reply: unknown) => void }[] = [];
+  const seen: [number, string][] = [];
+  AT.local.callHost = async (message: ATNamespace, progress?: (index: number, text: string) => void) => {
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, sourceChunks: [parts] };
+    const gate = Promise.withResolvers<unknown>();
+    gates.push({ progress, resolve: gate.resolve });
+    return gate.promise;
+  };
+  const result = localModel({ texts: [source, source], source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2,
+    onProgress: (index: number, text: string) => seen.push([index, text]) });
+  for (let turn = 0; gates.length < 2 && turn < 30; turn++) await Promise.resolve();
+  assert.equal(gates.length, 2);
+  gates[1]!.progress?.(0, '책을 빌릴 수 있습니다.');
+  gates[1]!.resolve({ ok: true, translations: ['책을 빌릴 수 있습니다.'] });
+  for (let turn = 0; gates.length < 3 && turn < 30; turn++) await Promise.resolve();
+  assert.ok(seen.every(([, text]) => !text), 'a later fragment is not a readable prefix');
+  gates[0]!.progress?.(0, '도서관');
+  assert.deepEqual(seen.slice(-2), [[0, '도서관'], [1, '도서관']]);
+  gates[0]!.resolve({ ok: true, translations: ['도서관을 엽니다.'] });
+  gates[2]!.resolve({ ok: true, translations: ['예약도 가능합니다.'] });
+  const completed = await result;
+  assert.deepEqual(completed.translations, Array(2).fill('도서관을 엽니다. 책을 빌릴 수 있습니다. 예약도 가능합니다.'));
+  const before = [...seen];
+  gates[0]!.progress?.(0, '오래된 응답');
+  assert.deepEqual(seen, before);
+  assert.equal(completed.timing.chunks, 3);
+});
+
+test('interactive fragment failure aborts its sibling, clears preview and never dispatches queued work', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const parts = ['図書館を開きます。', '本を借りられます。', '予約もできます。'];
+  const gates: { signal: AbortSignal; progress: ((index: number, text: string) => void) | undefined; resolve: (reply: unknown) => void }[] = [];
+  const seen: string[] = [];
+  AT.local.callHost = async (message: ATNamespace, progress: ((index: number, text: string) => void) | undefined, signal: AbortSignal) => {
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, sourceChunks: [parts] };
+    const gate = Promise.withResolvers<unknown>();
+    gates.push({ signal, progress, resolve: gate.resolve });
+    return gate.promise;
+  };
+  const result = localModel({ texts: [parts.join('')], source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2,
+    onProgress: (_index: number, text: string) => seen.push(text) });
+  const rejected = assert.rejects(result, /unusable fragment/);
+  for (let turn = 0; gates.length < 2 && turn < 30; turn++) await Promise.resolve();
+  gates[0]!.progress?.(0, '도서관');
+  gates[1]!.resolve({ ok: true, translations: [''] });
+  await rejected;
+  assert.ok(gates.every(gate => gate.signal.aborted));
+  gates[0]!.progress?.(0, '늦은 응답');
+  gates[0]!.resolve({ ok: true, translations: ['도서관을 엽니다.'] });
+  await Promise.resolve();
+  assert.deepEqual(seen, ['도서관', '']);
+  assert.equal(gates.length, 2);
+});
+
+test('interactive source planning never silently falls back to character estimates', async () => {
+  stubSend(() => { throw new Error('must not generate'); });
+  await assert.rejects(localModel({ texts: ['図書館からのお知らせです。'], sourceChunkTokens: 64 }), /no counts/);
+  assert.equal(translates().length, 0);
 });

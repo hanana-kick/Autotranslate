@@ -168,6 +168,8 @@ class FakeEngine {
   static inFlight: EngineJob[] = [];
   static dropped: number[] = [];
   static failInit: string | null = null;
+  static backend: 'kernels' | 'runtime' = 'runtime';
+  static rows = 1;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessageerror: (() => void) | null = null;
@@ -184,7 +186,7 @@ class FakeEngine {
         this.onmessage?.({
           data: failure
             ? { type: 'ready', ok: false, error: failure, code: 'worker-init' }
-            : { type: 'ready', ok: true }
+            : { type: 'ready', ok: true, backend: FakeEngine.backend, rows: FakeEngine.rows }
         });
       });
       return;
@@ -219,6 +221,8 @@ class FakeEngine {
     FakeEngine.inFlight = [];
     FakeEngine.dropped = [];
     FakeEngine.failInit = null;
+    FakeEngine.backend = 'runtime';
+    FakeEngine.rows = 1;
   }
 }
 
@@ -563,9 +567,107 @@ test('kernel load and token counting need no document generation session', async
       type: 'at/local-count', modelId: 'onnx-model', texts: [ASK_ONE], target: 'ko'
     });
     assert.deepEqual(counts.counts, [ASK_ONE.length]);
+    assert.equal(Object.hasOwn(counts, 'sourceChunks'), false, 'legacy counting does not opt into fragment planning');
     assert.equal(session.calls.tokenizers, 1);
     assert.equal(session.calls.pipelines, 0);
     assert.equal(session.inline.length, 0);
+  } finally {
+    await finish([], session);
+  }
+});
+
+test('LOCAL_COUNT plans actual-token bounded raw source fragments with the loaded tokenizer', async () => {
+  const weightedTokenizer = Object.assign((text: string, _options?: { add_special_tokens?: boolean }) => ({
+    input_ids: {
+      data: Array.from(text).flatMap((character) =>
+        Array.from({ length: character === '重' ? 5 : 1 }, () => character.codePointAt(0) ?? 0))
+    }
+  }), { decode: codepoints.decode, apply_chat_template: codepoints.apply_chat_template });
+  const session = installSession({ tokenizer: weightedTokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const texts = [
+    ' \t最初です。次です！終わり？ \n',
+    ' \talpha beta  gamma\r\n',
+    ` e\u0301e\u0301e\u0301e\u0301e\u0301 `,
+    '👩‍👩‍👧‍👦👩‍👩‍👧‍👦',
+    '重軽重軽重軽',
+    ' \t\r\n',
+    ''
+  ];
+  try {
+    const reply = await onnxhost.handle({
+      type: 'at/local-count', modelId: 'onnx-model', texts, target: 'ko', sourceChunkTokens: 7
+    });
+    const plans: string[][] = reply.sourceChunks;
+    assert.equal(plans.length, texts.length);
+    assert.deepEqual(plans[0], [' \t最初です。', '次です！', '終わり？ \n']);
+    assert.deepEqual(plans[3], ['👩‍👩‍👧‍👦', '👩‍👩‍👧‍👦']);
+    assert.deepEqual(plans[5], [texts[5]]);
+    assert.deepEqual(plans[6], []);
+    plans.forEach((chunks, index) => {
+      assert.equal(chunks.join(''), texts[index]);
+      if (texts[index]!.trim()) assert.ok(chunks.every((chunk) => chunk.trim()));
+    });
+    for (const chunk of plans[2]!) assert.match(chunk.trim(), /^(?:e\u0301)+$/u);
+    const fragments = plans.flat().map((chunk) => chunk.trim()).filter(Boolean);
+    const recounted = await onnxhost.handle({
+      type: 'at/local-count', modelId: 'onnx-model', texts: fragments, target: 'ko'
+    });
+    assert.ok(recounted.counts.every((count: number) => count <= 7), 'every translated fragment fits the real host count');
+    assert.equal(reply.counts[4], 18, 'the tokenizer, not character length, determines token cost');
+    assert.equal(session.calls.tokenizers, 1, 'planning reuses the resident tokenizer');
+    assert.equal(session.calls.pipelines, 0, 'planning does not generate translations');
+    await assert.rejects(onnxhost.handle({
+      type: 'at/local-count', modelId: 'onnx-model', texts: ['👩‍👩‍👧‍👦'], target: 'ko', sourceChunkTokens: 6
+    }), { reason: 'context-overflow', code: 'config', message: /grapheme/ });
+    await assert.rejects(onnxhost.handle({
+      type: 'at/local-count', modelId: 'onnx-model', texts: ['text'], target: 'ko', sourceChunkTokens: 0
+    }), { reason: 'context-overflow', code: 'config' });
+  } finally {
+    await finish([], session);
+  }
+});
+
+test('opt-in source planning never truncates the list at the legacy count limit', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const texts = Array.from({ length: 201 }, (_unused, index) => `${index}。`);
+  try {
+    const legacy = await onnxhost.handle({ type: 'at/local-count', modelId: 'onnx-model', texts, target: 'ko' });
+    assert.equal(legacy.counts.length, 200);
+    assert.equal(Object.hasOwn(legacy, 'sourceChunks'), false);
+    const planned = await onnxhost.handle({
+      type: 'at/local-count', modelId: 'onnx-model', texts, target: 'ko', sourceChunkTokens: local.SOURCE_CHUNK_TOKENS
+    });
+    assert.equal(planned.counts.length, texts.length);
+    assert.deepEqual(planned.sourceChunks, texts.map((text) => [text]));
+  } finally {
+    await finish([], session);
+  }
+});
+
+test('LOCAL_COUNT cancellation stops source planning during actual tokenization', async () => {
+  const controller = new AbortController();
+  let afterCancellation = 0;
+  let firstSentenceCounts = 0;
+  const cancellingTokenizer = Object.assign((text: string, options?: { add_special_tokens?: boolean }) => {
+    if (controller.signal.aborted) afterCancellation += 1;
+    // The host first probes byte fallback, then counts the resulting ids.
+    if (text === '最初です。' && ++firstSentenceCounts === 2) controller.abort();
+    return codepoints(text, options);
+  }, { decode: codepoints.decode, apply_chat_template: codepoints.apply_chat_template });
+  const session = installSession({ tokenizer: cancellingTokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  try {
+    await assert.rejects(onnxhost.handle({
+      type: 'at/local-count', modelId: 'onnx-model', texts: ['最初です。次です！終わり？'], target: 'ko', sourceChunkTokens: 7
+    }, undefined, controller.signal), { code: 'cancelled' });
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(afterCancellation, 0, 'planning does no tokenizer work after cancellation');
+    assert.equal(session.calls.pipelines, 0);
   } finally {
     await finish([], session);
   }
@@ -852,7 +954,82 @@ test('streaming does not turn invalid final output into success and clears the v
   } finally { await finish(started, session); }
 });
 
-test('numbered batch streams mapped segments without partial markers and resets before per-text retry', async () => {
+test('native batches keep source ownership through out-of-order completion and slot refill', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  FakeEngine.backend = 'kernels';
+  FakeEngine.rows = 3;
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const texts = ['Source alpha.', 'Source bravo.', 'Source charlie.', 'Source delta.', 'Source echo.'];
+  const answers = ['첫째 번역', '둘째 번역', '셋째 번역', '넷째 번역', '다섯째 번역'];
+  const seen: [number, string][] = [];
+  const started: Promise<unknown>[] = [];
+  const controller = new AbortController();
+  try {
+    const request = onnxhost.translate({ ...translateRequest(texts[0]!), texts },
+      (index: number, text: string) => seen.push([index, text]), controller.signal);
+    started.push(request);
+    await until('three source jobs', () => FakeEngine.inFlight.length === 3);
+    const second = jobFor(texts[1]!);
+    second.worker.onmessage?.({
+      data: { type: 'progress', id: second.id, tokens: Array.from('둘째').map((ch) => ch.codePointAt(0)) }
+    });
+    second.worker.answer(second, answers[1]!);
+    await until('free slot refilled before first source completes', () =>
+      FakeEngine.inFlight.some((job) => codepoints.decode(job.inputIds).includes(texts[3]!)));
+    assert.equal(FakeEngine.inFlight.length, 3);
+    const fourth = jobFor(texts[3]!);
+    fourth.worker.answer(fourth, answers[3]!);
+    await until('last source admitted', () =>
+      FakeEngine.inFlight.some((job) => codepoints.decode(job.inputIds).includes(texts[4]!)));
+    for (const index of [4, 2, 0]) {
+      const job = jobFor(texts[index]!);
+      job.worker.answer(job, answers[index]!);
+    }
+    assert.deepEqual((await request).translations, answers);
+    assert.deepEqual(seen, [[1, '둘째']], 'progress uses original source indexes, not completion order');
+    assert.equal(session.inline.length, 0);
+  } finally { controller.abort(); await finish(started, session); }
+});
+
+for (const cause of ['cancel', 'invalid-output'] as const) {
+  test(`native batch ${cause} releases its sibling rows without touching another request`, async () => {
+    const session = installSession();
+    FakeEngine.reset();
+    FakeEngine.backend = 'kernels';
+    FakeEngine.rows = 4;
+    (globalThis as ATNamespace).Worker = FakeEngine;
+    const controller = new AbortController();
+    const texts = ['Batch alpha.', 'Batch bravo.', 'Batch charlie.', 'Batch delta.', 'Batch echo.'];
+    const seen: string[] = [];
+    const started: Promise<unknown>[] = [];
+    try {
+      const request = onnxhost.translate({ ...translateRequest(texts[0]!), texts },
+        (_index: number, text: string) => seen.push(text), controller.signal);
+      const rejected = assert.rejects(request, cause === 'cancel' ? { code: 'cancelled' } : { reason: 'invalid-output' });
+      const survivor = onnxhost.translate(translateRequest('Independent survivor.'));
+      started.push(rejected, survivor);
+      await until('batch and independent request admitted', () => FakeEngine.inFlight.length === 5);
+      const siblings = texts.slice(0, 4).map(jobFor);
+      if (cause === 'cancel') controller.abort();
+      else siblings[0]!.worker.answer(siblings[0]!, '잘못된 출력<pad>');
+      await rejected;
+      await until('batch rows released', () => FakeEngine.inFlight.length === 1);
+      assert.deepEqual([...FakeEngine.dropped].sort((a, b) => a - b),
+        siblings.slice(cause === 'cancel' ? 0 : 1).map((job) => job.id).sort((a, b) => a - b));
+      for (const job of siblings) job.worker.onmessage?.({
+        data: { type: 'progress', id: job.id, tokens: [0xD55C] }
+      });
+      const remaining = jobFor('Independent survivor.');
+      remaining.worker.answer(remaining, '독립된 번역');
+      assert.deepEqual((await survivor).translations, ['독립된 번역']);
+      assert.deepEqual(seen, [], 'settled batch cannot emit late previews');
+      assert.equal(session.calls.pipelines, 0);
+    } finally { controller.abort(); await finish(started, session); }
+  });
+}
+
+test('serial runtime numbered batch maps streaming segments and resets before per-text retry', async () => {
   const session = installSession();
   FakeEngine.reset();
   (globalThis as ATNamespace).Worker = FakeEngine;
@@ -883,4 +1060,130 @@ test('numbered batch streams mapped segments without partial markers and resets 
     second.worker.answer(second, '둘째');
     assert.deepEqual((await request).translations, ['첫째', '둘째']);
   } finally { await finish(started, session); }
+});
+
+test('cancelling a native request drops only its row, ignores late frames and never falls back', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const controller = new AbortController();
+  const previews: string[] = [];
+  const started: Promise<unknown>[] = [];
+  try {
+    const cancelled = onnxhost.translate(translateRequest(ASK_ONE), (_index: number, text: string) => previews.push(text), controller.signal);
+    const rejected = assert.rejects(cancelled, { code: 'cancelled' });
+    const survivor = onnxhost.translate(translateRequest(ASK_TWO));
+    started.push(rejected, survivor);
+    await until('two independent native jobs', () => FakeEngine.inFlight.length === 2);
+    const first = jobFor(ASK_ONE);
+    const second = jobFor(ASK_TWO);
+    controller.abort();
+    await rejected;
+    assert.deepEqual(FakeEngine.dropped, [first.id]);
+    assert.equal(FakeEngine.inFlight.length, 1);
+    first.worker.onmessage?.({ data: { type: 'progress', id: first.id, tokens: [0xD55C] } });
+    first.worker.answer(first, '늦은 응답');
+    second.worker.answer(second, '둘째');
+    assert.deepEqual((await survivor).translations, ['둘째']);
+    assert.deepEqual(previews, []);
+    assert.equal(session.calls.pipelines, 0, 'cancellation never opens fallback');
+    assert.equal(first.worker.terminated, false, 'the shared model stays resident');
+    controller.abort();
+    assert.equal(FakeEngine.dropped.length, 1, 'cleanup happens only once');
+  } finally {
+    await finish(started, session);
+  }
+});
+
+test('preaborted host requests do not load and abort during loading never admits generation', async () => {
+  const gate = deferred();
+  const session = installSession({ beforeTokenizer: () => gate.promise });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const controller = new AbortController();
+  const started: Promise<unknown>[] = [];
+  try {
+    const preaborted = new AbortController();
+    preaborted.abort();
+    await assert.rejects(onnxhost.translate(translateRequest(ASK_ONE), undefined, preaborted.signal), { code: 'cancelled' });
+    assert.equal(session.calls.tokenizers, 0);
+    const cancelled = assert.rejects(onnxhost.translate(translateRequest(ASK_ONE), undefined, controller.signal), { code: 'cancelled' });
+    started.push(cancelled);
+    await until('shared tokenizer loading', () => session.calls.tokenizers === 1);
+    controller.abort();
+    await cancelled;
+    gate.resolve();
+    const survivor = onnxhost.translate(translateRequest(ASK_TWO));
+    started.push(survivor);
+    await until('only surviving job admitted', () => FakeEngine.inFlight.length === 1);
+    const job = jobFor(ASK_TWO);
+    job.worker.answer(job, '둘째');
+    await survivor;
+    assert.equal(FakeEngine.dropped.length, 0, 'no cancelled row was ever admitted');
+    assert.equal(session.calls.tokenizers, 1, 'shared initialization survives cancellation');
+  } finally {
+    gate.resolve();
+    await finish(started, session);
+  }
+});
+
+test('a cancelled count queued behind loading never loads its requested model', async () => {
+  const gate = deferred();
+  const session = installSession({ beforeTokenizer: () => gate.promise });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const controller = new AbortController();
+  const started: Promise<unknown>[] = [];
+  try {
+    const loading = onnxhost.handle({ type: 'at/local-load', modelId: 'onnx-model', target: 'ko' });
+    started.push(loading);
+    await until('load owns the tokenizer queue', () => session.calls.tokenizers === 1);
+    const counting = assert.rejects(onnxhost.handle({
+      type: 'at/local-count', modelId: 'cancelled-other-model', texts: [ASK_TWO], target: 'ko'
+    }, undefined, controller.signal), { code: 'cancelled' });
+    started.push(counting);
+    controller.abort();
+    await counting;
+    gate.resolve();
+    await loading;
+    await onnxhost.handle({ type: 'at/local-count', modelId: 'onnx-model', texts: [ASK_ONE], target: 'ko' });
+    assert.equal(session.calls.tokenizers, 1);
+    assert.equal(session.inline.length, 0);
+    assert.equal(FakeEngine.inFlight.length, 0);
+  } finally {
+    gate.resolve();
+    await finish(started, session);
+  }
+});
+
+test('inline cancellation is prompt but retains serialization until the real kernel settles', async () => {
+  const gate = deferred();
+  const session = installSession({ beforeGenerate: () => gate.promise });
+  FakeEngine.reset();
+  FakeEngine.failInit = 'worker unavailable';
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const firstController = new AbortController();
+  const queuedController = new AbortController();
+  const started: Promise<unknown>[] = [];
+  try {
+    const first = assert.rejects(onnxhost.translate(translateRequest(ASK_ONE), undefined, firstController.signal), { code: 'cancelled' });
+    started.push(first);
+    await until('inline kernel running', () => session.inline.length === 1);
+    const queued = assert.rejects(onnxhost.translate(translateRequest(ASK_TWO), undefined, queuedController.signal), { code: 'cancelled' });
+    started.push(queued);
+    firstController.abort();
+    queuedController.abort();
+    await Promise.all([first, queued]);
+    assert.equal((await onnxhost.status()).state, 'busy', 'pending kernel is not reported as stopped');
+    const survivor = onnxhost.translate(translateRequest('하나요'));
+    started.push(survivor);
+    assert.equal(session.inline.length, 1);
+    gate.resolve();
+    assert.deepEqual((await survivor).translations, ['문서']);
+    assert.equal(session.inline.length, 2, 'cancelled queued work never calls the pipeline');
+    assert.equal(FakeEngine.dropped.length, 0, 'inline cancellation does not pretend to DROP a GPU job');
+  } finally {
+    gate.resolve();
+    await finish(started, session);
+  }
 });

@@ -7,31 +7,29 @@ const { settings } = AT;
 
 test('defaults are a complete, normalised object', () => {
   const base = settings.normalize(undefined);
-  assert.equal(base.version, 1);
+  assert.equal(base.version, 3);
   assert.equal(base.enabled, false, 'nothing translates until onboarding turns it on');
   assert.equal(base.targetLang, 'en');
   assert.equal(base.sourceLang, 'auto');
   assert.equal(base.localModelId, '', 'nothing is downloaded out of the box');
   assert.equal(base.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS, 'the budget starts at the shared default');
   assert.equal(base.maxNodes, AT.C.DEFAULT_MAX_NODES);
+  assert.equal(base.translationConcurrency, 2);
   assert.deepEqual(base.siteRules, []);
+  assert.deepEqual(base.alwaysTranslateLanguages, []);
   // The whole stored blob: an extra field here would be persisted forever.
   assert.deepEqual(Object.keys(base).sort(), [
+    'alwaysTranslateLanguages',
     'debug',
     'enabled',
-    'engine',
     'localMaxTokens',
     'localModelId',
     'maxNodes',
-    'serverApiKey',
-    'serverBaseUrl',
-    'serverModel',
-    'serverRevision',
-    'serverTimeoutMs',
     'showBadge',
     'siteRules',
     'sourceLang',
     'targetLang',
+    'translationConcurrency',
     'version'
   ]);
 });
@@ -64,8 +62,7 @@ test('junk values fall back instead of throwing', () => {
   assert.equal(coerced.debug, false);
   assert.equal(coerced.localModelId, '', 'a model id must be a string to be stored');
   assert.equal(coerced.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS, 'an unparseable budget falls back');
-  assert.equal(coerced.engine, 'local');
-  for (const gone of ['endpoints', 'apiKey', 'batchChars', 'fallbackEngine', 'autoDetect', 'unknownKey']) {
+  for (const gone of ['engine', 'endpoints', 'apiKey', 'batchChars', 'fallbackEngine', 'autoDetect', 'unknownKey']) {
     assert.equal(gone in coerced, false, `${gone} is not a setting any more`);
   }
 });
@@ -91,16 +88,24 @@ test('site rules are canonicalised and deduplicated', () => {
   const saved = settings.normalize({
     siteRules: [
       { pattern: '*.Example.com', action: 'always' },
-      { pattern: 'example.com', action: 'never' },
+      { pattern: '*.example.com', action: 'never' },
       { pattern: 'news.example.com/top', action: 'never' },
       { pattern: 'not a host', action: 'always' },
       { pattern: 'ok.example', action: 'sometimes' }
     ]
   });
   assert.deepEqual(saved.siteRules, [
-    { pattern: 'example.com', action: 'always' },
+    { pattern: '*.example.com', action: 'always' },
     { pattern: 'news.example.com/top', action: 'never' }
   ]);
+});
+
+test('automatic source languages accept only supported, unique catalogue codes', () => {
+  const saved = settings.normalize({ alwaysTranslateLanguages: ['en', 'ja', 'en', 'zh-TW', 'auto', 'xx', null, 3] });
+  assert.deepEqual(saved.alwaysTranslateLanguages, ['en', 'ja', 'zh-TW']);
+  assert.deepEqual(settings.normalize({ alwaysTranslateLanguages: 'ja' }).alwaysTranslateLanguages, []);
+  assert.deepEqual(settings.normalize({ alwaysTranslateLanguages: null }, saved).alwaysTranslateLanguages, saved.alwaysTranslateLanguages);
+  assert.deepEqual(settings.normalize({ alwaysTranslateLanguages: [] }, saved).alwaysTranslateLanguages, []);
 });
 
 test('the content snapshot carries only what a page needs', () => {
@@ -110,15 +115,40 @@ test('the content snapshot carries only what a page needs', () => {
   assert.deepEqual(Object.keys(snapshot).sort(), [
     'debug',
     'enabled',
-    'engine',
     'maxNodes',
     'showBadge',
     'sourceLang',
     'targetLang',
+    'translationConcurrency',
     'translationKey'
   ]);
   assert.equal(snapshot.maxNodes, 400);
   assert.equal(snapshot.debug, false);
+});
+
+test('parallel admission defaults to two while preserving an explicit serial choice', () => {
+  const parallel = settings.normalize({});
+  const serial = settings.normalize({ translationConcurrency: 1 });
+  assert.equal(settings.defaults().translationConcurrency, 2);
+  assert.equal(parallel.translationConcurrency, 2);
+  assert.equal(settings.normalize({ translationConcurrency: 2 }).translationConcurrency, 2);
+  assert.equal(serial.translationConcurrency, 1);
+  assert.equal(settings.contentSnapshot().translationConcurrency, 2);
+  assert.equal(settings.contentSnapshot(parallel).translationConcurrency, 2);
+  assert.equal(settings.contentSnapshot(serial).translationConcurrency, 1);
+  assert.equal(settings.contentSnapshot(serial).translationKey, settings.contentSnapshot(parallel).translationKey);
+  for (const value of [undefined, 0, 3, 8, '1', '2', null, false]) {
+    assert.equal(settings.normalize({ translationConcurrency: value }).translationConcurrency, 2);
+    assert.equal(settings.normalize({ translationConcurrency: value }, serial).translationConcurrency, 1);
+  }
+});
+
+test('source-fragment translation invalidates the previous content cache', () => {
+  const selected = settings.normalize({ localModelId: 'model-a', targetLang: 'ko' });
+  const previousKey = JSON.stringify([
+    'prompt-v2', selected.localModelId, selected.localMaxTokens, selected.sourceLang, selected.targetLang
+  ]);
+  assert.notEqual(settings.contentSnapshot(selected).translationKey, previousKey);
 });
 
 test('the UI language picks a supported target', () => {
@@ -149,11 +179,18 @@ test('storage round-trips through normalisation', async () => {
 
   assert.deepEqual(await settings.load(), settings.normalize(undefined));
 
-  const saved = await settings.save({ targetLang: 'ko' });
+  assert.equal((await settings.load()).translationConcurrency, 2);
+  const saved = await settings.save({ targetLang: 'ko', alwaysTranslateLanguages: ['en', 'ja', 'en'] });
   assert.equal(saved.targetLang, 'ko');
   assert.equal(store.settings.targetLang, 'ko');
   const reloaded = await settings.load();
   assert.equal(reloaded.targetLang, 'ko');
+  assert.deepEqual(reloaded.alwaysTranslateLanguages, ['en', 'ja']);
+  await settings.save({ translationConcurrency: 1 });
+  assert.equal(store.settings.translationConcurrency, 1);
+  assert.equal((await settings.load()).translationConcurrency, 1);
+  await settings.save({ targetLang: 'ja' });
+  assert.equal((await settings.load()).translationConcurrency, 1, 'unrelated saves preserve the serial choice');
 
   // Hand-edited garbage in storage is normalised on read.
   store.settings = { targetLang: 42, siteRules: 'nope', maxNodes: '700' };
@@ -161,6 +198,7 @@ test('storage round-trips through normalisation', async () => {
   assert.equal(repaired.targetLang, 'en');
   assert.deepEqual(repaired.siteRules, []);
   assert.equal(repaired.maxNodes, 700);
+  assert.equal(repaired.translationConcurrency, 2);
 
   // The on-device choices are stored like any other setting.
   const local = await settings.save({ localModelId: 'model-a', localMaxTokens: 2048 });
@@ -175,8 +213,91 @@ test('storage round-trips through normalisation', async () => {
   const patched = await settings.save({ targetLang: 'klingon', maxNodes: 900 });
   assert.equal(patched.targetLang, 'en', 'an unusable patch value does not reset the choice');
   assert.equal(patched.maxNodes, 900);
+  await settings.save({ alwaysTranslateLanguages: ['ja', 'en'] });
+  await settings.save({ targetLang: 'ko' });
+  assert.deepEqual((await settings.load()).alwaysTranslateLanguages, ['ja', 'en'], 'unrelated saves preserve automatic languages');
+  await settings.save({ alwaysTranslateLanguages: [] });
+  assert.deepEqual((await settings.load()).alwaysTranslateLanguages, [], 'unchecking every language disables language enrollment');
 
   const reset = await settings.reset();
   assert.equal(store.settings.targetLang, 'en');
   assert.equal(reset.localModelId, '', 'a reset stops pointing at a model the user may have deleted');
+  assert.equal(reset.translationConcurrency, 2);
+});
+
+test('loading legacy settings erases retired credentials from storage while preserving local choices', async () => {
+  const legacy = {
+    ...settings.defaults(),
+    version: 1,
+    engine: 'openai',
+    serverBaseUrl: 'https://example.invalid/v1',
+    serverApiKey: 'retired-secret',
+    serverModel: 'retired-model',
+    serverTimeoutMs: 60000,
+    serverRevision: 9,
+    localModelId: 'model-a',
+    localMaxTokens: 2048,
+    targetLang: 'ko',
+    siteRules: [{ pattern: 'example.com', action: 'never' }]
+  };
+  const store: ATNamespace = { settings: structuredClone(legacy), unrelated: 'keep' };
+  let writes = 0, trusted = 0;
+  AT.storage = { local: {
+    get: async (key: string) => ({ [key]: structuredClone(store[key]) }),
+    set: async (value: ATNamespace) => { writes++; Object.assign(store, structuredClone(value)); },
+    setAccessLevel: async ({ accessLevel }: { accessLevel: string }) => {
+      assert.equal(accessLevel, 'TRUSTED_CONTEXTS'); trusted++;
+    }
+  } };
+  const migrated = await settings.load();
+  assert.deepEqual(store.settings, migrated);
+  assert.equal(migrated.version, 3);
+  assert.equal(migrated.localModelId, 'model-a');
+  assert.equal(migrated.localMaxTokens, 2048);
+  assert.equal(migrated.targetLang, 'ko');
+  assert.deepEqual(migrated.siteRules, legacy.siteRules);
+  assert.equal(store.unrelated, 'keep');
+  for (const key of ['engine', 'serverBaseUrl', 'serverApiKey', 'serverModel', 'serverTimeoutMs', 'serverRevision']) {
+    assert.equal(key in migrated, false, key);
+    assert.equal(key in settings.contentSnapshot(migrated), false, key);
+  }
+  assert.equal(JSON.stringify(store).includes('retired-secret'), false);
+  assert.equal(trusted, 1);
+  await settings.load();
+  assert.equal(writes, 1, 'a clean blob is not rewritten on each read');
+  await settings.save({ targetLang: 'ja', serverApiKey: 'cannot-return', engine: 'openai' });
+  assert.equal('serverApiKey' in store.settings, false, 'untrusted patches cannot restore credentials');
+  assert.equal('engine' in store.settings, false);
+  assert.equal(store.settings.targetLang, 'ja');
+  store.settings.serverApiKey = 'stale-v3-secret';
+  await settings.load();
+  assert.equal('serverApiKey' in store.settings, false, 'unknown fields are removed even with a current version');
+  await settings.reset();
+  assert.deepEqual(store.settings, settings.defaults());
+});
+
+test('v2 URL prefixes migrate once without shrinking legacy exclusions', async () => {
+  const store: ATNamespace = { settings: {
+    ...settings.defaults(), version: 2,
+    siteRules: [
+      { pattern: 'example.com/news/*', action: 'never' },
+      { pattern: 'example.org/news', action: 'always' }
+    ]
+  } };
+  let writes = 0;
+  AT.storage = { local: {
+    get: async (key: string) => ({ [key]: structuredClone(store[key]) }),
+    set: async (value: ATNamespace) => { writes++; Object.assign(store, structuredClone(value)); }
+  } };
+  const migrated = await settings.load();
+  assert.equal(migrated.version, 3);
+  assert.deepEqual(migrated.siteRules, [
+    { pattern: 'example.com/news/**', action: 'never' },
+    { pattern: 'example.org/news**', action: 'always' }
+  ]);
+  assert.equal(AT.rules.resolve(migrated.siteRules, 'https://example.com/news/deep/story').action, 'never');
+  assert.deepEqual(await settings.load(), migrated);
+  assert.equal(writes, 1, 'migration is persisted exactly once');
+  const saved = await settings.save({ siteRules: [{ pattern: 'example.com/news/*', action: 'always' }] });
+  assert.equal(saved.siteRules[0].pattern, 'example.com/news/*', 'newly entered globs retain one-segment semantics');
 });

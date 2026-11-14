@@ -2,14 +2,14 @@
   "extensionName": { "message": "Autotranslate 자동 번역" },
   "shortName": { "message": "Autotranslate" },
   "description": {
-    "message": "선택한 탭을 기기 내 모델 또는 OpenAI 호환 서버로 번역합니다."
+    "message": "선택한 탭을 기기 내 모델로 번역합니다."
   },
   "actionTitle": { "message": "이 페이지 자동 번역" },
   "menuTranslatePage": { "message": "이 탭 번역 켜기" },
   "menuRestorePage": { "message": "이 탭 번역 끄고 원문 복원" },
   "menuTranslateSelection": { "message": "선택 영역 번역" },
   "menuNeverSite": { "message": "이 사이트 번역 안 함" },
-  "menuAlwaysSite": { "message": "이 사이트를 선택한 탭에서 허용" },
+  "menuAlwaysSite": { "message": "이 사이트 항상 번역" },
   "content_close": { "message": "닫기" },
   "content_noSelection": { "message": "번역할 선택 영역이 없습니다." },
   "content_debugTitle": { "message": "번역 영역" },
@@ -50,40 +50,29 @@
   "options_title": { "message": "Autotranslate 설정" },
   "options_behavior": { "message": "이 탭 번역" },
   "options_enabled": { "message": "이 탭을 번역 대상으로 선택" },
-  "options_showBadge": { "message": "번역된 페이지에 배지 표시" },
-  "options_debug": { "message": "번역 영역을 페이지에 표시(외곽선)" },
-  "options_test": { "message": "서비스 테스트" },
-  "options_testing": { "message": "테스트 중…" },
-  "options_testOk": {
-    "message": "$1$ ($2$ ms)",
-    "placeholders": {
-      "1": { "content": "$1" },
-      "2": { "content": "$2" }
-    }
-  },
   "options_languages": { "message": "언어" },
   "options_targetLang": { "message": "번역 언어" },
-  "options_sourceLang": { "message": "원문 언어" },
-  "options_sourceAuto": { "message": "자동 감지" },
-  "options_limits": { "message": "제한" },
-  "options_maxNodes": { "message": "페이지당 최대 텍스트 노드" },
-  "options_rules": { "message": "사이트 규칙" },
+  "options_parallelTranslation": { "message": "짧은 조각 또는 화면 안 읽기 단위를 최대 두 개씩 동시 번역" },
+  "options_parallelTranslationHint": { "message": "기본값은 켜짐입니다. 처리량이 늘 수 있지만 첫 결과는 늦어질 수 있습니다. 끄면 하나씩 번역합니다. 백그라운드 미리 번역은 항상 하나씩 진행합니다." },
+  "options_alwaysLanguages": { "message": "항상 번역할 원문 언어" },
+  "options_alwaysLanguagesHint": { "message": "원문 언어는 자동 감지합니다. URL 패턴 또는 선택한 언어 중 하나가 일치하면 활성 탭을 번역합니다. 번역 대상 언어와 같은 언어는 선택해도 건너뜁니다. 탭에서 직접 끄면 탭을 닫을 때까지 자동 번역보다 우선합니다." },
+  "options_rules": { "message": "항상 번역할 URL" },
+  "options_rulesHint": { "message": "*는 호스트·경로의 한 구간, **는 여러 구간에 대응합니다. example.com/news/*는 한 단계, example.com/news/**는 더 깊은 경로도 포함합니다. http:// 또는 https://는 생략할 수 있습니다. 기존 번역 안 함 규칙은 삭제할 때까지 유지됩니다." },
+  "options_blockedRule": { "message": "기존 번역 안 함 규칙으로 차단된 패턴입니다. 해당 규칙을 삭제한 뒤 추가하세요." },
   "options_rulePlaceholder": { "message": "example.com 또는 example.com/news/*" },
   "options_addRule": { "message": "규칙 추가" },
-  "options_ruleAlways": { "message": "선택한 탭에서 번역 허용" },
-  "options_ruleNever": { "message": "안 함" },
+  "options_ruleAlways": { "message": "항상 번역" },
+  "options_ruleNever": { "message": "번역 안 함 (기존 규칙)" },
   "options_remove": { "message": "삭제" },
   "options_save": { "message": "저장" },
-  "options_reset": { "message": "기본값으로 초기화" },
   "options_saved": { "message": "저장했습니다." },
-  "options_resetDone": { "message": "기본값을 복원했습니다." },
-  "options_noRules": { "message": "사이트 규칙이 없습니다." },
+  "options_noRules": { "message": "자동 번역할 URL 패턴이 없습니다." },
   "options_badRule": { "message": "올바른 호스트 또는 URL 패턴을 입력하세요." },
   "options_local": {
     "message": "온디바이스 번역"
   },
   "options_localHint": {
-    "message": "온디바이스 엔진을 선택하면 페이지 텍스트를 이 브라우저에서 모델을 돌려 번역합니다. 외부로 전송되지 않습니다."
+    "message": "페이지 텍스트를 이 브라우저에서 모델을 돌려 번역합니다. 외부로 전송되지 않습니다."
   },
   "options_localModel": {
     "message": "모델"
@@ -91,20 +80,14 @@
   "options_localNone": {
     "message": "모델 선택 안 함"
   },
-  "options_localMaxTokens": {
-    "message": "생성당 토큰 예산"
-  },
-  "options_modelUrl": {
-    "message": "모델 URL"
-  },
   "options_download": {
-    "message": "모델 다운로드"
+    "message": "공식 모델 다운로드"
   },
   "options_cancel": {
     "message": "취소"
   },
   "options_pickFile": {
-    "message": "이미 받은 파일 사용"
+    "message": "디스크에서 가져오기"
   },
   "options_pickFileHint": {
     "message": ".onnx 그래프와 함께 같은 폴더의 tokenizer.json, tokenizer_config.json, config.json을 한 번에 선택하세요."
@@ -114,23 +97,6 @@
   },
   "options_noModels": {
     "message": "아직 다운로드한 모델이 없습니다."
-  },
-  "options_usage": {
-    "message": "$2$ 중 $1$ 사용 · 모델 $3$개, 파일 $4$",
-    "placeholders": {
-      "1": {
-        "content": "$1"
-      },
-      "2": {
-        "content": "$2"
-      },
-      "3": {
-        "content": "$3"
-      },
-      "4": {
-        "content": "$4"
-      }
-    }
   },
   "options_notPersisted": { "message": "저장소가 고정되지 않아 브라우저가 모델을 지울 수 있습니다" },
   "options_deleted": {
@@ -167,7 +133,7 @@
     "message": "다운로드를 취소했습니다"
   },
   "options_downloadFailed": {
-    "message": "다운로드 실패"
+    "message": "모델을 설치하지 못했습니다"
   },
   "options_downloadDone": {
     "message": "$1$ ($2$)을 $3$초에 저장했습니다",
@@ -182,9 +148,6 @@
         "content": "$3"
       }
     }
-  },
-  "options_badUrl": {
-    "message": "https:// 모델 URL을 입력하세요."
   },
   "options_noSpace": {
     "message": "여유 공간이 부족합니다. $1$이 필요합니다.",
@@ -201,7 +164,7 @@
     "message": "모델을 불러오는 중…"
   },
   "options_prepared": {
-    "message": "모델이 메모리에 준비되었습니다."
+    "message": "선택한 모델의 번역 준비가 완료되었습니다."
   },
   "options_prepareFailed": {
     "message": "모델을 불러오지 못했습니다"
@@ -224,7 +187,7 @@
   "options_stateError": {
     "message": "온디바이스 엔진 오류"
   },
-  "welcome_intro": { "message": "기기 내 모델 또는 호환 서버를 설정하십시오. 각 탭은 직접 켤 때까지 OFF로 유지됩니다." },
+  "welcome_intro": { "message": "기기 내 모델을 설정하세요. 탭에서 직접 번역을 켜거나 설정에서 자동 번역할 URL과 원문 언어를 지정할 수 있습니다." },
   "welcome_language": { "message": "번역할 언어" },
   "welcome_model": { "message": "모델" },
   "welcome_modelHint": { "message": "모델을 내려받거나, 이미 가지고 있는 모델 파일을 고르세요. 파일은 이 기기에 저장되고 페이지는 브라우저 밖으로 나가지 않습니다." },
@@ -235,32 +198,12 @@
   },
   "welcome_importFailed": { "message": "파일을 사용할 수 없습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
   "welcome_needModel": { "message": "모델이 없습니다. 내려받거나 파일을 골라야 시작할 수 있습니다." },
-  "welcome_readyExisting": { "message": "모델이 설치되어 있습니다. 설정을 마친 뒤 번역할 탭에서 직접 스위치를 켜십시오." },
+  "welcome_readyExisting": { "message": "모델이 설치되어 있습니다. 설정을 마친 뒤 탭에서 번역을 켜거나 설정에서 자동 번역을 지정하세요." },
   "welcome_start": { "message": "설정 완료" },
   "welcome_starting": { "message": "내려받기를 시작합니다…" },
-  "welcome_done": { "message": "모델 준비 완료. 번역할 탭에서 스위치를 켜십시오." },
+  "welcome_done": { "message": "모델 준비 완료. 탭에서 번역을 켜거나 설정에서 자동 번역을 지정하세요." },
   "options_modelStored": { "message": "모델은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
   "welcome_modelStored": { "message": "파일은 저장했지만 불러오지 못했습니다: $1$", "placeholders": { "1": { "content": "$1" } } },
   "tab_noTarget": { "message": "번역할 페이지의 확장 아이콘에서 옵션을 여십시오." },
-  "tab_unavailable": { "message": "대상 탭이 닫혔거나 번역할 수 없는 페이지입니다." },
-  "tab_enabledHint": { "message": "이 탭만 번역합니다. 새로 삽입되는 내용도 처리합니다." },
-  "tab_disabledHint": { "message": "이 탭에서는 번역하지 않습니다. 다른 탭의 선택은 바뀌지 않습니다." },
-  "server_engine": {"message":"번역 엔진"},
-  "server_local": {"message":"기기 내 PLaMo 3"},
-  "server_openai": {"message":"OpenAI 호환 서버"},
-  "server_privacy": {"message":"명시적으로 켠 탭의 텍스트만 이 서버로 전송합니다. API 키는 이 브라우저에 저장하며 페이지 스크립트에 전달하지 않습니다. HTTP는 암호화되지 않으므로 신뢰할 수 있는 네트워크 외에서는 HTTPS를 사용하십시오."},
-  "server_baseUrl": {"message":"서버 Base URL"},
-  "server_apiKey": {"message":"API 키 (선택 사항)"},
-  "server_model": {"message":"모델 ID (직접 입력 또는 목록 불러오기)"},
-  "server_timeout": {"message":"요청 제한시간 (밀리초)"},
-  "server_loadModels": {"message":"모델 목록 불러오기"},
-  "server_modelsLoaded": {"message":"모델 $1$개를 불러왔습니다. 모델 ID를 선택하거나 입력하십시오.","placeholders":{"1":{"content":"$1"}}},
-  "server_loadingModels": {"message":"모델 목록을 불러오는 중…"},
-  "server_modelsUnavailable": {"message":"목록을 불러올 수 없습니다. 모델 ID를 직접 입력할 수 있습니다."},
-  "server_badConfig": {"message":"서버 주소가 올바르지 않습니다. 인증정보·쿼리·해시 없는 HTTP(S) Base URL을 입력하십시오."},
-  "server_testHint": {"message":"테스트는 현재 입력값을 사용합니다. 선택한 탭에 적용하려면 저장하십시오. 서버 테스트는 페이지 내용 대신 샘플 문장을 전송합니다."},
-  "server_popup": {"message":"서버 번역: $1$","placeholders":{"1":{"content":"$1"}}},
-  "server_needConfig": {"message":"옵션에서 서버 주소와 모델을 설정하십시오. 로컬 모델·WebGPU는 필요하지 않습니다."},
-  "server_onboarding": {"message":"로컬 모델 다운로드·WebGPU 없이 기존 호환 서버를 사용합니다. 각 탭은 명시적으로 켤 때까지 OFF로 유지됩니다."},
-  "server_setup": {"message":"호환 서버 설정"}
+  "tab_unavailable": { "message": "대상 탭이 닫혔거나 번역할 수 없는 페이지입니다." }
 }

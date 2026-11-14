@@ -1,3 +1,4 @@
+/// <reference lib="es2024.promise" />
 // Unit tests for the message plumbing in `src/lib/browser.ts`: the router that
 // lets handlers be plain async functions, the Promise response lifetime (with
 // a raw Chrome callback fallback), the failure
@@ -95,12 +96,12 @@ test('a handler answers asynchronously while the listener keeps the channel open
 
 test('a handler that answers with its own failure keeps it', async () => {
   const { AT, listeners } = boot({});
-  AT.onMessage({ 'at/x': async () => ({ ok: false, error: 'provider is down', code: 'rate-limit' }) });
+  AT.onMessage({ 'at/x': async () => ({ ok: false, error: 'model is unavailable', code: 'provider' }) });
 
   const { response } = await reply(listeners[0]!, { type: 'at/x' });
   assert.deepEqual(
     response,
-    { ok: false, error: 'provider is down', code: 'rate-limit' },
+    { ok: false, error: 'model is unavailable', code: 'provider' },
     'the injected ok:true must not overwrite what the handler decided'
   );
 });
@@ -130,12 +131,12 @@ test('a rejecting handler becomes a failure envelope and is logged', async () =>
   const { AT, listeners, warnings } = boot({});
   AT.onMessage({
     'at/x': async () => {
-      throw Object.assign(new Error('quota exceeded'), { code: 'rate-limit' });
+      throw Object.assign(new Error('generation timed out'), { code: 'timeout' });
     }
   });
 
   const { response } = await reply(listeners[0]!, { type: 'at/x' }, SENDER);
-  assert.deepEqual(response, { ok: false, error: 'quota exceeded', code: 'rate-limit' });
+  assert.deepEqual(response, { ok: false, error: 'generation timed out', code: 'timeout' });
   assert.equal(warnings.length, 1, 'the rejection must be reported, not swallowed');
   assert.equal(warnings[0]![0], 'at/x', 'the log line names the message that failed');
 });
@@ -508,4 +509,61 @@ test('a lost translation channel rejects partial output rather than committing i
   ports.connections[0]!.server.disconnect();
   assert.deepEqual(await result, { ok: false, error: 'translation stream closed', code: 'no-response' });
   assert.deepEqual(seen, ['미완성']);
+});
+
+test('preaborted translation and count requests never dispatch', async () => {
+  const h = boot({ sendMessage: () => assert.fail('must not dispatch') });
+  const ports = installPorts(h);
+  const controller = new AbortController();
+  controller.abort();
+  for (const type of [h.AT.C.MSG.BATCH, h.AT.C.MSG.LOCAL_TRANSLATE, h.AT.C.MSG.LOCAL_COUNT]) {
+    const result = await h.AT.sendMessage({ type }, undefined, controller.signal);
+    assert.equal(result.code, 'cancelled');
+    assert.equal(result.ok, false);
+  }
+  assert.equal(ports.connections.length, 0);
+});
+
+test('abort disconnects one request and passes a receiver-local signal without serializing it', async () => {
+  const h = boot({ sendMessage: () => assert.fail('cancellation requires a port') });
+  const ports = installPorts(h);
+  const requests: { signal: AbortSignal; progress: (index: number, text: string) => void; finish: (value: unknown) => void }[] = [];
+  h.AT.onMessage({ [h.AT.C.MSG.LOCAL_COUNT]: (message: Message, _sender: unknown, progress: (index: number, text: string) => void, signal: AbortSignal) => {
+    assert.equal('signal' in message, false);
+    const pending = Promise.withResolvers<unknown>();
+    requests.push({ signal, progress, finish: pending.resolve });
+    return pending.promise;
+  } });
+  const controller = new AbortController();
+  const seen: string[] = [];
+  const first = h.AT.sendMessage({ type: h.AT.C.MSG.LOCAL_COUNT }, (_index: number, text: string) => seen.push(text), controller.signal);
+  const second = h.AT.sendMessage({ type: h.AT.C.MSG.LOCAL_COUNT }, undefined, new AbortController().signal);
+  await flush();
+  assert.notEqual(requests[0]!.signal, controller.signal);
+  controller.abort();
+  assert.equal((await first).code, 'cancelled');
+  await flush();
+  assert.equal(requests[0]!.signal.aborted, true);
+  assert.equal(requests[1]!.signal.aborted, false);
+  assert.equal(ports.connections[0]!.client.closed, true);
+  requests[0]!.progress(0, 'late');
+  requests[0]!.finish({ counts: [999] });
+  requests[1]!.finish({ counts: [2] });
+  assert.deepEqual(await second, { ok: true, counts: [2] });
+  assert.deepEqual(seen, []);
+});
+
+test('unexpected caller disconnect aborts its receiving handler', async () => {
+  const h = boot({});
+  const ports = installPorts(h);
+  let signal!: AbortSignal;
+  h.AT.onMessage({ [h.AT.C.MSG.BATCH]: (_message: Message, _sender: unknown, _progress: unknown, received: AbortSignal) => {
+    signal = received;
+    return Promise.withResolvers<unknown>().promise;
+  } });
+  const result = h.AT.sendMessage({ type: h.AT.C.MSG.BATCH }, () => {});
+  await flush();
+  ports.connections[0]!.client.disconnect();
+  assert.equal((await result).code, 'no-response');
+  assert.equal(signal.aborted, true);
 });

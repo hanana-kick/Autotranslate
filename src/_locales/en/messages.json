@@ -2,14 +2,14 @@
   "extensionName": { "message": "Autotranslate" },
   "shortName": { "message": "Autotranslate" },
   "description": {
-    "message": "Translate selected tabs using an on-device model or your OpenAI-compatible server."
+    "message": "Translate selected tabs using an on-device model."
   },
   "actionTitle": { "message": "Autotranslate this page" },
   "menuTranslatePage": { "message": "Turn translation on for this tab" },
   "menuRestorePage": { "message": "Turn translation off and restore this tab" },
   "menuTranslateSelection": { "message": "Translate selection" },
   "menuNeverSite": { "message": "Never translate this site" },
-  "menuAlwaysSite": { "message": "Allow this site in selected tabs" },
+  "menuAlwaysSite": { "message": "Always translate this site" },
   "content_close": { "message": "Close" },
   "content_noSelection": { "message": "Nothing selected to translate." },
   "content_debugTitle": { "message": "Translated regions" },
@@ -50,40 +50,29 @@
   "options_title": { "message": "Autotranslate options" },
   "options_behavior": { "message": "Translation for this tab" },
   "options_enabled": { "message": "Translate this tab" },
-  "options_showBadge": { "message": "Show badge on translated pages" },
-  "options_debug": { "message": "Outline translated regions on the page" },
-  "options_test": { "message": "Test provider" },
-  "options_testing": { "message": "Testing…" },
-  "options_testOk": {
-    "message": "$1$ ($2$ ms)",
-    "placeholders": {
-      "1": { "content": "$1" },
-      "2": { "content": "$2" }
-    }
-  },
   "options_languages": { "message": "Languages" },
   "options_targetLang": { "message": "Translate to" },
-  "options_sourceLang": { "message": "Source language" },
-  "options_sourceAuto": { "message": "Detect automatically" },
-  "options_limits": { "message": "Limits" },
-  "options_maxNodes": { "message": "Maximum text nodes per page" },
-  "options_rules": { "message": "Site rules" },
+  "options_parallelTranslation": { "message": "Translate up to two short fragments or visible reading units at once" },
+  "options_parallelTranslationHint": { "message": "On by default. May improve throughput, but the first result may take longer. Turn off to translate one at a time. Background prefetch always runs one at a time." },
+  "options_alwaysLanguages": { "message": "Always translate these source languages" },
+  "options_alwaysLanguagesHint": { "message": "The source language is detected automatically. A matching URL or a checked language starts translation in the active tab. Your target language is skipped, even if checked. Turning a tab off overrides automatic translation until that tab closes." },
+  "options_rules": { "message": "Always translate these URLs" },
+  "options_rulesHint": { "message": "Use * within one host or path segment and ** across segments: example.com/news/* matches one level; example.com/news/** includes deeper paths. http:// or https:// is optional. Existing Never rules stay blocked until removed." },
+  "options_blockedRule": { "message": "This pattern is blocked by an existing Never rule. Remove that rule before adding it." },
   "options_rulePlaceholder": { "message": "example.com or example.com/news/*" },
   "options_addRule": { "message": "Add rule" },
-  "options_ruleAlways": { "message": "Allow in selected tabs" },
-  "options_ruleNever": { "message": "Never" },
+  "options_ruleAlways": { "message": "Always translate" },
+  "options_ruleNever": { "message": "Never translate (existing rule)" },
   "options_remove": { "message": "Remove" },
   "options_save": { "message": "Save" },
-  "options_reset": { "message": "Reset to defaults" },
   "options_saved": { "message": "Saved." },
-  "options_resetDone": { "message": "Defaults restored." },
-  "options_noRules": { "message": "No site rules yet." },
+  "options_noRules": { "message": "No automatic URL patterns yet." },
   "options_badRule": { "message": "Enter a valid host or URL pattern." },
   "options_local": {
     "message": "On-device translation"
   },
   "options_localHint": {
-    "message": "With the on-device engine selected, page text is translated by a model running in this browser: nothing is uploaded."
+    "message": "Page text is translated by a model running in this browser: nothing is uploaded."
   },
   "options_localModel": {
     "message": "Model"
@@ -91,20 +80,14 @@
   "options_localNone": {
     "message": "No model selected"
   },
-  "options_localMaxTokens": {
-    "message": "Token budget per generation"
-  },
-  "options_modelUrl": {
-    "message": "Model URL"
-  },
   "options_download": {
-    "message": "Download model"
+    "message": "Download official model"
   },
   "options_cancel": {
     "message": "Cancel"
   },
   "options_pickFile": {
-    "message": "Use a local file"
+    "message": "Import from disk"
   },
   "options_pickFileHint": {
     "message": "Select the .onnx graph together with the files beside it in the same folder: tokenizer.json, tokenizer_config.json and config.json at least."
@@ -114,23 +97,6 @@
   },
   "options_noModels": {
     "message": "No model has been downloaded yet."
-  },
-  "options_usage": {
-    "message": "$1$ used of $2$ · $3$ model(s), $4$ of model files",
-    "placeholders": {
-      "1": {
-        "content": "$1"
-      },
-      "2": {
-        "content": "$2"
-      },
-      "3": {
-        "content": "$3"
-      },
-      "4": {
-        "content": "$4"
-      }
-    }
   },
   "options_notPersisted": { "message": "storage is not pinned, so the browser may evict the model" },
   "options_deleted": {
@@ -167,7 +133,7 @@
     "message": "Download cancelled"
   },
   "options_downloadFailed": {
-    "message": "Download failed"
+    "message": "Could not install the model"
   },
   "options_downloadDone": {
     "message": "$1$ ($2$) stored in $3$ s",
@@ -182,9 +148,6 @@
         "content": "$3"
       }
     }
-  },
-  "options_badUrl": {
-    "message": "Enter an https:// model URL."
   },
   "options_noSpace": {
     "message": "Not enough room: $1$ would be needed.",
@@ -201,7 +164,7 @@
     "message": "Loading the model…"
   },
   "options_prepared": {
-    "message": "The model is resident and warm."
+    "message": "The selected model is ready to translate."
   },
   "options_prepareFailed": {
     "message": "Could not load the model"
@@ -224,7 +187,7 @@
   "options_stateError": {
     "message": "On-device engine failed"
   },
-  "welcome_intro": { "message": "Choose an on-device model or configure a compatible server. Each tab stays OFF until you turn it on." },
+  "welcome_intro": { "message": "Set up an on-device model. Translate tabs manually, or configure automatic URLs and source languages in Settings." },
   "welcome_language": { "message": "Your language" },
   "welcome_model": { "message": "Model" },
   "welcome_modelHint": { "message": "Download the model once, or pick a model file you already have. It is stored on this device; pages never leave the browser." },
@@ -235,32 +198,12 @@
   },
   "welcome_importFailed": { "message": "That file cannot be used: $1$", "placeholders": { "1": { "content": "$1" } } },
   "welcome_needModel": { "message": "No model yet. Download it or pick a file to continue." },
-  "welcome_readyExisting": { "message": "The model is installed. Finish setup, then explicitly enable translation in the desired tab." },
+  "welcome_readyExisting": { "message": "The model is installed. Finish setup, then turn on a tab or configure automatic translation in Settings." },
   "welcome_start": { "message": "Finish setup" },
   "welcome_starting": { "message": "Starting the download…" },
-  "welcome_done": { "message": "Model ready. Enable translation explicitly in each tab you want to translate." },
+  "welcome_done": { "message": "Model ready. Turn on a tab or configure automatic translation in Settings." },
   "options_modelStored": { "message": "Model stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } },
   "welcome_modelStored": { "message": "The file is stored, but it did not load: $1$", "placeholders": { "1": { "content": "$1" } } },
   "tab_noTarget": { "message": "Open options from the extension icon on the page you want to translate." },
-  "tab_unavailable": { "message": "The target tab is closed or cannot be translated." },
-  "tab_enabledHint": { "message": "Only this selected tab is translated, including newly inserted content." },
-  "tab_disabledHint": { "message": "Translation is off in this tab. Other tabs keep their own selection." },
-  "server_engine": {"message":"Translation engine"},
-  "server_local": {"message":"On-device PLaMo 3"},
-  "server_openai": {"message":"OpenAI-compatible server"},
-  "server_privacy": {"message":"Only explicitly enabled tabs send text to this server. API keys are stored in this browser, not sent to page scripts. HTTP is unencrypted; use HTTPS outside trusted networks."},
-  "server_baseUrl": {"message":"Base URL"},
-  "server_apiKey": {"message":"API key (optional)"},
-  "server_model": {"message":"Model ID (type manually or load a list)"},
-  "server_timeout": {"message":"Request timeout (milliseconds)"},
-  "server_loadModels": {"message":"Load models"},
-  "server_modelsLoaded": {"message":"$1$ models loaded. Choose or type a model ID.","placeholders":{"1":{"content":"$1"}}},
-  "server_loadingModels": {"message":"Loading models…"},
-  "server_modelsUnavailable": {"message":"Model listing unavailable. You can enter the model ID manually."},
-  "server_badConfig": {"message":"Invalid server URL. Use an HTTP(S) Base URL without credentials, query parameters or a fragment."},
-  "server_testHint": {"message":"The test uses the fields currently shown. Save to apply them to selected tabs. Testing a server sends a sample sentence, not page content."},
-  "server_popup": {"message":"Server translation: $1$","placeholders":{"1":{"content":"$1"}}},
-  "server_needConfig": {"message":"Configure the server URL and model in Options. No local model or WebGPU is required."},
-  "server_onboarding": {"message":"Use your existing compatible server without downloading a local model or enabling WebGPU. Tabs remain OFF until explicitly enabled."},
-  "server_setup": {"message":"Configure compatible server"}
+  "tab_unavailable": { "message": "The target tab is closed or cannot be translated." }
 }

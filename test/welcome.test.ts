@@ -117,7 +117,6 @@ const FIELDS: readonly (readonly [string, string])[] = [
   ['status', 'p'],
   ['start', 'button'],
   ['options', 'button'],
-  ['serverOptions', 'button'],
   ['modelUrl', 'input']
 ];
 

@@ -95,6 +95,41 @@ test('clipped attributed text keeps its visible prefix bounded with the producti
   assert.equal(result.restored, true);
 });
 
+test('committed preview handoff does not hide a clipped source continuation from planning', async () => {
+  const result = await fixture(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = '<div style="height:72px;width:360px;overflow:hidden;white-space:pre-line;font:16px/24px monospace"></div>';
+    const element = root.firstChild;
+    const source = 'First visible lyric.\nSecond visible lyric.\nThird visible lyric.\nFourth hidden lyric.';
+    const node = document.createTextNode(source);
+    element.append(node);
+    const requests = [];
+    const presentation = AT.translationtext.create(document);
+    const translator = AT.dom.createTranslator({
+      doc: document, presentation,
+      workLimit: () => ({ maxChars: 16, maxTexts: 1 }),
+      translate: async (texts, onProgress) => {
+        requests.push(...texts);
+        onProgress?.(0, texts[0].toUpperCase());
+        await new Promise(resolve => setTimeout(resolve, 80));
+        return texts.map(text => text.toUpperCase());
+      }
+    });
+    const first = await translator.translateNodes([node]);
+    const before = {
+      preview: element.querySelector('at-translation-text').dataset.streaming === 'true',
+      deferred: translator.deferred(node), pending: first.pending.includes(node)
+    };
+    await translator.translateNodes(first.pending);
+    const progressed = requests.length === 2 && !requests[1].includes('First') && node.data.startsWith('FIRST VISIBLE LYRIC.');
+    translator.restore();
+    return { before, progressed, restored: node.data === source && element.firstChild === node };
+  });
+  assert.deepEqual(result.before, { preview: true, deferred: false, pending: true });
+  assert.equal(result.progressed, true, 'the next quantum uses canonical offsets during the handoff');
+  assert.equal(result.restored, true);
+});
+
 test('nested scaled overflow clips use padding-box geometry and preserve bidi, blank lines and surrogate pairs', async () => {
   const result = await fixture(async () => {
     const root = document.querySelector('#fixture');

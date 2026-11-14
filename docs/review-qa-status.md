@@ -2,7 +2,7 @@
 
 The scope is the actual installed extension, its vendored `onnxruntime-web`/Transformers.js runtime and the published `plamo-3-translate-0.8b-onnx` graph. Unit doubles, planner identity responses, synthetic pages, live sites and actual model execution are separate evidence layers. This is not a certification of linguistic quality or every browser/GPU combination.
 
-**Integration is not release approval.** The release workflow requires the browser, planner and real-server checks; a failed or canceled job is not success. Firefox ships no archive, so nothing about it is certified by a release.
+**Integration is not release approval.** The release workflow requires browser/planner checks and reproducible type/unit/package builds; a failed or canceled job is not success. Original-model inference uses separate native harnesses. Firefox ships no archive, so nothing about it is certified by a release.
 
 **Firefox on-device execution is unverified, and the earlier finding is closed as obsolete.** The "preparation channel closed" report was measured on the MediaPipe host and its inference worker, both deleted in 0.1.7; it cannot be reproduced against the ONNX host, and no run has tried. What is known is only what the host reports when the probe fails (`no-webgpu`), which is not evidence either way.
 

@@ -35,13 +35,6 @@ npm run test:browser
 
 For an existing Chromium executable, use `CHROMIUM_EXECUTABLE=/path/to/chromium npm run test:browser:dom`. `PLAYWRIGHT_MODULE` selects a driver module and `QA_DIR` selects the evidence directory. Do not bypass managed extension-installation policies; isolated Actions runners provide the separate extension test environment.
 
-The actual-server gate runs `test/server-extension/e2e.mjs` against a real
-OpenAI-compatible model server with the untouched installed Chrome package.
-Dynamic-text checks retain the page-owned `Text` handle before translation:
-the paragraph's first child may become an inline presentation component.
-They mutate that same text node, verify its new translation, then require
-current-source restoration and original-node identity.
-
 ## Planner-only layer
 
 `PLANNER_ENFORCE=1 node test/optimization/planner-audit.mjs` followed by `node test/optimization/check-budget.mjs` measures actual DOM eligibility/order and CPU overhead using identity responses. Every compiled module's SHA-256 and environment are recorded. These are not translations. See [the planner audit](optimization-audit.md).
@@ -119,11 +112,10 @@ See [the measured comment sessions](translation-performance.md#youtube-comment-s
 ## Release, evidence and limits
 
 The current Chrome release workflow requires browser regressions, planner
-acceptance, actual installed-extension server-mode QA, and the build action's
-type/unit/package and reproducibility checks. The published archive must match
-the server-tested package byte for byte. Native-model smoke results are separate
-evidence, not certification supplied by that server run. No Firefox archive is
-published; its on-device execution remains unverified.
+acceptance, and the build action's type/unit/package and reproducibility checks.
+The release records the archive SHA-256. Native-model smoke results remain
+separate evidence; these gates do not certify original-model inference.
+No Firefox archive is published; its on-device execution remains unverified.
 
 No token or model file is committed. Authenticated browser traces/profiles are excluded from artifacts; text evidence is scanned before upload. Screenshots, sanitized logs, before/after HTML, installed-file inventories, environment and tested package hashes are retained.
 
@@ -132,10 +124,10 @@ Semantic translation quality, arbitrary websites, all GPU/backends and hours-lon
 ## Streaming translation presentation
 
 Run the changed-region fade, exact-source ownership, cancellation, Unicode,
-SSE framing and port-routing regressions with the focused streaming suites:
+and port-routing regressions with the focused streaming suites:
 `test/browser/streaming.test.mjs`, `test/dom.test.ts`,
 `test/messages.test.ts`, `test/engine.test.ts`, `test/onnxhost.test.ts`,
-`test/engines.test.ts` and `test/server.test.ts`.
+and `test/engines.test.ts`.
 Browser tests inspect animation progression rather than only CSS declarations.
 
 For actual installed-extension token previews, use the current Chrome build:
@@ -163,3 +155,474 @@ The deterministic installed-extension tokenizer double implements
 `decode(ids, { skip_special_tokens: true })` with the same special-marker
 removal as its generated full sequence. This keeps strict prompt extraction
 under test rather than making the production host guess where an answer starts.
+
+## Viewport / presentation stability regressions
+
+The focused DOM, pipeline, targets and content suites cover offscreen active
+commits, retained partial prefixes, parked-source resumption, failure parking
+and exact restoration. Browser suites additionally cover semantic news/forum
+layouts, unmarked cards, CSS order, nested overflow, clipped-source measurement
+during final handoff, persistent aurora timelines across parked work, progressive
+source-tail replacement, reduced motion and forced colors.
+
+`test/browser/extension.test.mjs` exercises nested scrolling with the installed
+Chrome extension: move away while a model response is held, complete that
+offscreen source, translate newly visible prose, keep distant text parked,
+return to the translated source, and restore all original Text identities.
+Only inference is deterministic in this layer; it is not a model-speed test.
+
+## Real public-site viewport matrix
+
+```sh
+SITE_MATRIX=1 UNSAFE_WEBGPU=0 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/site-matrix-live \
+  YOUTUBE_COMMENTS_BURST=1 node test/sites-live/run-sites.mjs
+```
+
+Uses the existing real model installation and unchanged Chrome package, then
+observes Pixiv artwork, Reddit, a news article, a technical PDF, the same
+paper's HTML version, and YouTube comments/replies. `SITES` selects matrix IDs
+(`pixiv,reddit,news,technical-pdf,technical-html,youtube`); `PIXIV`, `REDDIT`,
+`NEWS`, `PDF`, `TECHNICAL_HTML` and `WATCH` select public URLs.
+Pixiv ranking links are followed by their observed href, including links that
+normally open a separate tab. Access challenges are recorded, never bypassed.
+
+`viewport-sites.json` records preview/commit timing, scroll phases, source
+identity/restoration, errors and screenshots. It also counts observed aurora
+animation object replacements and missing animation samples while translating
+or partial; reduced-motion intentionally disables that animation. These samples
+are not a measurement of compositor cost or proof of absence between samples.
+HTML completion counts are dispatched Text nodes, not all page text or whole
+comments; unchanged names
+and tokens remain in the unfinished denominator. YouTube retains its separate
+whole-comment viewport-episode SLO report. A PDF displayed by the browser is
+not a translated document: zero requests/hosts is recorded explicitly.
+The matrix is an observation runner, not a pass/fail gate; process exit zero
+does not turn blocked, incomplete, or untranslated cases into successes.
+
+## Reading policy and compact settings
+
+Focused verification covers `rules`, `settings`, `options`, `background`,
+`targets`, `pipeline`, `content`, `i18n` and `messages`: 209 distinct Node
+cases passed across the initial run and corrected-case runs. Type checking
+passed. Real Chromium DOM/extension scenarios passed 50/50 with deterministic
+inference; these are not real-model latency measurements.
+
+The scenarios cover semantic and generic columns in LTR/RTL, CSS multicolumn
+flow, visible support ahead of prefetch, bounded explicit expansion, and
+preservation of active aurora/source through scrolling. Background regressions
+cover inactive-tab admission, manual OFF through navigation and worker restart,
+stale language decisions, original-language caching, and automatic revocation.
+URL matching includes single/deep wildcards, exact paths, query patterns,
+scheme/port constraints and legacy migration.
+
+The installed extension exercises URL-rule entry, source-language checkboxes
+with native browser language detection, automatic translation, OFF override,
+rule removal/restoration, and model import/replacement. Desktop and 390px-wide
+settings screenshots and browser traces are in
+`test-results/browser/reading-policy-settings/`. Browser startup required the
+locally installed Playwright module and explicit Chromium executable.
+
+No new public-site model benchmark was run for this policy/settings change.
+Chrome and Firefox packages passed the packaging gate after the final locale
+label correction; the 15 extension scenarios passed again on that build.
+
+## Cancelled and parked aurora
+
+`test/browser/dom.test.mjs` checks that a settled partial flow loses its gradient
+and shadow after the bounded 180ms handoff grace, while preserving committed
+text, original suffix and animation identity. Resume reuses the same animation.
+Observed abort, explicit restore and failure clear busy presentation immediately;
+stale callbacks and results cannot settle or remove a restarted presentation.
+Scoped restore also settles cancelled active units outside the restored subtree.
+
+`test/browser/streaming.test.mjs` checks paused surfaces are undecorated and
+resumed surfaces are decorated, alongside existing phase/identity continuity.
+The installed-extension OFF scenario covers immediate original-source restoration
+while inference remains pending. A bare `shouldAbort` change is observed only at
+existing callbacks/checkpoints; it does not provide a new cancellation event.
+
+Visual evidence is saved under `test-results/browser/aurora-cancellation/`,
+including `aurora-partial-stopped.png` and `aurora-partial-cancelled.png`.
+
+Verification: type checking, 111 focused Node cases, and 71 distinct Chromium
+browser cases passed across the initial run and corrected-case run. Four new
+browser fixtures initially read requests before asynchronous sentence admission;
+they now await actual admission before exercising cancellation. Both stopped
+and cancelled screenshots were inspected: committed Korean prefix and original
+English suffix remain without aurora tint. Chrome/Firefox packaging passed.
+Inference was deterministic; this was not a live YouTube or throughput benchmark.
+
+## Generic selection, idle prefetch and opt-in concurrency
+
+Focused verification passed 384 distinct Node cases across the initial and
+corrected runs (`settings`, `options`, `messages`, `local`, `engines`, `onnxhost`,
+`engine`, `dom`, `pipeline`, `targets`, `i18n`, `content`, `background`).
+Type checking and Chrome/Firefox builds and packaging verification passed.
+The last corrected scheduling run passed all 143 cases in its four suites.
+
+Chromium DOM, streaming and installed-extension scenarios passed 74 distinct
+cases across the initial run and corrected-case run. They cover semantic
+author/identifier exclusions without dropping short prose, dynamic source
+cache reuse, bounded reading-unit continuity, explicit expansion precedence,
+stable-idle offscreen admission, two independent visible units, settings
+persistence and OFF cancellation of both outstanding requests. Inference in
+these deterministic browser tests is a stand-in, not a throughput measurement.
+
+The expansion regression exposed an unrelated active request consuming a
+newly granted reader-intent turn; only work admitted under that same grant now
+consumes it. Identifier filtering no longer treats arbitrary unprefixed
+hexadecimal-looking prose or fragments as IDs. The content test clock now
+advances to the earliest deadline rather than expiring five-minute transport
+timeouts together with immediate scheduling callbacks.
+
+Inspected UI evidence: `test-results/browser/reading-units-parallel/`,
+including `options-parallel-enabled.png` and `parallel-visible-units.png`.
+At the time of that run the setting was off by default. The source-token
+rollout below changes new settings to two slots; explicit serial choices remain serial.
+
+For real-model public-page observation with this option:
+
+```sh
+SITE_MATRIX=1 UNSAFE_WEBGPU=0 TRANSLATION_CONCURRENCY=2 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  SITES=news,technical-html \
+  QA_DIR=test-results/browser/reading-units-native \
+  node test/sites-live/run-sites.mjs
+```
+
+The harness sets and saves the shipped checkbox and records its stored value.
+This observes shared-session page behavior, not an isolated width-one versus
+width-two throughput comparison.
+
+### Real-model observation results
+
+Chromium 143, real q4f16 weights, native `kernels` backend, shared session,
+`translationConcurrency=2`; NASA news and arXiv HTML were opened sequentially
+and scrolled down/up. Evidence: `reading-units-native/viewport-sites.json`.
+These measurements precede the final prefixed-person-name exclusion correction.
+
+| Page | Completed / dispatched Text nodes | Preview p50 | Completion p50 | Completion p95 |
+| --- | ---: | ---: | ---: | ---: |
+| NASA news | 35 / 40 | 216ms | 427ms | 5193ms |
+| arXiv HTML | 49 / 55 | 191ms | 302ms | 7360ms |
+
+Completion quantiles include only completed nodes and can include time parked
+offscreen. These are neither whole-comment latencies nor a one-second SLO pass.
+Both runs observed zero source reversions before explicit restore, zero aurora
+animation replacements and zero missing-animation samples. All 40/40 and 55/55
+observed sources restored exactly, with no remaining presentation hosts.
+Translated screenshots were inspected; model quality is not established.
+
+The content status reported unchanged-source output on both pages. The technical
+page host additionally retained an `empty-output` error. NASA reported two page
+JavaScript errors (`setLocaleData` and `jQuery is not defined`). These runs are
+partial observations, not clean end-to-end passes.
+
+Host snapshots reported prefill/decode 747.3/113.6 tok/s after NASA and
+725.3/114.9 tok/s after arXiv. They are shared-session counters, not isolated
+comparative benchmarks; prefill remains below the previously requested
+1000 tok/s minimum. No twofold-speedup claim follows from admitting two units.
+
+The live run also exposed author names in generated prefixed classes. Explicit
+person/author/user/profile/display-name field tokens now match generic prefixes,
+without adding host-specific selectors or skipping whole prefixed author
+containers that also hold contribution prose. Names without reliable semantic
+markers remain ambiguous and may still translate.
+
+After the correction, the expanded generic browser regression passed. A fresh
+public arXiv DOM check excluded all eight person-name fields while keeping all
+eight author-note containers eligible. This was a selection check, not a second
+model benchmark. Final type checking, both package builds and packaging
+verification passed.
+
+## Source chunk-budget experiment
+
+```sh
+CHUNK_BENCH=1 CHUNK_ROUNDS=4 UNSAFE_WEBGPU=0 TRANSLATION_CONCURRENCY=1 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/chunk-budget-native \
+  node test/sites-live/run-sites.mjs
+```
+
+`test/sites-live/chunk-benchmark.mjs` reuses the installed-extension model
+setup, then calls the shipped `AT.engines.translate` in its service worker.
+By default it compares the historical 64-character partition boundary with sentence-aware
+64/128/256-source-token budgets, using actual host tokenizer counts rather than
+a character/token ratio. It does not modify production scheduling defaults.
+Each request contains one contiguous fragment of one source; this is not the
+numbered multi-comment prompt experiment or a concurrency comparison.
+
+Eight fixed English/Japanese comments and paragraphs are translated into Korean,
+one source/request at a time. Every policy is warmed first. Four rounds rotate
+policy order so each occupies each order position once. Full source partitions,
+outputs, validation failures, progress resets, request timings and host counters
+are saved to `chunk-benchmark.json`, including partial evidence if a run fails.
+`CHUNK_CASES` selects comma-separated corpus IDs. The six original cases are
+`short-comment,context-comment,long-comment,technical-paragraph,japanese-comment,japanese-article`;
+`extended-technical,extended-japanese` each require more than 256 source tokens.
+
+Source partition planning is offline and excluded from timed work. Normal
+per-request engine counting, prompt creation, output validation and built-in
+retries remain included. The configured input/output window stays unchanged;
+the existing source-length-based answer cap still varies with fragment size.
+No result cache is added, and no engine backend fallback counts as a valid run.
+
+First preview means the engine's validated streaming callback, not a browser
+paint. Completion covers every fragment, including failed fragments; completed
+and valid are separate fields. Summaries include source tokens/elapsed second,
+whole-source-valid tokens/elapsed second, and prefill/decode phase rates derived
+from cumulative counter differences. This does not measure document discovery,
+scroll scheduling, DOM presentation, cold startup or a whole-site SLO.
+Automatic output checks are not semantic-quality scores; inspect the saved
+translations for missing clauses, altered facts and cross-fragment grammar.
+
+Recorded runs: the original six-source cohort is in
+`test-results/browser/chunk-budget-native/`; the separate
+`CHUNK_CASES=extended-technical,extended-japanese` run is in
+`test-results/browser/chunk-budget-long-native/`. Each used four rounds, for
+128 measured whole-source samples and 656 fragment requests in total, excluding
+warmups. Both runs completed on native kernels. Automatic checks accepted every
+fragment, but manual review found reproducible mid-sentence truncation in all
+eight long-source samples at the 256-token budget. Treating those as translation
+successes would be incorrect. See the source-budget experiment in
+`docs/translation-performance.md` for timing, output examples and budget analysis.
+
+### Same source: long requests versus short serial/parallel requests
+
+```sh
+CHUNK_BENCH=1 CHUNK_COMPARE=1 CHUNK_ROUNDS=4 UNSAFE_WEBGPU=0 \
+  CHUNK_CASES=extended-technical,extended-japanese \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/length6-comparison \
+  node test/sites-live/run-sites.mjs
+```
+
+This opt-in mode compares whole-source, 128-token and 64-token requests
+serially, then reuses the exact same 64-token partitions at widths 2/4/8.
+Each full source finishes before the next one starts. The total source is
+identical in every condition, partitions preserve every character, and
+parallel results retain source order. Width is an upper bound when fewer
+fragments exist; `peakActive` records actual overlapping engine calls.
+
+The shared model session uses a 2048-token context/output window in all
+conditions. This differs from the historical 1024-window experiment above.
+Normal source-length-based answer budgeting and validation remain enabled.
+No glossary, preceding-chunk context, production scheduling or UI setting is
+changed; widths 4/8 are capacity experiments. Warmups are excluded, adjacent
+rounds reverse policy order, and each pair rotates its starting policy.
+
+Use fixed-source `sourceTokPerSec` and full-source completion to compare
+useful work. Splitting changes tokenization and repeats per-request prompts;
+`chunkSourceTokens` records the former. Pure phase counters exclude mixed
+steps and must not be mistaken for end-to-end throughput. Ordered first
+preview and ordered first complete fragment refer to source fragment zero,
+not a faster fragment farther down the document. These are worker callbacks,
+not DOM paint. Saved source/output pairs still require semantic inspection.
+The report also fingerprints the six installed engine modules.
+
+## Whole-source pool and alternate-model comparison
+
+```sh
+POOL_BENCH=1 POOL_ROUNDS=2 UNSAFE_WEBGPU=0 TRANSLATION_CONCURRENCY=1 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/pool-independent-native \
+  node test/sites-live/run-sites.mjs
+```
+
+`pool-benchmark.mjs` shares the eight-source `CORPUS` with the chunk experiment.
+It does not split sources: English and Japanese form separate fixed ordered pools
+(five and three items). No glossary, page context or role hint is supplied.
+Single-item requests are compared with whole-item packs capped at 256 or 512
+source tokens and with the full language pool. A source larger than a pack cap
+stays whole as its own request, and that exception is visible in saved plans.
+
+The native context is physically fixed at 2048 tokens. Primary runs set the
+host budget to 2048. A separate nominal-8192 diagnostic demonstrates the
+difference between a host-request budget and the actual kernel capacity.
+No context-size or production kernel change is made by this harness.
+
+Actual host sub-batches, generation counts, first streamed text, full mapped
+outputs, automatic output issues and cumulative token/rate snapshots are saved
+to `pool-benchmark.json`. Current native WebGPU hosts use independent rows;
+serial runtime fallback can use numbered output and per-source retries. One
+outer call is not one generation. Review complete outputs for omissions even
+when the returned item count matches. Published pure-phase counters exclude
+mixed prefill/decode steps; compare whole-workload wall time as well.
+
+Model comparison uses the same source text and target, not equal token counts:
+tokenizers differ. Browser WebGPU PLaMo and native CPU STQ Hy-MT2 are different
+execution stacks; their throughput difference cannot isolate model quality or
+predict the speed of a future Hy-MT2 WebGPU port. Do not run the two performance
+experiments concurrently on the same device.
+
+The Hy comparison harness pins a producer-compatible STQ runtime and verifies
+the official GGUF checksum. CMake, Ninja, a C++ compiler and network access
+are required for preparation. Run separately from the browser benchmark:
+
+```bash
+bash test/model-comparison/prepare-hymt2.sh
+HYMT_CONTEXT=2048 HYMT_ROUNDS=2 \
+  HYMT_OUTPUT=test-results/model-comparison/hymt2/context-2048 \
+  node test/model-comparison/hymt2-benchmark.mjs
+HYMT_CONTEXT=8192 HYMT_KINDS=pool HYMT_ROUNDS=2 \
+  HYMT_OUTPUT=test-results/model-comparison/hymt2/context-8192-pools \
+  node test/model-comparison/hymt2-benchmark.mjs
+```
+
+The second run tests genuine larger native context and is not capacity-matched
+to the extension's physical 2048-token kernel. Each run starts a loopback-only,
+test-only native completion service and stops it in `finally`. Reports retain
+full translations and stream events, EOS/limit reason, numbered-item coverage,
+actual token counts, build/runtime flags and artifact hashes. Missing numbered
+items and length-limited results must not count as successful throughput.
+See the measured results and port requirements in
+[`translation-performance.md`](translation-performance.md#whole-source-pool-experiment-without-glossary-context).
+
+## Independent browser throughput and model roofline
+
+```sh
+CONCURRENCY_BENCH=1 UNSAFE_WEBGPU=0 TRANSLATION_CONCURRENCY=1 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/concurrency-throughput-baseline \
+  node test/sites-live/run-sites.mjs
+node test/model-comparison/hymt2-roofline.mjs
+```
+
+The browser experiment runs the same eight whole sources as independent
+requests with widths 1/2/4/8, two reversed-order warm rounds, unchanged output
+budgets and no glossary/cache. It records installed script hashes, per-source
+previews/completion/output, exact comparisons and mixed-counter limitations.
+Widths 4/8 test engine capacity, not additional UI concurrency choices.
+
+The roofline calculator performs no inference or GPU work. It requires the
+checksum-pinned GGUF and saved Hy 2048 benchmark, computes mixed-quantization
+traffic and unequal-output-length schedules, and saves all assumptions.
+Its peak-bandwidth and utilization scenarios are not measured WebGPU rates.
+
+## Kernel attribution and current-model TPS targets
+
+```sh
+PROFILE_DISPATCH=1 CURRENT_ONLY=1 LENGTHS=128,1024 BATCHES=1,8 \
+  STEPS=16 REPEATS=1 UNSAFE_WEBGPU=0 \
+  QA_DIR=test-results/browser/tps-profile-baseline \
+  node test/engine-spike/run-kernels.mjs
+node test/engine-spike/performance-roofline.mjs \
+  test-results/browser/tps-profile-baseline/<printed-artifact>.json \
+  test-results/browser/tps-roofline.json
+```
+
+Profiling explicitly negotiates `timestamp-query`, records each real compute
+pass and calibrates a checked 256 MiB streaming read. It also saves exact
+parsed matrix/scale/normalization/embedding bytes. This mode is intrusive:
+do not use its throughput to accept an optimization. GPU timer quantization
+requires aggregating passes; host `computeMs` remains queue-wait wall time.
+Normal benchmark runs do not enable timestamps.
+
+Use immutable source snapshots with `BASELINE_KERNEL` and `VARIANT_SHADERS`
+for interleaved, equal-output-token A/B runs, without `PROFILE_DISPATCH`.
+Inspect token comparisons as well as rates; a faster mismatching variant is
+not automatically a winner. `CHECK_LOGITS=1 BATCHES=1,2 MODE=uniform`
+additionally compares every active row's complete vocabulary logits. The
+diagnostic rejects a final step that did not produce the full batch, rather
+than comparing stale rows. Heterogeneous mode covers slot retirement/refill and
+mixed prefill/decode; installed-extension corpus runs cover actual tokenization,
+prompts and streamed translation. Never overlap GPU performance experiments.
+
+The roofline report separates ideal peak-bandwidth bounds, measured-bandwidth
+sensitivity scenarios, dense-equivalent compute requirements and engineering
+targets. Batch aggregate TPS is not one request's TPS; no result claims whole
+pages can complete within milliseconds.
+
+### Packed decode and partitioned attention regression
+
+```sh
+QA_DIR=test-results/browser/tps2-attention-final \
+  node test/engine-spike/run-attention.mjs
+```
+
+This model-free real-WebGPU check compares partitioned attention with an
+independent CPU softmax reference. Cases cover partition tails, mixed cache
+slots, scratch reuse after long/invalid rows, sliding windows, no-QK/no-V
+ablations and large scores. It checks numerical values, not shader source
+strings or the mere absence of errors. `ATTENTION_SOURCE` selects an isolated
+candidate when experimenting; default is the production attention module.
+
+Profiling now records initialization submissions separately in
+`runs[].gpuInitialization`. GPU weight packing must not consume the first
+inference step's timestamp record or enter decode throughput. Normal warm
+step timings still exclude model load, pipeline creation and weight packing.
+
+```sh
+QA_DIR=test-results/browser/packed-gemv \
+  node test/engine-spike/run-packed-gemv.mjs
+```
+
+The packed-GEMV regression executes the production packer, GEMV shader and
+dispatch geometry on real WebGPU, without loading a model. Independent CPU
+Q4 products check every output for widths 1–8, K up to 6144, partial
+output tiles and the 4096-workgroup boundary. Sparse probes exercise signed
+nibbles, different block scales and both ends of each quantization block.
+Dense dyadic fixtures exercise every nibble/component and long accumulation
+loops with exactly representable sums. Output canaries catch padded-tile
+writes. The TypeScript parser exposes private
+generators only in the test page; production has no test-only API.
+`KERNEL_SOURCE` selects an experimental full kernel module.
+
+Partitioned-attention tests exercise both production launch geometries:
+`DECODE_HEADS_PER_GROUP` (2) and `DECODE_WIDE_HEADS_PER_GROUP` (4).
+Seven query heads cover a full four-head group and a partially filled tail.
+The 22 cases compare 59,136 output values, including partition/window tails.
+The runner selects four-head sharing only for eight active attention rows
+in the existing long-context partitioned path; smaller batches retain two.
+
+### Frozen-build installed-extension comparisons
+
+`test/sites-live/run-sites.mjs` accepts `EXTENSION_DIR` to install a frozen
+built extension into its disposable profile without overwriting
+`build/chrome`. The default remains `build/chrome`.
+
+```sh
+UNSAFE_WEBGPU=0 CONCURRENCY_BENCH=1 \
+  EXTENSION_DIR=test-results/browser/matrix5-baseline/extension \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/matrix5-installed-baseline \
+  node test/sites-live/run-sites.mjs
+```
+
+Run GPU benchmarks serially. Compare full outputs and installed-file hashes
+before interpreting timings. The concurrency report additionally records
+`items[].previewGapMs` and `summaries[].previewGapP90Ms`: intervals between
+consecutive nonempty streaming callbacks after the first preview. These
+measure callback delivery, not individual decoded-token intervals or DOM
+paint. First-preview latency, pure phase TPS and full corpus completion
+remain separate metrics; mixed-step time is excluded from the host's
+published pure-prefill/decode counters.
+
+### Japanese source-token rollout in the installed extension
+
+```sh
+PAGE_CHUNK_BENCH=1 UNSAFE_WEBGPU=0 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/page-fragments \
+  node test/sites-live/run-sites.mjs
+```
+
+This uses Japanese fixtures only, through the installed content script,
+background and real model. English remains a supported application language;
+it is excluded from this evaluation, not from language settings.
+The harness compares one long paragraph and two visible reading units with
+serial/two-slot settings. It verifies actual source-token counts at every
+generation, page-wide concurrency, streaming presentation, exact restoration
+after completion and cancellation, and saves screenshots/full outputs.
+Token planning is included in page latency. One sample per condition is smoke
+evidence, not a statistical speedup or translation-quality benchmark.
+
+The application separates a bounded 480-character DOM work quantum from a
+64-source-token model fragment. It prefers sentence boundaries, then words
+and graphemes for oversized sentences. Two visible reading units each own
+one slot; a lone visible unit can use both slots internally. Idle prefetch
+remains serial. Out-of-order fragments stay hidden until a contiguous
+source-order preview exists. Planning failure never falls back to estimated
+character/token arithmetic on this interactive path.

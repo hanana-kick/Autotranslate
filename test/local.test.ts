@@ -1,3 +1,4 @@
+/// <reference lib="es2024.promise" />
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { load } from './helpers.ts';
@@ -131,6 +132,89 @@ test('a mixed string is costed by script, not by the cheapest one', () => {
   // Counted as Latin alone these three characters cost one token; the Hangul
   // pays its own, far dearer, prior on top.
   assert.equal(local.estimateTokens('ab인'), 2);
+});
+
+test('source fragments use the measured 64-token default and Japanese sentence boundaries', async () => {
+  assert.equal(local.SOURCE_CHUNK_TOKENS, 64);
+  const source = ' \t最初です。次です！終わり？ \n';
+  const count = (text: string) => Array.from(text).length;
+  const chunks = await local.sourceChunks(source, 7, count);
+  assert.deepEqual(chunks, [' \t最初です。', '次です！', '終わり？ \n']);
+  assert.equal(chunks.join(''), source);
+  assert.ok(chunks.every((chunk: string) => chunk.trim() && count(chunk.trim()) <= 7));
+});
+
+test('an oversized sentence prefers whole words and preserves every whitespace character', async () => {
+  const source = ' \talpha beta  gamma\r\n';
+  const seen: string[] = [];
+  const chunks = await local.sourceChunks(source, 10, (text: string) => {
+    assert.equal(text, text.trim(), 'the tokenizer receives only translated content');
+    seen.push(text);
+    return Array.from(text).length;
+  });
+  assert.deepEqual(chunks, [' \talpha beta  ', 'gamma\r\n']);
+  assert.equal(chunks.join(''), source);
+  assert.ok(chunks.every((chunk: string) => seen.includes(chunk.trim()) && chunk.trim().length <= 10));
+  assert.deepEqual(await local.sourceChunks('', 10, () => assert.fail('empty input is not tokenized')), []);
+  assert.deepEqual(await local.sourceChunks(' \r\n\t', 10, () => assert.fail('raw-only input is not translated')), [' \r\n\t']);
+});
+
+test('overlong words split only at grapheme boundaries and never discard source text', async () => {
+  const source = ` \te\u0301e\u0301e\u0301e\u0301👩‍👩‍👧‍👦👩‍👩‍👧‍👦\r\n`;
+  const count = (text: string) => Array.from(text).length;
+  const chunks = await local.sourceChunks(source, 7, count);
+  assert.equal(chunks.join(''), source);
+  assert.ok(chunks.length > 1);
+  for (const chunk of chunks) {
+    assert.ok(chunk.trim());
+    assert.ok(count(chunk.trim()) <= 7);
+    assert.match(chunk.trim(), /^(?:e\u0301|👩‍👩‍👧‍👦)+$/u, 'combining marks and joined emoji stay intact');
+  }
+  await assert.rejects(local.sourceChunks('👩‍👩‍👧‍👦', 6, count), {
+    reason: 'context-overflow', code: 'config', message: /grapheme/
+  });
+});
+
+test('source planning measures token costs rather than using text length or proportional cuts', async () => {
+  const count = (text: string) => Array.from(text).reduce((sum, char) => sum + (char === '重' ? 5 : 1), 0);
+  const source = '重軽重軽重軽';
+  const chunks = await local.sourceChunks(source, 6, count);
+  assert.equal(chunks.join(''), source);
+  assert.ok(chunks.length > 1);
+  assert.ok(chunks.every((chunk: string) => chunk.trim() && count(chunk.trim()) <= 6));
+  await assert.rejects(local.sourceChunks(source, 0, count), { reason: 'context-overflow', code: 'config' });
+});
+
+test('source planning honors cancellation before and during tokenization', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(local.sourceChunks('text', 2, () => assert.fail('aborted work is not measured'), controller.signal), {
+    code: 'cancelled'
+  });
+  const during = new AbortController();
+  let measured = 0;
+  await assert.rejects(local.sourceChunks('a long source', 2, (text: string) => {
+    if (++measured === 3) during.abort();
+    return text.length;
+  }, during.signal), { code: 'cancelled' });
+  assert.equal(measured, 3, 'no tokenizer calls follow cancellation');
+});
+
+test('a long source plan yields so an incoming cancellation can interrupt it', async () => {
+  const controller = new AbortController();
+  let measured = 0;
+  // Exercise real event-loop delivery: simulated time alone would not prove
+  // that a long chain of tokenizer promises admits an incoming cancel event.
+  const timer = setTimeout(() => controller.abort(), 0);
+  try {
+    await assert.rejects(local.sourceChunks('長'.repeat(1000), 4, (text: string) => {
+      measured += 1;
+      return text.length;
+    }, controller.signal), { code: 'cancelled' });
+    assert.ok(measured > 0 && measured < 1000);
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 test('chunking keeps one generation inside the budget', () => {
@@ -603,5 +687,30 @@ test('callHost forwards translation previews in both placements without changing
     local.setHostPlacement('offscreen');
     delete AT.onnxhost;
     delete AT.sendMessage;
+  }
+});
+
+test('callHost passes the local signal and cancels an inline wait without unloading the host', async () => {
+  const controller = new AbortController();
+  const completion = Promise.withResolvers<Record<string, unknown>>();
+  let calls = 0;
+  AT.onnxhost = {
+    handle: (_message: unknown, _progress: unknown, signal: AbortSignal) => {
+      calls += 1;
+      assert.equal(signal, controller.signal);
+      return completion.promise;
+    }
+  };
+  local.setHostPlacement('background');
+  try {
+    const result = local.callHost({ type: 'at/local-translate' }, undefined, controller.signal);
+    controller.abort();
+    assert.equal((await result).code, 'cancelled');
+    assert.equal((await local.callHost({ type: 'at/local-translate' }, undefined, controller.signal)).code, 'cancelled');
+    assert.equal(calls, 1);
+    completion.resolve({ translations: ['late'] });
+  } finally {
+    local.setHostPlacement('offscreen');
+    delete AT.onnxhost;
   }
 });

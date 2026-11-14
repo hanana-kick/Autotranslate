@@ -8,6 +8,14 @@
 //   SITE_SECONDS=120 MIN_TRANSLATED=3 npm run test:sites
 //   KEEP_OPEN=1 npm run test:sites           # leave the window open to look at
 //   WATCH=<url> REDDIT=<url> NHK=<url> YAHOO=<url> npm run test:sites
+//   SITE_MATRIX=1 QA_DIR=<dir> ...          # Pixiv/Reddit/news/PDF/YouTube viewport scenarios
+//   TRANSLATION_CONCURRENCY=2 ...          # opt in through the shipped settings checkbox
+//   CHUNK_BENCH=1 ...                     # fixed-concurrency source-budget experiment
+//   CHUNK_BENCH=1 CHUNK_COMPARE=1 ...     # same source: whole vs short serial/parallel requests
+//   PAGE_CHUNK_BENCH=1 ...                # Japanese content-to-host rollout, real model
+//   POOL_BENCH=1 ...                      # fixed whole-source pool, no glossary/context
+//   CONCURRENCY_BENCH=1 ...               # independent engine-capacity experiment, not a UI setting
+//   EXTENSION_DIR=<built directory> ...   # compare a frozen build without replacing build/chrome
 //
 // Silent in three layers: --mute-audio for the browser itself, an init script
 // that mutes every media element a page creates or plays, and a per-poll sweep
@@ -19,7 +27,7 @@
 // blocks the run, serves another language, or reports its own error is recorded
 // and does not fail it; a site that had Japanese source and translated nothing
 // does.
-import { chromium, launchOptions } from '../browser/support.mjs';
+import { chromium, launchOptions, ROOT, OUTPUT } from '../browser/support.mjs';
 import { execFileSync } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import { mkdir, mkdtemp, cp, readFile, stat, writeFile } from 'node:fs/promises';
@@ -27,8 +35,7 @@ import { createServer as createHttpsServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-const ROOT = '/Users/hana/sources/Autotranslate';
-const OUT = join(ROOT, 'test-results/browser');
+const OUT = OUTPUT;
 /** A model already on disk: the run installs from it instead of downloading. */
 const MODEL_DIR = process.env.MODEL_DIR ? resolve(process.env.MODEL_DIR) : '';
 const GRAPH = 'model_q4f16.onnx';
@@ -48,7 +55,8 @@ await mkdir(OUT, { recursive: true });
 
 const tmp = await mkdtemp(join(tmpdir(), 'sites-live-'));
 const extension = join(tmp, 'extension');
-await cp(join(ROOT, 'build/chrome'), extension, { recursive: true });
+const extensionSource = resolve(process.env.EXTENSION_DIR || join(ROOT, 'build/chrome'));
+await cp(extensionSource, extension, { recursive: true });
 
 /**
  * Serves a model directory over a throwaway https origin. It has to stream: the
@@ -100,14 +108,15 @@ const context = await chromium.launchPersistentContext(join(tmp, 'profile'), {
   headless: process.env.HEADLESS === '1',
   ignoreDefaultArgs: [...(launchOptions.ignoreDefaultArgs ?? []), '--disable-extensions', '--disable-gpu'],
   args: [...launchOptions.args.filter((arg) => arg !== '--disable-gpu'),
-    '--enable-unsafe-webgpu', ...(process.platform === 'darwin' ? ['--use-webgpu-adapter=apple'] : []),
+    ...(process.env.UNSAFE_WEBGPU === '0' ? [] : ['--enable-unsafe-webgpu']),
+    ...(process.platform === 'darwin' ? ['--use-webgpu-adapter=apple'] : []),
     `--disable-extensions-except=${extension}`, `--load-extension=${extension}`,
     '--no-first-run', '--no-default-browser-check',
     // Layer one: the browser itself never unmutes a tab, and nothing autoplays.
     '--mute-audio', '--autoplay-policy=user-gesture-required'],
   // A concrete viewport: a window with none never starts the extension worker.
   viewport: { width: 1280, height: 1000 },
-  locale: 'ja-JP',
+  locale: process.env.SITE_MATRIX === '1' ? 'en-US' : 'ja-JP',
   // The throwaway certificate the model origin presents.
   ...(modelServer ? { ignoreHTTPSErrors: true } : {})
 });
@@ -175,17 +184,17 @@ const extensionId = new URL(worker.url()).host;
 const options = await context.newPage();
 await options.goto(`chrome-extension://${extensionId}/options.html`);
 await options.waitForFunction(() => !!globalThis.AT?.settings, null, { timeout: 30000 });
-// The region overlay is part of the shipped UI: turn it on, then require the
-// shipped checkbox to show it. (The click itself races the page's own render.)
+// Enable the diagnostic overlay through persisted settings, not a removed
+// advanced-settings control.
 await options.evaluate((target) => AT.settings.save({ targetLang: target, debug: true }), TARGET);
 await options.reload();
 await options.waitForFunction(() => !!globalThis.AT?.settings, null, { timeout: 30000 });
 await options.bringToFront();
-await options.waitForFunction(() => document.querySelector('#debug')?.checked === true, null, { timeout: 15000 });
+await options.waitForFunction(() => document.body.dataset.ready === 'true', null, { timeout: 15000 });
 console.log('[debug]', 'region overlay on');
 // MODEL_DIR serves the bytes; the card stays the card, so the parts beside it
 // are discovered exactly as they are for a real download.
-if (modelServer) await options.waitForFunction((expected) => document.querySelector('#modelUrl')?.value === expected, CARD, { timeout: 15000 });
+if (modelServer) await options.waitForFunction(() => document.body.dataset.ready === 'true', null, { timeout: 15000 });
 await options.locator('#downloadModel').click();
 await options.waitForFunction(
   () => ['ok', 'error'].includes(document.querySelector('#modelStatus')?.dataset.kind),
@@ -203,6 +212,67 @@ if (install.kind !== 'ok') {
   await context.close();
   await modelServer?.close();
   throw new Error(`install failed: ${install.text}`);
+}
+await options.locator('#parallelTranslation').setChecked(process.env.TRANSLATION_CONCURRENCY === '2');
+await options.locator('#save').click();
+await options.waitForFunction((width) => AT.settings.load().then(settings =>
+  settings.translationConcurrency === width), process.env.TRANSLATION_CONCURRENCY === '2' ? 2 : 1);
+summary.translationConcurrency = (await options.evaluate(() => AT.settings.load())).translationConcurrency;
+await options.screenshot({ path: join(OUT, 'sites-options.png') });
+
+if (process.env.PAGE_CHUNK_BENCH === '1') {
+  try {
+    const { runPageChunkBenchmark } = await import('./page-chunk-benchmark.mjs');
+    await runPageChunkBenchmark({ context, options, worker, output: OUT });
+  } finally {
+    await context.close();
+    await modelServer?.close();
+  }
+  process.exit(0);
+}
+
+if (process.env.CONCURRENCY_BENCH === '1') {
+  try {
+    const { runConcurrencyBenchmark } = await import('./concurrency-benchmark.mjs');
+    await runConcurrencyBenchmark({ context, options, worker, output: OUT, extension });
+  } finally {
+    await context.close();
+    await modelServer?.close();
+  }
+  process.exit(0);
+}
+
+if (process.env.POOL_BENCH === '1') {
+  try {
+    const { runPoolBenchmark } = await import('./pool-benchmark.mjs');
+    await runPoolBenchmark({ context, options, worker, output: OUT });
+  } finally {
+    await context.close();
+    await modelServer?.close();
+  }
+  process.exit(0);
+}
+
+if (process.env.CHUNK_BENCH === '1') {
+  try {
+    const { runChunkBenchmark } = await import('./chunk-benchmark.mjs');
+    await runChunkBenchmark({ context, options, worker, output: OUT, extension });
+  } finally {
+    await context.close();
+    await modelServer?.close();
+  }
+  process.exit(0);
+}
+
+if (process.env.SITE_MATRIX === '1') {
+  try {
+    const { runViewportSites } = await import('./viewport-sites.mjs');
+    await runViewportSites({ context, options, output: OUT });
+  } finally {
+    await context.close();
+    await modelServer?.close();
+  }
+  process.exit(0);
 }
 
 /** Enables the per-tab switch through the shipped options path. */

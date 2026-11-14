@@ -12,7 +12,7 @@ namespace AT.content {
     engine?: string;
     error?: string;
     code?: AT.engines.EngineErrorCode | null;
-    /** Where a local batch spent its time; absent for a server engine. */
+    /** Where a batch spent its time. */
     timing?: { countMs: number; hostMs: number; chunks: number };
   };
 
@@ -170,6 +170,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
   ): Promise<string[]> {
     const texts = batch.texts;
     const started = Date.now();
+    const epoch = state.epoch;
     const response = (await AT.sendMessage({
       type: C.MSG.BATCH,
       texts,
@@ -180,8 +181,10 @@ declare var __autotranslate: AT.content.Boot | undefined;
       // Read once per pass. Only a context that would actually change the
       // prompt is sent: an unidentified page adds nothing to a request.
       context: AT.pagecontext.hint(batch.context) ? batch.context : null,
-      role: batch.role
-    }, batch.onProgress)) as AT.content.BatchReply | undefined;
+      role: batch.role,
+      fragmentConcurrency: batch.fragmentConcurrency ?? 1
+    }, batch.onProgress, batch.signal)) as AT.content.BatchReply | undefined;
+    if (batch.signal?.aborted || epoch !== state.epoch) throw new DOMException('Translation cancelled', 'AbortError');
     // The round trip a reader waits for: request out, translations back. The
     // first one of a session carries the model load, later ones do not.
     const ms = Date.now() - started;
@@ -211,7 +214,8 @@ declare var __autotranslate: AT.content.Boot | undefined;
       state.pipeline = AT.pipeline.create({
         doc: document,
         presentation: AT.translationtext.create(document),
-        settings: () => ({ maxNodes: snapshot.maxNodes, engine: snapshot.engine }),
+        settings: () => ({ maxNodes: snapshot.maxNodes, translationConcurrency: state.settings?.translationConcurrency ?? 2 }),
+        readingWindow: true,
         shouldTranslate: (text) => !AT.isTargetLanguage(text, snapshot.targetLang),
         // A pass owns an immutable settings snapshot, not mutable global state.
         translate: (batch) => requestBatch(batch, snapshot),
@@ -493,8 +497,53 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.viewportTimer = 0;
   }
 
+  const IDLE_PREFETCH_MS = 500;
+  let idleTimer = 0;
+  let idleEpoch = 0;
+  let stableSince = Date.now();
+  function interruptPrefetch(): void {
+    clearTimeout(idleTimer);
+    idleTimer = 0;
+    idleEpoch++;
+    stableSince = Date.now();
+  }
+  function schedulePrefetch(): void {
+    if (idleTimer || state.stopped || !state.pipeline || document.hidden || state.working ||
+        state.timer || state.viewportTimer || state.dirty || state.continuation || state.full || state.roots.length) return;
+    const epoch = state.epoch, idle = idleEpoch, pipeline = state.pipeline;
+    idleTimer = setTimeout(() => {
+      idleTimer = 0;
+      if (epoch !== state.epoch || idle !== idleEpoch || document.hidden || state.working ||
+          state.timer || state.continuation || state.dirty || state.full || state.roots.length) return;
+      state.working = true;
+      let more = false;
+      void pipeline.prefetch().then(async (result) => {
+        if (epoch !== state.epoch || state.stopped) return;
+        more = result.hasMore && result.processedNodes > 0;
+        if (result.processedNodes) await report({ status: result.failed ? 'error' : 'translated',
+          translated: result.translated, error: result.error });
+        updateDebug(pipeline);
+      }).catch(async (error: unknown) => {
+        if (epoch === state.epoch && !state.stopped) await report({ status: 'error',
+          translated: pipeline.stats().translated, error: String((error as Error)?.message ?? error) });
+      }).finally(() => {
+        if (epoch !== state.epoch) return;
+        state.working = false;
+        if (state.dirty || state.continuation || state.full || state.roots.length) scheduleTick(state.continuation);
+        else if (more && idle === idleEpoch) schedulePrefetch();
+      });
+    }, Math.max(0, IDLE_PREFETCH_MS - (Date.now() - stableSince))) as unknown as number;
+  }
+  function visibilityChanged(): void {
+    interruptPrefetch();
+    state.pipeline?.invalidatePlan(true);
+    if (!document.hidden) scheduleViewportPass();
+  }
+
   function scheduleTick(immediate = false): void {
     if (state.stopped || !state.pipeline) return;
+    clearTimeout(idleTimer);
+    idleTimer = 0;
     if (state.working) { state.dirty = true; return; }
     if (state.timer !== 0 && immediate && !state.immediateTimer) {
       clearTimeout(state.timer);
@@ -522,6 +571,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
         })
         .finally(() => {
           if (state.dirty || state.continuation) scheduleTick(state.continuation);
+          else schedulePrefetch();
         });
     }, immediate ? 0 : C.OBSERVER_DEBOUNCE_MS);
   }
@@ -610,7 +660,10 @@ declare var __autotranslate: AT.content.Boot | undefined;
 
   function onMutations(records: MutationRecord[]): void {
     const regions = changedRegions(records);
-    if (regions === null || regions.length) state.pipeline?.invalidatePlan();
+    if (regions === null || regions.length) {
+      interruptPrefetch();
+      state.pipeline?.invalidatePlan();
+    }
     enqueue(regions);
     if (!state.full && state.roots.length === 0) return;
     scheduleTick();
@@ -636,7 +689,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       subtree: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ['hidden', 'open', 'style', 'class', 'aria-hidden', 'translate']
+      attributeFilter: ['hidden', 'open', 'style', 'class', 'aria-hidden', 'aria-expanded', 'translate']
     });
   }
 
@@ -644,9 +697,10 @@ declare var __autotranslate: AT.content.Boot | undefined;
    *  and jump to whatever scrolls back into view. */
   function scheduleViewportPass(): void {
     if (!state.settings?.enabled || !state.pipeline || state.stopped) return;
+    interruptPrefetch();
     // Stop refilling the active inference window immediately. Geometry is read
     // once by the next pass, not on every scroll event.
-    state.pipeline.invalidatePlan();
+    state.pipeline.invalidatePlan(true);
     if (state.viewportTimer) return;
     state.viewportTimer = setTimeout(() => {
       state.viewportTimer = 0;
@@ -655,29 +709,81 @@ declare var __autotranslate: AT.content.Boot | undefined;
     }, 0) as unknown as number;
   }
 
+  let readerGestureAt = 0;
+  let readerEngagedAt = 0;
+  let readerEngagedRegion: Element | null = null;
+  function rememberReaderGesture(event: Event): void {
+    if (event.isTrusted) readerGestureAt = Date.now();
+  }
+
+  /** Only explicit reader intent earns a short boost; DOM churn never does. */
+  function onReaderInteraction(event: Event): void {
+    if (!event.isTrusted || Date.now() - readerGestureAt > 1000 || !state.pipeline || state.stopped) return;
+    let target = event.target as Element | null;
+    if (event.type === 'selectionchange') {
+      const selection = document.getSelection?.();
+      if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+      const ancestor = selection.getRangeAt(0).commonAncestorContainer;
+      target = ancestor.nodeType === 1 ? ancestor as Element : ancestor.parentElement;
+    }
+    if (!target?.closest || state.card?.contains(target) || state.overlay?.contains(target) || state.overlayPanel?.contains(target)) return;
+    const control = target.closest('[aria-controls],summary');
+    let region: Element | null = null;
+    if (control) {
+      const controlled = control.getAttribute('aria-controls')?.trim().split(/\s+/)[0];
+      region = controlled ? document.getElementById(controlled) : control.closest('details');
+    }
+    if (!region && event.type !== 'click') {
+      region = target.closest('p,li,details,[role="tabpanel"],section,article,aside,nav') ?? target;
+    }
+    if (!region) return;
+    if (readerEngagedAt === readerGestureAt && readerEngagedRegion === region) return;
+    readerEngagedAt = readerGestureAt;
+    readerEngagedRegion = region;
+    state.pipeline.engage(region);
+    scheduleViewportPass();
+  }
+
   type ScrollTarget = {
-    addEventListener?: (type: string, listener: () => void, options?: { passive?: boolean }) => void;
-    removeEventListener?: (type: string, listener: () => void) => void;
+    addEventListener?: (type: string, listener: (event: Event) => void, options?: { passive?: boolean; capture?: boolean }) => void;
+    removeEventListener?: (type: string, listener: (event: Event) => void, options?: { capture?: boolean }) => void;
   };
 
   function startViewportPass(): void {
     if (state.scrollBound) return;
     const target = globalThis as unknown as ScrollTarget;
     if (typeof target.addEventListener !== 'function') return;
-    target.addEventListener('scroll', scheduleViewportPass, { passive: true });
+    // Element scroll events do not bubble; capture includes nested feeds/panes.
+    target.addEventListener('scroll', scheduleViewportPass, { passive: true, capture: true });
     target.addEventListener('resize', scheduleViewportPass, { passive: true });
+    target.addEventListener('visibilitychange', visibilityChanged);
+    target.addEventListener('pointerdown', rememberReaderGesture, { passive: true, capture: true });
+    target.addEventListener('keydown', rememberReaderGesture, { passive: true, capture: true });
+    target.addEventListener('focusin', onReaderInteraction, { capture: true });
+    target.addEventListener('click', onReaderInteraction, { capture: true });
+    target.addEventListener('selectionchange', onReaderInteraction, { capture: true });
     state.scrollBound = true;
   }
 
   function stopViewportPass(): void {
     stopViewportTimer();
+    interruptPrefetch();
     if (!state.scrollBound) return;
     const target = globalThis as unknown as ScrollTarget;
     if (typeof target.removeEventListener === 'function') {
-      target.removeEventListener('scroll', scheduleViewportPass);
+      target.removeEventListener('scroll', scheduleViewportPass, { capture: true });
       target.removeEventListener('resize', scheduleViewportPass);
+      target.removeEventListener('visibilitychange', visibilityChanged);
+      target.removeEventListener('pointerdown', rememberReaderGesture, { capture: true });
+      target.removeEventListener('keydown', rememberReaderGesture, { capture: true });
+      target.removeEventListener('focusin', onReaderInteraction, { capture: true });
+      target.removeEventListener('click', onReaderInteraction, { capture: true });
+      target.removeEventListener('selectionchange', onReaderInteraction, { capture: true });
     }
     state.scrollBound = false;
+    readerGestureAt = 0;
+    readerEngagedAt = 0;
+    readerEngagedRegion = null;
   }
 
   async function runTick(): Promise<void> {
@@ -779,10 +885,12 @@ declare var __autotranslate: AT.content.Boot | undefined;
       state.settingsKey = key;
       state.targetLang = settings.targetLang;
       state.stopped = false;
-    } else if (state.settings && state.settings.debug !== settings.debug) {
+    } else if (state.settings && (state.settings.debug !== settings.debug ||
+        state.settings.translationConcurrency !== settings.translationConcurrency)) {
       // The overlay switch is not page content: apply it to what is already
       // translated instead of rebuilding a session to draw a box.
-      const snapshot: AT.settings.ContentSnapshot = { ...state.settings, debug: settings.debug };
+      const snapshot: AT.settings.ContentSnapshot = { ...state.settings, debug: settings.debug,
+        translationConcurrency: settings.translationConcurrency ?? 2 };
       state.settings = Object.freeze(snapshot);
       if (settings.debug) state.overlayClosed = false;
       updateDebug(state.pipeline);
@@ -810,6 +918,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
           state.dirty = false;
           scheduleTick(state.continuation);
         }
+        else schedulePrefetch();
       }
     }
   }

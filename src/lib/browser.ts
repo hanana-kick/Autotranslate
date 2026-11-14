@@ -39,8 +39,10 @@ namespace AT {
     get: (tabId: number) => Promise<Tab | undefined>;
     query: (queryInfo: { active?: boolean; currentWindow?: boolean; windowId?: number }) => Promise<(Tab | undefined)[]>;
     sendMessage: (tabId: number, message: unknown) => Promise<unknown>;
+    /** Native page-language detection; no content script or model is needed. */
+    detectLanguage?: (tabId: number) => Promise<string>;
     onUpdated: {
-      addListener: (listener: (tabId: number, changeInfo: { status?: string }, tab: Tab) => void) => void;
+      addListener: (listener: (tabId: number, changeInfo: { status?: string; url?: string }, tab: Tab) => void) => void;
     };
     onRemoved: { addListener: (listener: (tabId: number) => void) => void };
     onActivated?: { addListener: (listener: (info: { tabId: number; windowId?: number }) => void) => void };
@@ -142,7 +144,8 @@ namespace AT {
   export type MessageHandler = (
     message: Message,
     sender: Sender,
-    onProgress?: TranslationProgress
+    onProgress?: TranslationProgress,
+    signal?: AbortSignal
   ) => MessageResult | null | undefined | Promise<MessageResult | null | undefined>;
 
   export type MessageHandlers = { [type: string]: MessageHandler | undefined };
@@ -304,27 +307,29 @@ namespace AT {
   export function onMessage(handlers: MessageHandlers): void {
     // Operation-scoped ports isolate previews by caller/frame and close at the
     // final response. Only the owner of this exact command claims its port.
-    if ([C.MSG.BATCH, C.MSG.LOCAL_TRANSLATE].some((type) => Object.hasOwn(handlers, type))) extensionApi.runtime.onConnect?.addListener((port) => {
+    if ([C.MSG.BATCH, C.MSG.LOCAL_TRANSLATE, C.MSG.LOCAL_COUNT].some((type) => Object.hasOwn(handlers, type))) extensionApi.runtime.onConnect?.addListener((port) => {
       if (!port.name.startsWith(STREAM_PORT)) return;
       const type = port.name.slice(STREAM_PORT.length);
-      if (type !== C.MSG.BATCH && type !== C.MSG.LOCAL_TRANSLATE) return;
+      if (type !== C.MSG.BATCH && type !== C.MSG.LOCAL_TRANSLATE && type !== C.MSG.LOCAL_COUNT) return;
       const handler = Object.hasOwn(handlers, type) ? handlers[type] : undefined;
       if (!handler) return;
       let active = true, received = false;
-      port.onDisconnect.addListener(() => { active = false; });
+      const controller = new AbortController();
+      port.onDisconnect.addListener(() => { active = false; controller.abort(); });
       const post = (value: unknown): void => {
         if (!active) return;
-        try { port.postMessage(value); } catch { active = false; }
+        try { port.postMessage(value); } catch { active = false; controller.abort(); }
       };
       port.onMessage.addListener((raw) => {
         if (received) return;
         received = true;
         const message = raw && typeof raw === 'object' ? raw as Message : null;
         void Promise.resolve().then(async () => {
+          if (!active) return;
           if (!message || message.type !== type) throw new Error('invalid translation stream command');
           const result = await handler(message, port.sender ?? {}, (index, text) => {
             post({ kind: 'progress', index, text });
-          });
+          }, controller.signal);
           post({ kind: 'result', response: { ok: true, ...(result ?? {}) } });
         }).catch((error: unknown) => {
           const failure = error as Rejection;
@@ -415,7 +420,7 @@ namespace AT {
     });
   }
 
-  function translateOverPort(message: Message, onProgress: TranslationProgress): Promise<Response> {
+  function translateOverPort(message: Message, onProgress?: TranslationProgress, signal?: AbortSignal): Promise<Response> {
     return new Promise((resolve) => {
       let settled = false;
       let port: RuntimePort | undefined;
@@ -423,11 +428,15 @@ namespace AT {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
         resolve(response);
         try { port?.disconnect(); } catch { /* Context already closed. */ }
       };
       const timer = setTimeout(() => finish({ ok: false,
         error: 'translation stream timed out', code: 'timeout' }), 5 * 60 * 1000);
+      const abort = (): void => finish({ ok: false, error: 'Translation cancelled.', code: 'cancelled' });
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) { abort(); return; }
       try {
         port = extensionApi.runtime.connect!({ name: STREAM_PORT + message.type });
         port.onMessage.addListener((raw) => {
@@ -436,7 +445,7 @@ namespace AT {
           if (event.kind === 'progress') {
             if (Number.isInteger(event.index) && Number(event.index) >= 0 &&
                 typeof event.text === 'string' && event.text.length <= 1_000_000) {
-              onProgress(Number(event.index), event.text);
+              onProgress?.(Number(event.index), event.text);
             }
           } else if (event.kind === 'result') {
             const response = event.response as Partial<Response> | null;
@@ -453,11 +462,12 @@ namespace AT {
     });
   }
 
-  export async function sendMessage(message: Message | null | undefined, onProgress?: TranslationProgress): Promise<Response> {
+  export async function sendMessage(message: Message | null | undefined, onProgress?: TranslationProgress, signal?: AbortSignal): Promise<Response> {
+    if (signal?.aborted) return { ok: false, error: 'Translation cancelled.', code: 'cancelled' };
     const type = message?.type ?? 'message';
-    if (message && onProgress && (type === C.MSG.BATCH || type === C.MSG.LOCAL_TRANSLATE)) {
+    if (message && (onProgress || signal) && (type === C.MSG.BATCH || type === C.MSG.LOCAL_TRANSLATE || type === C.MSG.LOCAL_COUNT)) {
       if (!extensionApi.runtime.connect) return { ok: false, error: 'translation streaming is unavailable', code: 'no-response' };
-      return translateOverPort(message, onProgress);
+      return translateOverPort(message, onProgress, signal);
     }
     // The document-host preparation uses a native operation-scoped channel.
     // Chrome offscreen and every other command retain ordinary messaging.

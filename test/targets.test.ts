@@ -75,6 +75,21 @@ test('ARIA roles are read when the elements are not semantic', () => {
   assert.equal(targets.roleOf(info({ ariaRole: 'contentinfo', tag: 'div' })), 'footer');
   assert.equal(targets.roleOf(info({ ariaRole: 'list', tag: 'div' })), 'list');
 });
+test('unmarked card prose is content while explicit supporting regions retain their roles', () => {
+  assert.equal(targets.isContent(targets.roleOf(info({ tag: 'div' }))), true);
+  assert.equal(targets.roleOf(info({ inComment: true, inAside: true })), 'aside');
+  assert.equal(targets.roleOf(info({ inComment: true, inNav: true })), 'navigation');
+  const candidates = [
+    { id: 'sidebar', role: 'aside', priority: 'visible', order: 0, top: 0 },
+    { id: 'bottom-card', role: 'unknown', priority: 'visible', order: 1, top: 300 },
+    { id: 'headline', role: 'heading', priority: 'visible', order: 2, top: 10 },
+    { id: 'top-card', role: 'unknown', priority: 'visible', order: 3, top: 100 },
+    { id: 'next-card', role: 'unknown', priority: 'near', order: 4, top: 1000 }
+  ];
+  assert.deepEqual(targets.plan(candidates).flatMap((group: { ids: string[] }) => group.ids),
+    ['headline', 'top-card', 'bottom-card', 'sidebar', 'next-card']);
+});
+
 
 test('priority is viewport first, then a ring around it', () => {
   const viewport = { top: 0, height: 800 };
@@ -86,9 +101,7 @@ test('priority is viewport first, then a ring around it', () => {
 });
 
 test('visible chrome is scheduled before distant content', () => {
-  // Content (article, headings, lists) first, top to bottom; menus and footers
-  // afterwards, also top to bottom. That is what "the meaningful part is fully
-  // translated" means when the page is longer than the budget.
+  // Visibility is a hard boundary, including supporting UI versus near prose.
   const candidates = [
     { id: 'far-below', role: 'article', priority: 'far', order: 5, top: 2600 },
     { id: 'visible-body', role: 'article', priority: 'visible', order: 1, top: 300 },
@@ -100,8 +113,8 @@ test('visible chrome is scheduled before distant content', () => {
   const groups = targets.plan(candidates, { band: 900 });
   assert.deepEqual(
     groups.map((group: { role: string; ids: string[] }) => `${group.role}:${group.ids.join(',')}`),
-    ['article:visible-body', 'heading:next-band', 'navigation:visible-menu', 'article:far-below', 'article:above-fold', 'footer:footer'],
-    'nearby primary reading continues before the sidebar, but visible UI still precedes distant prose'
+    ['article:visible-body', 'navigation:visible-menu', 'heading:next-band', 'article:far-below', 'article:above-fold', 'footer:footer'],
+    'all visible text precedes next-screen prefetch'
   );
   assert.equal(targets.isContent('article'), true);
   assert.equal(targets.isContent('heading'), true);
@@ -166,6 +179,52 @@ test('same-line targets use inline geometry, with stable order when boxes tie', 
   assert.deepEqual(targets.plan(candidates)[0].ids, ['left', 'left-next', 'right']);
   assert.deepEqual(targets.plan(candidates.map((entry) => ({ ...entry, inlineStart: -entry.inlineStart })))[0].ids,
     ['right', 'left', 'left-next']);
+});
+
+test('reading regions finish a column before crossing to the next in LTR and RTL', () => {
+  for (const rtl of [false, true]) {
+    const first = { id: 1, top: 0, inlineStart: rtl ? -900 : 10, order: 3, documentFlow: false };
+    const second = { id: 2, top: 0, inlineStart: rtl ? -400 : 500, order: 0, documentFlow: false };
+    const candidates = [
+      { id: 'other-top', region: second, top: 10, order: 0 },
+      { id: 'first-bottom', region: first, top: 400, order: 1 },
+      { id: 'other-bottom', region: second, top: 200, order: 2 },
+      { id: 'first-top', region: first, top: 20, order: 3 }
+    ].map(entry => ({ ...entry, role: 'article', priority: 'visible' }));
+    assert.deepEqual(targets.plan(candidates).flatMap((group: { ids: string[] }) => group.ids),
+      ['first-top', 'first-bottom', 'other-top', 'other-bottom']);
+  }
+});
+
+test('CSS multicolumn regions preserve authored flow instead of interleaving rows', () => {
+  const region = { id: 1, top: 0, inlineStart: 0, order: 0, documentFlow: true };
+  const candidates = [20, 300, 10, 200].map((top, order) =>
+    ({ id: String(order), region, top, order, role: 'article', priority: 'visible' }));
+  assert.deepEqual(targets.plan(candidates).flatMap((group: { ids: string[] }) => group.ids), ['0', '1', '2', '3']);
+});
+
+test('reader intent cannot promote offscreen work and visible partial units precede fresh regions', () => {
+  const first = { id: 1, top: 0, inlineStart: 0, order: 0, documentFlow: false };
+  const second = { id: 2, top: 0, inlineStart: 500, order: 1, documentFlow: false };
+  const candidates = [
+    { id: 'body', role: 'article', priority: 'visible', order: 0, region: first },
+    { id: 'partial', role: 'article', priority: 'visible', order: 1, region: second, continuation: 'preferred' },
+    { id: 'selected', role: 'aside', priority: 'visible', order: 2, engaged: true },
+    { id: 'prefetch', role: 'article', priority: 'near', order: 3, engaged: true },
+    { id: 'support', role: 'aside', priority: 'visible', order: 4 }
+  ];
+  assert.deepEqual(targets.plan(candidates).flatMap((group: { ids: string[] }) => group.ids),
+    ['selected', 'partial', 'body', 'support', 'prefetch']);
+});
+
+test('visible continuations get a turn before fresh text but yield after their quantum allowance', () => {
+  const entries = [
+    { id: 'new', role: 'article', priority: 'visible', top: 10, order: 0 },
+    { id: 'partial', role: 'article', priority: 'visible', top: 200, order: 1, continuation: 'preferred' }
+  ];
+  assert.deepEqual(targets.plan(entries).flatMap((group: { ids: string[] }) => group.ids), ['partial', 'new']);
+  entries[1]!.continuation = 'yielding';
+  assert.deepEqual(targets.plan(entries).flatMap((group: { ids: string[] }) => group.ids), ['new', 'partial']);
 });
 
 test('each region gets a line the prompt can use, and prose gets none', () => {

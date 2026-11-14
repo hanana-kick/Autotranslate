@@ -130,11 +130,9 @@ namespace AT.kernels {
   /** The sliding window the attention mask applies. */
   const WINDOW = 2048;
 
-  /** RMSNorm over `rows` rows of `n`, read with a stride and an optional head
-   *  gather so q and k are normalised straight out of the qkv projection:
-   *  `info` is {n, rows, stride, start, heads, pad}. */
+  /** First-layer RMSNorm over contiguous embedding rows. */
   const RMSNORM = `
-    struct Info { n: u32, rows: u32, stride: u32, start: u32, heads: u32, pad: f32, pad2: u32, pad3: u32 };
+    struct Info { n: u32, rows: u32 };
     @group(0) @binding(0) var<storage, read> x: array<f32>;
     @group(0) @binding(1) var<storage, read> w: array<f32>;
     @group(0) @binding(2) var<storage, read_write> y: array<f32>;
@@ -144,10 +142,7 @@ namespace AT.kernels {
     fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
       let row = min(wg.x, info.rows - 1u);
       let lane = lid.x;
-      var base: u32 = row * info.stride + info.start;
-      if (info.heads != 0u) {
-        base = (row / info.heads) * info.stride + info.start + (row % info.heads) * info.n;
-      }
+      let base = row * info.n;
       var acc: f32 = 0.0;
       for (var i: u32 = lane; i < info.n; i = i + 128u) {
         let v = x[base + i];
@@ -169,58 +164,144 @@ namespace AT.kernels {
     }
   `;
 
-  /** q4 GEMM/GEMV: a workgroup owns eight output rows, sixteen lanes each, and
-   *  every live row of x. One template per live-row count, because the
-   *  accumulators are registers: an eight-accumulator template used for a lone
-   *  request costs 3x (measured), and a sixteen-accumulator one costs more than
-   *  the positions it gains.
-   *  `info` is {n, k, blocks, rows}. */
+  /** Post-normalization → residual sum → next pre-normalization. The same
+   *  lane owns each residual element across both reductions, including its
+   *  storage write/read. Both RMS reductions preserve the original tree. */
+  const NORM_CHAIN = `
+    struct Info { n: u32, rows: u32 };
+    @group(0) @binding(0) var<storage, read> x: array<f32>;
+    @group(0) @binding(1) var<storage, read> post: array<f32>;
+    @group(0) @binding(2) var<storage, read> residual: array<f32>;
+    @group(0) @binding(3) var<storage, read> pre: array<f32>;
+    @group(0) @binding(4) var<storage, read_write> combined: array<f32>;
+    @group(0) @binding(5) var<storage, read_write> y: array<f32>;
+    @group(0) @binding(6) var<uniform> info: Info;
+    var<workgroup> sums: array<f32, 128>;
+    fn inverseRms(acc: f32, lane: u32) -> f32 {
+      // Every invocation must consume the previous reduction before reuse.
+      workgroupBarrier();
+      sums[lane] = acc;
+      workgroupBarrier();
+      var stride: u32 = 64u;
+      loop {
+        if (stride == 0u) { break; }
+        if (lane < stride) { sums[lane] = sums[lane] + sums[lane + stride]; }
+        workgroupBarrier();
+        stride = stride / 2u;
+      }
+      return 1.0 / sqrt(sums[0] / f32(info.n) + 1e-6);
+    }
+    @compute @workgroup_size(128)
+    fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+      let base = wg.x * info.n;
+      let lane = lid.x;
+      var acc: f32 = 0.0;
+      for (var i = lane; i < info.n; i += 128u) {
+        let v = x[base + i];
+        acc = acc + v * v;
+      }
+      let postInv = inverseRms(acc, lane);
+      acc = 0.0;
+      for (var i = lane; i < info.n; i += 128u) {
+        let normalized = x[base + i] * postInv * post[i];
+        let v = residual[base + i] + normalized;
+        combined[base + i] = v;
+        acc = acc + v * v;
+      }
+      let preInv = inverseRms(acc, lane);
+      for (var i = lane; i < info.n; i += 128u) {
+        y[base + i] = combined[base + i] * preInv * pre[i];
+      }
+    }
+  `;
+
+  /** GPU-only transpose: each vec4 holds the same word from four output rows.
+   *  Padded output rows duplicate the last valid row; no weight precision changes. */
+  const PACK_GEMV = `
+    struct Info { n: u32, wordsPerRow: u32, vectors: u32, pad: u32 };
+    @group(0) @binding(0) var<storage, read> src: array<u32>;
+    @group(0) @binding(1) var<storage, read_write> dst: array<vec4<u32>>;
+    @group(0) @binding(2) var<uniform> info: Info;
+    @compute @workgroup_size(256)
+    fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+      let at = (wg.y * 4096u + wg.x) * 256u + lid.x;
+      if (at >= info.vectors) { return; }
+      let row = (at / info.wordsPerRow) * 4u;
+      let word = at % info.wordsPerRow;
+      dst[at] = vec4<u32>(
+        src[min(row, info.n - 1u) * info.wordsPerRow + word],
+        src[min(row + 1u, info.n - 1u) * info.wordsPerRow + word],
+        src[min(row + 2u, info.n - 1u) * info.wordsPerRow + word],
+        src[min(row + 3u, info.n - 1u) * info.wordsPerRow + word]);
+    }
+  `;
+
+  /** Eight outputs, 32 threads; each accumulator vector spans four outputs.
+   *  Widths one/two factor the Q4 scale outside each eight-nibble block sum.
+   *  Wider batches reuse scaled weights instead: additional block accumulators
+   *  regressed them. F32 association changes, but final lane sums are unchanged. */
   function gemvWgsl(width: number): string {
+    const factorScale = width <= 2;
+    const outputs = ['A', 'B', 'C', 'D'];
     const decl = Array.from({ length: width }, (_unused, r) =>
-      `var acc${r}: f32 = 0.0;`).join('\n      ');
+      `var acc${r}: vec4<f32> = vec4<f32>(0.0);`).join('\n');
+    const blockDecl = factorScale ? Array.from({ length: width }, (_unused, r) =>
+      `var block${r}: vec4<f32> = vec4<f32>(0.0);`).join('\n') : '';
+    const foldScale = factorScale ? Array.from({ length: width }, (_unused, r) =>
+      `acc${r} = fma(block${r}, scale, acc${r});`).join('\n') : '';
+    const rowDecl = outputs.map((s, i) =>
+      `let row${s} = min(rawRow + ${i}u, info.n - 1u);`).join('\n');
+    const scaleDecl = `let scale = vec4<f32>(${outputs.map(s =>
+      `scales[row${s} * info.blocks + b]`).join(', ')});`;
+    const loadActivations = Array.from({ length: width }, (_unused, r) =>
+      `let activation${r} = x[(${r}u * info.k + at) / 4u];`).join('\n');
     const accumulate = Array.from({ length: width }, (_unused, r) =>
-      `if (info.rows > ${r}u) {
-          let base = ${r}u * info.k + at;
-          acc${r} += dot(kv, vec4<f32>(x[base], x[base + 1u], x[base + 2u], x[base + 3u]));
-        }`).join('\n          ');
+      `${factorScale ? 'block' : 'acc'}${r} = fma(weight, vec4<f32>(activation${r}[component]), ${factorScale ? 'block' : 'acc'}${r});`).join('\n');
     const store = Array.from({ length: width }, (_unused, r) =>
-      `partial[(tileRow * ${width}u + ${r}u) * 16u + lane] = acc${r};`).join('\n      ');
+      outputs.map((_s, i) =>
+        `partial[((tileRow + ${i}u) * ${width}u + ${r}u) * 16u + lane] = acc${r}[${i}];`).join('\n')).join('\n');
     return `
     struct Info { n: u32, k: u32, blocks: u32, rows: u32 };
-    @group(0) @binding(0) var<storage, read> q4: array<u32>;
+    @group(0) @binding(0) var<storage, read> q4: array<vec4<u32>>;
     @group(0) @binding(1) var<storage, read> scales: array<f32>;
-    @group(0) @binding(2) var<storage, read> x: array<f32>;
+    @group(0) @binding(2) var<storage, read> x: array<vec4<f32>>;
     @group(0) @binding(3) var<storage, read_write> y: array<f32>;
     @group(0) @binding(4) var<uniform> info: Info;
     var<workgroup> partial: array<f32, 8 * ${width} * 16>;
-    @compute @workgroup_size(128)
-    fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+    @compute @workgroup_size(32)
+    fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>,
+      @builtin(num_workgroups) grid: vec3<u32>) {
+      let firstRow = (wg.y * grid.x + wg.x) * 8u;
+      if (firstRow >= info.n) { return; }
       let t = lid.x;
-      let tileRow = t / 16u;
+      let tileRow = (t / 16u) * 4u;
       let lane = t % 16u;
-      let rawRow = wg.y * 32768u + wg.x * 8u + tileRow;
-      // No early return: every thread must reach the barrier.
-      let row = min(rawRow, info.n - 1u);
-      let wordsPerRow = info.blocks * 16u;
+      let rawRow = firstRow + tileRow;
+      let packedRow = min(rawRow / 4u, (info.n - 1u) / 4u);
+      ${rowDecl}
       ${decl}
       for (var b: u32 = 0u; b < info.blocks; b = b + 1u) {
-        let word = q4[row * wordsPerRow + b * 16u + lane];
-        let scale = scales[row * info.blocks + b];
+        let words = q4[(packedRow * info.blocks + b) * 16u + lane];
+        ${scaleDecl}
+        ${blockDecl}
         for (var j: u32 = 0u; j < 8u; j = j + 4u) {
-          let shift = vec4<u32>(j * 4u) + vec4<u32>(0u, 4u, 8u, 12u);
-          let kv = (vec4<f32>((vec4<u32>(word) >> shift) & vec4<u32>(15u)) - vec4<f32>(8.0)) * scale;
           let at = b * 128u + lane * 8u + j;
-          ${accumulate}
+          ${loadActivations}
+          for (var component: u32 = 0u; component < 4u; component = component + 1u) {
+            let shift = vec4<u32>((j + component) * 4u);
+            let weight = (vec4<f32>((words >> shift) & vec4<u32>(15u)) - vec4<f32>(8.0))${factorScale ? '' : ' * scale'};
+            ${accumulate}
+          }
         }
+        ${foldScale}
       }
       ${store}
       workgroupBarrier();
-      // One thread per (output row, sequence): sixteen added values.
-      if (t < 8u * ${width}u) {
-        let tile = t / ${width}u;
-        let p = t % ${width}u;
-        let outRow = wg.y * 32768u + wg.x * 8u + tile;
-        if (outRow < info.n && info.rows > p) {
+      for (var output: u32 = t; output < 8u * ${width}u; output = output + 32u) {
+        let tile = output / ${width}u;
+        let p = output % ${width}u;
+        let outRow = firstRow + tile;
+        if (outRow < info.n) {
           var sum: f32 = 0.0;
           for (var i: u32 = 0u; i < 16u; i = i + 1u) {
             sum = sum + partial[(tile * ${width}u + p) * 16u + i];
@@ -229,19 +310,24 @@ namespace AT.kernels {
         }
       }
     }
-  `;
+    `;
   }
 
 
-  /** RoPE for `heads` heads of `headDim`, each row at its own position, then
-   *  the q/k scale. `info` is {heads, rows, half, scale}. */
-  const ROPE = `
+  /** Fuse 128-wide Q RMSNorm and RoPE, one workgroup per (head, row).
+   *  Preserve the RMS lane ownership, 64..1 sum tree, x*inv*w order and RoPE
+   *  arithmetic. Shared FP32 normalised values replace the qN storage buffer.
+   *  Five storage bindings and 1 KiB workgroup storage; no optional features. */
+  const NORM_ROPE = `
     struct Info { heads: u32, rows: u32, half: u32, scale: f32, stride: u32, start: u32, pad: u32, pad2: u32 };
     @group(0) @binding(0) var<storage, read> x: array<f32>;
     @group(0) @binding(1) var<storage, read> inv: array<f32>;
     @group(0) @binding(2) var<storage, read_write> y: array<f32>;
     @group(0) @binding(3) var<uniform> info: Info;
     @group(0) @binding(4) var<storage, read> positions: array<u32>;
+    @group(0) @binding(5) var<storage, read> w: array<f32>;
+    var<workgroup> sums: array<f32, 128>;
+    var<workgroup> normalised: array<f32, 128>;
     @compute @workgroup_size(128)
     fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
       let row = min(wg.y, info.rows - 1u);
@@ -249,17 +335,30 @@ namespace AT.kernels {
       let d = lid.x;
       let half = info.half;
       let at = (row * info.heads + head) * 2u * half;
-      // Stride 0 means the input is already gathered (the normalised q/k).
-      var src = at;
-      if (info.stride != 0u) { src = row * info.stride + info.start + head * 2u * half; }
+      let src = row * info.stride + info.start + head * 2u * half;
+      let v = x[src + d];
+      var acc: f32 = 0.0;
+      acc = acc + v * v;
+      sums[d] = acc;
+      workgroupBarrier();
+      var stride: u32 = 64u;
+      loop {
+        if (stride == 0u) { break; }
+        if (d < stride) { sums[d] = sums[d] + sums[d + stride]; }
+        workgroupBarrier();
+        stride = stride / 2u;
+      }
+      let normInv = 1.0 / sqrt(sums[0] / f32(2u * half) + 1e-6);
+      normalised[d] = v * normInv * w[d];
+      workgroupBarrier();
       let angle = f32(positions[row]) * inv[d % half];
       let c = cos(angle);
       let s = sin(angle);
       var out: f32;
       if (d < half) {
-        out = x[src + d] * c - x[src + d + half] * s;
+        out = normalised[d] * c - normalised[d + half] * s;
       } else {
-        out = x[src + d] * c + x[src + d - half] * s;
+        out = normalised[d] * c + normalised[d - half] * s;
       }
       y[at + d] = out * info.scale;
     }
@@ -287,23 +386,36 @@ namespace AT.kernels {
     }
   `;
 
-  /** y = a + b, elementwise over all rows. */
-  const ADD = `
-    @group(0) @binding(0) var<storage, read> a: array<f32>;
-    @group(0) @binding(1) var<storage, read> b: array<f32>;
-    @group(0) @binding(2) var<storage, read_write> y: array<f32>;
-    @compute @workgroup_size(256)
-    fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-      let i = id.x;
-      if (i >= arrayLength(&y)) { return; }
-      y[i] = a[i] + b[i];
+
+  /** Split each original argmax lane's scan across 4096-token chunks. The
+   *  second pass merges chunks in token order and keeps the original lane
+   *  reduction, including its strict-greater tie behavior and NaN handling. */
+  const ARGMAX_CHUNK = 4096;
+  const ARGMAX_PARTIAL = `
+    struct Info { vocab: u32, rows: u32, parts: u32, pad2: u32 };
+    struct Pick { value: f32, index: u32 };
+    @group(0) @binding(0) var<storage, read> logits: array<f32>;
+    @group(0) @binding(1) var<storage, read_write> partials: array<Pick>;
+    @group(0) @binding(2) var<uniform> info: Info;
+    @compute @workgroup_size(128)
+    fn main(@builtin(workgroup_id) wg: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
+      let row = wg.y;
+      let lane = lid.x;
+      let start = wg.x * ${ARGMAX_CHUNK}u;
+      let end = min(start + ${ARGMAX_CHUNK}u, info.vocab);
+      var value: f32 = -3.0e38;
+      var index: u32 = 0u;
+      for (var i: u32 = start + lane; i < end; i = i + 128u) {
+        let v = logits[row * info.vocab + i];
+        if (v > value) { value = v; index = i; }
+      }
+      partials[(row * info.parts + wg.x) * 128u + lane] = Pick(value, index);
     }
   `;
-
-  /** The greedy pick per row, on the device: only the token id crosses back. */
   const ARGMAX = `
-    struct Info { vocab: u32, rows: u32, pad: u32, pad2: u32 };
-    @group(0) @binding(0) var<storage, read> logits: array<f32>;
+    struct Info { vocab: u32, rows: u32, parts: u32, pad2: u32 };
+    struct Pick { value: f32, index: u32 };
+    @group(0) @binding(0) var<storage, read> partials: array<Pick>;
     @group(0) @binding(1) var<storage, read_write> tokens: array<u32>;
     @group(0) @binding(2) var<uniform> info: Info;
     var<workgroup> best: array<f32, 128>;
@@ -314,9 +426,9 @@ namespace AT.kernels {
       let lane = lid.x;
       var value: f32 = -3.0e38;
       var index: u32 = 0u;
-      for (var i: u32 = lane; i < info.vocab; i = i + 128u) {
-        let v = logits[row * info.vocab + i];
-        if (v > value) { value = v; index = i; }
+      for (var part: u32 = 0u; part < info.parts; part = part + 1u) {
+        let pick = partials[(row * info.parts + part) * 128u + lane];
+        if (pick.value > value) { value = pick.value; index = pick.index; }
       }
       best[lane] = value;
       bestAt[lane] = index;
@@ -469,17 +581,40 @@ namespace AT.kernels {
     const put = (buffer: GpuBuffer, data: ArrayBufferView): void => device.queue.writeBuffer(buffer, 0, data);
     const pipeline = (code: string, layout: string | unknown = 'auto'): GpuPipeline =>
       device.createComputePipeline({ layout, compute: { module: device.createShaderModule({ code }), entryPoint: 'main' } });
+    const compute = 4;
     const rms = pipeline(RMSNORM);
-    const rope = pipeline(ROPE);
+    const normChain = pipeline(NORM_CHAIN);
+    const normRope = pipeline(NORM_ROPE);
     const attention = pipeline(AT.kernelattention.decode(maxTokens * headDim));
+    const attentionParts = Math.ceil(maxTokens / AT.kernelattention.DECODE_PARTITION);
+    // Explicit layout keeps one bind group usable by both head-group pipelines.
+    const partitionLayout = maxTokens > AT.kernelattention.DECODE_SPLIT_MIN
+      ? device.createBindGroupLayout({ entries: [
+        { binding: 0, visibility: compute, buffer: { type: 'read-only-storage' } },
+        { binding: 1, visibility: compute, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: compute, buffer: { type: 'read-only-storage' } },
+        { binding: 3, visibility: compute, buffer: { type: 'storage' } },
+        { binding: 4, visibility: compute, buffer: { type: 'uniform' } },
+        { binding: 5, visibility: compute, buffer: { type: 'read-only-storage' } },
+        { binding: 6, visibility: compute, buffer: { type: 'read-only-storage' } }
+      ] }) : null;
+    const partitionPipelineLayout = partitionLayout
+      ? device.createPipelineLayout({ bindGroupLayouts: [partitionLayout] }) : null;
+    const partitionAttention = partitionPipelineLayout
+      ? pipeline(AT.kernelattention.decodePartial(maxTokens * headDim), partitionPipelineLayout) : null;
+    const widePartitionAttention = partitionPipelineLayout && rows === MAX_ROWS
+      ? pipeline(AT.kernelattention.decodePartial(maxTokens * headDim,
+        AT.kernelattention.DECODE_WIDE_HEADS_PER_GROUP), partitionPipelineLayout) : null;
+    const mergeAttention = partitionAttention
+      ? pipeline(AT.kernelattention.decodeMerge(maxTokens * headDim)) : null;
     const prefillAttention = execution.attention === 'tiled'
       ? pipeline(AT.kernelattention.prefill(maxTokens * headDim, !!device.features?.has('subgroups'))) : null;
     const ropeKV = pipeline(AT.kernelattention.ropeKV(maxTokens * headDim, qkvWidth, heads));
     const silu = pipeline(SILU_MUL);
     const argmax = pipeline(ARGMAX);
-    const add = pipeline(ADD);
+    const argmaxPartial = pipeline(ARGMAX_PARTIAL);
+    const argmaxParts = Math.ceil(vocab / ARGMAX_CHUNK);
     // One shared layout lets the small-row GEMV and prefill GEMM reuse bindings.
-    const compute = 4;
     const gemvLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: compute, buffer: { type: 'read-only-storage' } },
@@ -504,22 +639,24 @@ namespace AT.kernels {
         entries: buffers.map((buffer, index) => ({ binding: index, resource: { buffer } }))
       });
 
+    // One reusable f32 partial buffer for all layers. alloc registers it with
+    // held, so runner disposal destroys it together with the activation buffers.
+    const attentionScratch = partitionAttention
+      ? alloc(capacity * heads * attentionParts * AT.kernelattention.DECODE_PARTIAL_FLOATS * 4) : null;
     const act = {
       x: alloc(capacity * hidden * 4),
       n1: alloc(capacity * hidden * 4),
       qkv: alloc(capacity * qkvWidth * 4),
-      qN: alloc(capacity * qWidth * 4),
-      kN: alloc(capacity * headDim * 4),
       qR: alloc(capacity * qWidth * 4),
       attn: alloc(capacity * qWidth * 4),
       o: alloc(capacity * hidden * 4),
-      post: alloc(capacity * hidden * 4),
       res: alloc(capacity * hidden * 4),
       n2: alloc(capacity * hidden * 4),
       gu: alloc(capacity * intermediate * 2 * 4),
       s: alloc(capacity * intermediate * 4),
       d: alloc(capacity * hidden * 4),
       logits: alloc(rows * vocab * 4),
+      argmaxPartial: alloc(rows * argmaxParts * 128 * 8),
       positions: alloc(capacity * 4),
       cacheRows: alloc(capacity * 4),
       tokens: alloc(rows * 4),
@@ -530,6 +667,8 @@ namespace AT.kernels {
     const staging = device.createBuffer({ size: rows * 4, usage: USAGE.MAP_READ | USAGE.COPY_DST }) as Mappable;
     held.push(staging);
     const embedded = new Float32Array(capacity * hidden);
+    // Exact binary16 conversion once, instead of an exponent operation per element/token.
+    const embeddingFloats = Float32Array.from({ length: 65536 }, (_unused, bits) => AT.onnxweights.f16(bits));
     const positionData = new Uint32Array(capacity);
     const cacheRowData = new Uint32Array(capacity);
     const picksBuffer = new Uint32Array(rows);
@@ -542,8 +681,6 @@ namespace AT.kernels {
       gemvDown: uniform(),
       gemvHead: uniform(),
       normHidden: uniform(),
-      normQ: uniform(),
-      normK: uniform(),
       ropeQ: uniform(),
       ropeK: uniform(),
       attn: uniform(),
@@ -565,35 +702,32 @@ namespace AT.kernels {
     };
     const putGemv = (target: GpuBuffer, n: number, k: number, active: number): void =>
       setMeta(target, n, k, k / 128, active);
-    const putNorm = (target: GpuBuffer, n: number, count: number, stride: number, start: number, heads: number): void =>
-      setMeta(target, n, count, stride, start, heads);
     const putRope = (target: GpuBuffer, headCount: number, active: number): void => {
       metaU32[0] = headCount;
       metaU32[1] = active;
       metaU32[2] = headDim / 2;
-      metaU32[4] = metaU32[5] = metaU32[6] = metaU32[7] = 0;
+      metaU32[4] = qkvWidth;
+      metaU32[5] = metaU32[6] = metaU32[7] = 0;
       metaF32[3] = QK_SCALE;
       put(target, metaU32);
     };
     /** The width of the step that is about to run: a lone request costs one
      *  row, a full cohort costs what it uses. Every uniform is rewritten here,
      *  once per step, before the one submit that reads them. */
-    const configure = (active: number, headRows: number, decodeRows: number): void => {
+    const configure = (active: number, headRows: number, decodeRows: number, contextParts: number): void => {
       putGemv(meta.gemvQkv, qkvWidth, hidden, active);
       putGemv(meta.gemvO, hidden, qWidth, active);
       putGemv(meta.gemvGu, intermediate * 2, hidden, active);
       putGemv(meta.gemvDown, hidden, intermediate, active);
       putGemv(meta.gemvHead, vocab, hidden, headRows);
-      putNorm(meta.normHidden, hidden, active, hidden, 0, 0);
-      putNorm(meta.normQ, headDim, active * heads, qkvWidth, 0, heads);
-      putNorm(meta.normK, headDim, active, qkvWidth, qWidth, 0);
+      setMeta(meta.normHidden, hidden, active);
       putRope(meta.ropeQ, heads, active);
       putRope(meta.ropeK, 1, active);
       const splitAttention = active > POSITIONS && prefillAttention !== null;
-      setMeta(meta.attn, heads, splitAttention ? decodeRows : active, WINDOW, attnMode);
+      setMeta(meta.attn, heads, splitAttention ? decodeRows : active, WINDOW, attnMode, contextParts);
       if (splitAttention) setMeta(meta.attnPrefill, heads, active, WINDOW, attnMode, decodeRows);
       setMeta(meta.silu, intermediate);
-      setMeta(meta.argmax, vocab, headRows);
+      setMeta(meta.argmax, vocab, headRows, argmaxParts);
     };
 
     const upload = (bytes: Uint8Array): GpuBuffer => {
@@ -607,19 +741,51 @@ namespace AT.kernels {
       return buffer;
     };
 
-    const headBind = bindGroup(gemvLayout, [upload(model.head.q4), uploadFloats(model.head.scales), act.headIn, act.logits, meta.gemvHead]);
-    const finalBind = bindGroup(rms, [act.x, uploadFloats(model.finalNorm), act.n1, meta.normHidden]);
+    const packPipeline = pipeline(PACK_GEMV);
+    const packEncoder = device.createCommandEncoder();
+    const packTransient: GpuBuffer[] = [];
+    const uploadMatrix = (
+      matrix: { q4: Uint8Array; scales: Float32Array }, n: number, k: number,
+      retainOriginal: boolean
+    ): { q4: GpuBuffer; packed: GpuBuffer; scales: GpuBuffer } => {
+      const q4 = upload(matrix.q4);
+      const scales = uploadFloats(matrix.scales);
+      const wordsPerRow = k / 8;
+      const vectors = Math.ceil(n / 4) * wordsPerRow;
+      const target = alloc(vectors * 16);
+      const info = uniform();
+      setMeta(info, n, wordsPerRow, vectors);
+      const pass = packEncoder.beginComputePass();
+      pass.setPipeline(packPipeline);
+      pass.setBindGroup(0, bindGroup(packPipeline, [q4, target, info]));
+      const groups = Math.ceil(vectors / 256);
+      pass.dispatchWorkgroups(Math.min(4096, groups), Math.ceil(groups / 4096));
+      pass.end();
+      packTransient.push(info);
+      // The head always uses GEMV, even during prefill, so its original is temporary.
+      if (!retainOriginal) packTransient.push(q4);
+      return { q4, packed: target, scales };
+    };
+    const headWeights = uploadMatrix(model.head, vocab, hidden, false);
+    const headBind = bindGroup(gemvLayout, [headWeights.packed, headWeights.scales, act.headIn, act.logits, meta.gemvHead]);
+    const directHeadBind = bindGroup(gemvLayout, [headWeights.packed, headWeights.scales, act.n1, act.logits, meta.gemvHead]);
+    const finalNorm = uploadFloats(model.finalNorm);
     const siluBind = bindGroup(silu, [act.gu, act.s, meta.silu]);
-    const addMixer = bindGroup(add, [act.x, act.post, act.res]);
-    const addMlp = bindGroup(add, [act.res, act.post, act.x]);
-    const argmaxBind = bindGroup(argmax, [act.logits, act.tokens, meta.argmax]);
+    const argmaxPartialBind = bindGroup(argmaxPartial, [act.logits, act.argmaxPartial, meta.argmax]);
+    const argmaxBind = bindGroup(argmax, [act.argmaxPartial, act.tokens, meta.argmax]);
+    const mergeAttentionBind = mergeAttention && attentionScratch
+      ? bindGroup(mergeAttention, [attentionScratch, act.attn, meta.attn]) : null;
 
     const layerState: { bind: Record<string, unknown> }[] = [];
+    let precedingPostMlp: GpuBuffer | undefined;
     for (let index = 0; index < layers; index += 1) {
       const layer = model.layers[index]!;
-      const q4 = (matrix: { q4: Uint8Array; scales: Float32Array }): { q4: GpuBuffer; scales: GpuBuffer } =>
-        ({ q4: upload(matrix.q4), scales: uploadFloats(matrix.scales) });
-      const w = { qkv: q4(layer.qkv), o: q4(layer.o), gateUp: q4(layer.gateUp), down: q4(layer.down) };
+      const w = {
+        qkv: uploadMatrix(layer.qkv, qkvWidth, hidden, true),
+        o: uploadMatrix(layer.o, hidden, qWidth, true),
+        gateUp: uploadMatrix(layer.gateUp, intermediate * 2, hidden, true),
+        down: uploadMatrix(layer.down, hidden, intermediate, true)
+      };
       const norms = {
         preMixer: uploadFloats(layer.preMixer),
         postMixer: uploadFloats(layer.postMixer),
@@ -637,35 +803,48 @@ namespace AT.kernels {
           o: bindGroup(gemvLayout, [w.o.q4, w.o.scales, act.attn, act.o, meta.gemvO]),
           gateUp: bindGroup(gemvLayout, [w.gateUp.q4, w.gateUp.scales, act.n2, act.gu, meta.gemvGu]),
           down: bindGroup(gemvLayout, [w.down.q4, w.down.scales, act.s, act.d, meta.gemvDown]),
-          preMixer: bindGroup(rms, [act.x, norms.preMixer, act.n1, meta.normHidden]),
-          postMixer: bindGroup(rms, [act.o, norms.postMixer, act.post, meta.normHidden]),
-          preMlp: bindGroup(rms, [act.res, norms.preMlp, act.n2, meta.normHidden]),
-          postMlp: bindGroup(rms, [act.d, norms.postMlp, act.post, meta.normHidden]),
-          q: bindGroup(rms, [act.qkv, norms.qNorm, act.qN, meta.normQ]),
-          k: bindGroup(rms, [act.qkv, norms.kNorm, act.kN, meta.normK]),
-          ropeQ: bindGroup(rope, [act.qN, frequencies, act.qR, meta.ropeQ, act.positions]),
-          ropeKV: bindGroup(ropeKV, [act.kN, frequencies, kc, vc, act.qkv, act.positions, act.cacheRows, meta.ropeK]),
+          qkvPacked: bindGroup(gemvLayout, [w.qkv.packed, w.qkv.scales, act.n1, act.qkv, meta.gemvQkv]),
+          oPacked: bindGroup(gemvLayout, [w.o.packed, w.o.scales, act.attn, act.o, meta.gemvO]),
+          gateUpPacked: bindGroup(gemvLayout, [w.gateUp.packed, w.gateUp.scales, act.n2, act.gu, meta.gemvGu]),
+          downPacked: bindGroup(gemvLayout, [w.down.packed, w.down.scales, act.s, act.d, meta.gemvDown]),
+          preMixer: index === 0 ? bindGroup(rms, [act.x, norms.preMixer, act.n1, meta.normHidden]) : null,
+          preMixerChain: precedingPostMlp ? bindGroup(normChain, [act.d, precedingPostMlp, act.res, norms.preMixer, act.x, act.n1, meta.normHidden]) : null,
+          preMlpChain: bindGroup(normChain, [act.o, norms.postMixer, act.x, norms.preMlp, act.res, act.n2, meta.normHidden]),
+          finalChain: index === 0 || index === layers - 1
+            ? bindGroup(normChain, [act.d, norms.postMlp, act.res, finalNorm, act.x, act.n1, meta.normHidden]) : null,
+          normRopeQ: bindGroup(normRope, [act.qkv, frequencies, act.qR, meta.ropeQ, act.positions, norms.qNorm]),
+          ropeKV: bindGroup(ropeKV, [norms.kNorm, frequencies, kc, vc, act.qkv, act.positions, act.cacheRows, meta.ropeK]),
           attn: bindGroup(attention, [act.qR, kc, vc, act.attn, meta.attn, act.positions, act.cacheRows]),
+          partialAttn: partitionAttention && attentionScratch
+            ? bindGroup(partitionLayout, [act.qR, kc, vc, attentionScratch, meta.attn, act.positions, act.cacheRows]) : null,
           prefillAttn: prefillAttention
             ? bindGroup(prefillAttention, [act.qR, kc, vc, act.attn, meta.attnPrefill, act.positions, act.cacheRows]) : null
         }
       });
+      precedingPostMlp = norms.postMlp;
     }
+    device.queue.submit([packEncoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    for (const buffer of packTransient) buffer.destroy?.();
 
+    // One-row work shares a compute pass; dispatches remain synchronization scopes.
+    // Batched steps retain separate passes because blanket coalescing regressed them.
+    let sharedPass: GpuPass | null = null;
+    const endSharedPass = (): void => { sharedPass?.end(); sharedPass = null; };
     const emit = (encoder: GpuEncoder, pipe: GpuPipeline, bind: unknown, groups: number | [number, number]): void => {
-      const pass = encoder.beginComputePass();
+      const pass = sharedPass ?? encoder.beginComputePass();
       pass.setPipeline(pipe);
       pass.setBindGroup(0, bind);
       if (Array.isArray(groups)) pass.dispatchWorkgroups(groups[0], groups[1]);
       else pass.dispatchWorkgroups(groups);
-      pass.end();
+      if (!sharedPass) pass.end();
     };
-    /** Eight output rows per workgroup: exactly as many workgroups as tiles,
-     *  x capped at 4096 and the rest in y, so a 2304-row matrix does not spin
-     *  up 4096 workgroups that all compute a row twice. */
+    /** Balance the dispatch rectangle instead of rounding its full x extent
+     *  up for every y row. The shader skips any final wholly padded tile. */
     const gemvGroups = (n: number): [number, number] => {
       const tiles = Math.max(1, Math.ceil(n / rowsPerGroup));
-      return [Math.min(4096, tiles), Math.ceil(tiles / 4096)];
+      const y = Math.ceil(tiles / 4096);
+      return [Math.ceil(tiles / y), y];
     };
 
     /** One step: every row feeds its token at its own position, all layers, the
@@ -679,8 +858,25 @@ namespace AT.kernels {
       decodeRows: number
     ): void => {
       const headRows = Math.max(1, Math.min(collectRows.length, rows));
-      configure(active, headRows, decodeRows);
       const tiled = active > POSITIONS;
+      const attentionRows = tiled && prefillAttention ? decodeRows : active;
+      // Four-head KV reuse wins at eight rows, but regresses small batches.
+      const useWideAttention = attentionRows === MAX_ROWS && widePartitionAttention !== null;
+      const partitionPipe = useWideAttention ? widePartitionAttention : partitionAttention;
+      const partitionHeads = useWideAttention ? AT.kernelattention.DECODE_WIDE_HEADS_PER_GROUP
+        : AT.kernelattention.DECODE_HEADS_PER_GROUP;
+      let longestContext = 0;
+      if (partitionAttention && ablate !== 'noattn') {
+        for (let row = 0; row < attentionRows; row += 1) {
+          const position = (positions[row] ?? 0) >>> 0;
+          if (position < maxTokens) {
+            longestContext = Math.max(longestContext, Math.min(position + 1, WINDOW));
+          }
+        }
+      }
+      const contextParts = longestContext > AT.kernelattention.DECODE_SPLIT_MIN
+        ? Math.ceil(longestContext / AT.kernelattention.DECODE_PARTITION) : 0;
+      configure(active, headRows, decodeRows, contextParts);
       const wide = wideGemm !== null && active > AT.kernelmatmul.TILE_ROWS;
       const weights = tiled ? (wide ? wideGemm : gemm) : gemv[active - 1]!;
       const weightGroups = (n: number): [number, number] => tiled
@@ -689,7 +885,7 @@ namespace AT.kernels {
       for (let row = 0; row < active; row += 1) {
         const token = tokens[row] ?? 0;
         const base = token * hidden;
-        for (let i = 0; i < hidden; i += 1) embedded[row * hidden + i] = AT.onnxweights.f16(model.embed[base + i] ?? 0);
+        for (let i = 0; i < hidden; i += 1) embedded[row * hidden + i] = embeddingFloats[model.embed[base + i] ?? 0]!;
       }
       device.queue.writeBuffer(act.x, 0, embedded.subarray(0, active * hidden));
       positionData.set(positions);
@@ -697,52 +893,61 @@ namespace AT.kernels {
       put(act.positions, positionData);
       put(act.cacheRows, cacheRowData);
       const encoder = device.createCommandEncoder();
+      sharedPass = active === 1 ? encoder.beginComputePass() : null;
       const layerCount = ablate === 'onelay' ? 1 : layers;
       for (let index = 0; index < layerCount; index += 1) {
         const state = layerState[index]!;
         const bind = state.bind;
-        emit(encoder, rms, bind.preMixer, active);
-        emit(encoder, weights, bind.qkv, weightGroups(qkvWidth));
-        // q and k are normalised straight out of the projection, rotated into
-        // the scratch the attention reads, and only k and v reach the cache.
-        emit(encoder, rms, bind.q, active * heads);
-        emit(encoder, rms, bind.k, active);
-        emit(encoder, rope, bind.ropeQ, [heads, active]);
+        emit(encoder, index === 0 ? rms : normChain, index === 0 ? bind.preMixer : bind.preMixerChain, active);
+        emit(encoder, weights, tiled ? bind.qkv : bind.qkvPacked, weightGroups(qkvWidth));
+        // Each preparation dispatch normalises and rotates directly from QKV.
+        // KV cache writes finish before either decode or causal prefill reads.
+        emit(encoder, normRope, bind.normRopeQ, [heads, active]);
         emit(encoder, ropeKV, bind.ropeKV, [1, active]);
         if (ablate !== 'noattn') {
-          if (tiled && prefillAttention) {
-            // Independent decoding queries cannot reuse each other's KV tiles.
-            // Keep them out of the prefill tile's serial cache-slot loop.
-            if (decodeRows) emit(encoder, attention, bind.attn, [heads, decodeRows]);
-            if (active > decodeRows) {
-              emit(encoder, prefillAttention, bind.prefillAttn,
-                [heads, Math.ceil((active - decodeRows) / AT.kernelattention.PREFILL_ROWS)]);
+          if (attentionRows) {
+            if (contextParts && partitionPipe && mergeAttention) {
+              emit(encoder, partitionPipe, bind.partialAttn,
+                [Math.ceil(heads / partitionHeads) * contextParts, attentionRows]);
+              emit(encoder, mergeAttention, mergeAttentionBind, [heads, attentionRows]);
+            } else {
+              emit(encoder, attention, bind.attn, [heads, attentionRows]);
             }
-          } else {
-            emit(encoder, attention, bind.attn, [heads, active]);
+          }
+          if (tiled && prefillAttention && active > decodeRows) {
+            // Prefill tiles remain independent of the decode partition scratch.
+            emit(encoder, prefillAttention, bind.prefillAttn,
+              [heads, Math.ceil((active - decodeRows) / AT.kernelattention.PREFILL_ROWS)]);
           }
         }
-        emit(encoder, weights, bind.o, weightGroups(hidden));
-        emit(encoder, rms, bind.postMixer, active);
-        emit(encoder, add, addMixer, Math.ceil((active * hidden) / 256));
-        emit(encoder, rms, bind.preMlp, active);
-        emit(encoder, weights, bind.gateUp, weightGroups(intermediate * 2));
+        emit(encoder, weights, tiled ? bind.o : bind.oPacked, weightGroups(hidden));
+        emit(encoder, normChain, bind.preMlpChain, active);
+        emit(encoder, weights, tiled ? bind.gateUp : bind.gateUpPacked, weightGroups(intermediate * 2));
         emit(encoder, silu, siluBind, Math.ceil((active * intermediate) / 256));
-        emit(encoder, weights, bind.down, weightGroups(hidden));
-        emit(encoder, rms, bind.postMlp, active);
-        emit(encoder, add, addMlp, Math.ceil((active * hidden) / 256));
+        emit(encoder, weights, tiled ? bind.down : bind.downPacked, weightGroups(hidden));
       }
-      emit(encoder, rms, finalBind, active);
+      emit(encoder, normChain, layerState[layerCount - 1]!.bind.finalChain, active);
       // The head is the widest matrix in the model, so a prefill chunk that is
       // not asked for a token pays only for the rows whose logits are wanted.
       if (collectRows.length && ablate !== 'nohead') {
+        // A contiguous prefix can read normalized activations without a gather copy.
+        let directHead = true;
         for (let at = 0; at < headRows; at += 1) {
-          const row = Math.min(collectRows[at] ?? 0, active - 1);
-          encoder.copyBufferToBuffer(act.n1, row * hidden * 4, act.headIn, at * hidden * 4, hidden * 4);
+          if (collectRows[at] !== at) directHead = false;
         }
-        emit(encoder, gemv[headRows - 1]!, headBind, gemvGroups(vocab));
+        if (!directHead) {
+          endSharedPass();
+          for (let at = 0; at < headRows; at += 1) {
+            const row = Math.min(collectRows[at] ?? 0, active - 1);
+            encoder.copyBufferToBuffer(act.n1, row * hidden * 4, act.headIn, at * hidden * 4, hidden * 4);
+          }
+          if (active === 1) sharedPass = encoder.beginComputePass();
+        }
+        emit(encoder, gemv[headRows - 1]!, directHead ? directHeadBind : headBind, gemvGroups(vocab));
+        emit(encoder, argmaxPartial, argmaxPartialBind, [argmaxParts, headRows]);
         emit(encoder, argmax, argmaxBind, headRows);
       }
+      endSharedPass();
       if (collectRows.length) encoder.copyBufferToBuffer(act.tokens, 0, staging, 0, collectRows.length * 4);
       device.queue.submit([encoder.finish()]);
     };

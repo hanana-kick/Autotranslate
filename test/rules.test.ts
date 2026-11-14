@@ -53,7 +53,7 @@ test('an explicit scheme outranks a longer host', () => {
 test('a tie prefers never', () => {
   const list: Rule[] = [
     ['example.com', 'always'],
-    ['*.example.com', 'never']
+    ['example.com', 'never']
   ];
   assert.equal(resolve(list, 'https://shop.example.com/').action, 'never');
 });
@@ -73,7 +73,7 @@ test('resolve names the stored pattern, not an internal parse field', () => {
 test('canonical folds case in the host only, keeps the path verbatim', () => {
   // A host is case-insensitive, a path is not: folding the path made a rule
   // like `example.com/Docs/*` unmatchable on a server that spells it `Docs`.
-  assert.equal(rules.canonical('  *.Example.com/News/*  '), 'example.com/News/*');
+  assert.equal(rules.canonical('  *.Example.com/News/*  '), '*.example.com/News/*');
   assert.equal(rules.canonical('Example.com/Docs/*'), 'example.com/Docs/*');
   const pattern = rules.parse('example.com/Docs/*');
   assert.equal(rules.matches(pattern, 'https://example.com/Docs/page'), true);
@@ -91,4 +91,31 @@ test('hostPattern gives the popup a default pattern', () => {
   assert.equal(rules.hostPattern('https://www.Example.com/path'), 'example.com');
   assert.equal(rules.hostPattern('chrome://extensions'), null);
   assert.equal(rules.hostPattern(undefined), null);
+});
+
+test('single stars stay in one segment and double stars cross segments', () => {
+  for (const [pattern, url, expected] of [
+    ['*.example.com', 'https://example.com/', false],
+    ['*.example.com', 'https://a.example.com/', true],
+    ['*.example.com', 'https://a.b.example.com/', false],
+    ['**.example.com', 'https://example.com/', true],
+    ['**.example.com', 'https://a.b.example.com/', true],
+    ['example.com/docs/*', 'https://example.com/docs/a/b', false],
+    ['example.com/docs/**', 'https://example.com/docs/a/b', true],
+    ['example.com/docs', 'https://example.com/docs-extra', false],
+    ['example.com/docs/*', 'https://example.com/docs/a?q=x#part', true],
+    ['example.com/docs/*?q=*', 'https://example.com/docs/a?q=x', true],
+    ['example.com/docs/*?q=*', 'https://example.com/docs/a?other=x', false],
+    ['https://example.com:443/**', 'https://example.com/docs', true],
+    ['http://example.com:8080/**', 'http://example.com/docs', false],
+    ['example.com/**', 'file:///example.com/docs', false]
+  ] as const) assert.equal(rules.matches(rules.parse(pattern), url), expected, `${pattern}: ${url}`);
+});
+
+test('legacy host wildcards and path prefixes retain their former reach', () => {
+  assert.equal(rules.migrateLegacyPattern('*.example.com/news/*'), 'example.com/news/**');
+  assert.equal(rules.migrateLegacyPattern('https://example.com/docs'), 'https://example.com/docs**');
+  const migrated = rules.parse(rules.migrateLegacyPattern('*.example.com/news/*'));
+  assert.equal(rules.matches(migrated, 'https://a.b.example.com/news/a/b'), true);
+  assert.equal(rules.matches(migrated, 'https://example.com/news/a'), true);
 });

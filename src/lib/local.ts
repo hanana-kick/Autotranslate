@@ -21,6 +21,8 @@ namespace AT.local {
   export const MIN_MAX_TOKENS = 128;
   export const MAX_MAX_TOKENS = 8192;
   export const DEFAULT_MAX_TOKENS = 1024;
+  /** Each parallel translation consumes at most this many actual source tokens. */
+  export const SOURCE_CHUNK_TOKENS = 64;
   /** Never promise the model less than this for its answer. */
   export const MIN_OUTPUT_TOKENS = 64;
 
@@ -112,7 +114,7 @@ namespace AT.local {
   };
 
   /** The answer at/local-count gives: per-text counts and the instruction. */
-  export type TokenCounts = { counts: number[]; overhead: number };
+  export type TokenCounts = { counts: number[]; overhead: number; sourceChunks?: string[][] };
 
   /**
    * The messages the host and one decode worker exchange. A worker owns one
@@ -170,18 +172,47 @@ namespace AT.local {
     engine?: string;
     counts?: number[];
     overhead?: number;
+    sourceChunks?: string[][];
   };
+
+  /** Cancellation is local state; only the operation port crosses contexts. */
+  export function cancelled(): Error & { code: 'cancelled' } {
+    return Object.assign(new Error('Translation cancelled.'), { code: 'cancelled' as const });
+  }
+
+  export function throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) throw cancelled();
+  }
+
+  /** Stop waiting promptly without claiming that an uninterruptible kernel stopped. */
+  export function withSignal<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return operation;
+    return new Promise<T>((resolve, reject) => {
+      const abort = (): void => {
+        signal.removeEventListener('abort', abort);
+        reject(cancelled());
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      if (signal.aborted) abort();
+      void operation.then(
+        value => { signal.removeEventListener('abort', abort); resolve(value); },
+        error => { signal.removeEventListener('abort', abort); reject(error); }
+      );
+    });
+  }
 
   /**
    * The one way to reach the host, so no caller has to know the browser.
    * `background` placement calls the host module in place; `offscreen`
    * reaches it over runtime messages.
    */
-  export async function callHost(message: AT.Message, onProgress?: AT.TranslationProgress): Promise<AT.Response> {
+  export async function callHost(message: AT.Message, onProgress?: AT.TranslationProgress, signal?: AbortSignal): Promise<AT.Response> {
     const host = placement === 'background' ? AT.onnxhost : undefined;
-    if (!host) return AT.sendMessage(Object.assign({}, message, { to: TARGET_OFFSCREEN }), onProgress);
+    if (!host) return AT.sendMessage(Object.assign({}, message, { to: TARGET_OFFSCREEN }), onProgress, signal);
     try {
-      const reply = (await host.handle(message, onProgress)) as Record<string, unknown>;
+      throwIfAborted(signal);
+      const reply = (await withSignal(host.handle(message, onProgress, signal), signal)) as Record<string, unknown>;
+      throwIfAborted(signal);
       return { ok: true, ...reply };
     } catch (error: unknown) {
       const rejection = error as { message?: unknown; code?: unknown };
@@ -495,6 +526,81 @@ namespace AT.local {
    *  bound that decides. */
   export function estimateTokens(text: string): number {
     return Math.ceil(rawTokens(text, PRIORS));
+  }
+
+  /**
+   * Plan raw-preserving source fragments using the loaded tokenizer's count,
+   * never a character/token estimate. Only trimmed content is translated.
+   * Prefer whole sentences, then words, then whole graphemes. Whitespace stays
+   * attached to its neighbor; a whitespace-only source stays raw and must not
+   * be translated. Empty input has no fragments.
+   */
+  export async function sourceChunks(
+    source: string,
+    maxTokens: number,
+    count: (text: string) => number,
+    signal?: AbortSignal
+  ): Promise<string[]> {
+    throwIfAborted(signal);
+    if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) {
+      throw Object.assign(new RangeError('Source chunk tokens must be a positive integer.'), {
+        reason: 'context-overflow', code: 'config'
+      });
+    }
+    if (!source) return [];
+    let measurements = 0;
+    const fits = async (raw: string): Promise<boolean> => {
+      throwIfAborted(signal);
+      // Let a cancellation message reach this context during a long plan.
+      if (++measurements % 32 === 0) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, 0);
+        await promise;
+        throwIfAborted(signal);
+      }
+      const tokens = count(raw.trim());
+      throwIfAborted(signal);
+      return tokens <= maxTokens;
+    };
+    if (!source.trim() || await fits(source)) return [source];
+    const granularities = ['sentence', 'word', 'grapheme'] as const;
+    const segmenters: Intl.Segmenter[] = [];
+    const split = async (text: string, level: number): Promise<string[]> => {
+      const segmenter = segmenters[level] ??= new Intl.Segmenter(undefined, {
+        granularity: granularities[level]!
+      });
+      const chunks: string[] = [];
+      let current = '';
+      for (const { segment } of segmenter.segment(text)) {
+        throwIfAborted(signal);
+        const combined = current + segment;
+        if (!combined.trim() || await fits(combined)) {
+          current = combined;
+          continue;
+        }
+        if (current.trim()) {
+          chunks.push(current);
+          current = '';
+        }
+        const remainder = current + segment;
+        if (await fits(remainder)) {
+          current = remainder;
+          continue;
+        }
+        if (level === granularities.length - 1) {
+          throw Object.assign(new Error(`One source grapheme exceeds the ${maxTokens}-token fragment budget.`), {
+            reason: 'context-overflow', code: 'config'
+          });
+        }
+        const smaller = await split(remainder, level + 1);
+        for (let index = 0; index < smaller.length - 1; index += 1) chunks.push(smaller[index]!);
+        current = smaller[smaller.length - 1]!;
+      }
+      if (current.trim()) chunks.push(current);
+      else if (chunks.length) chunks[chunks.length - 1] += current;
+      return chunks;
+    };
+    return await split(source, 0);
   }
 
   /** The prompt's own cost, counted with the same priors. */

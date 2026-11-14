@@ -991,7 +991,7 @@ test('oversized mixed inline runs fall back to resumable element-owned fragments
     yieldWork = false;
     const before: number = calls.length;
     result = await translator.translateNodes(result.pending);
-    assert.equal(calls.length - before, 1);
+    assert.ok(calls.length - before <= 1, 'cached fragments need no provider request');
   }
   assert.deepEqual(result.pending, []);
   assert.ok(calls.every((call) => call.length === 1 && call[0]!.length <= 64));
@@ -1096,7 +1096,9 @@ test('stream previews never commit or cache unfinished output and late callbacks
     const work = translator.translateRoot();
     await turn();
     emit(0, '미완성 번역');
-    assert.equal(shown.get(node), '미완성 번역');
+    assert.ok(shown.get(node)?.startsWith('미완성 번역'));
+    const tail = shown.get(node)!.slice('미완성 번역'.length);
+    assert.ok(tail.length > 0 && node.nodeValue.endsWith(tail), 'unconsumed source remains readable');
     assert.equal(node.nodeValue, 'Original comment.');
     assert.equal(translator.has(node), false);
     if (ending === 'failure') {
@@ -1137,11 +1139,146 @@ test('streaming a bounded suffix retains committed prefix and untouched original
     }
   });
   const first = await translator.translateRoot();
-  assert.equal(seen[0], '진행 중 Second phrase. Third phrase.');
+  assert.ok(seen[0]!.startsWith('진행 중'));
+  assert.ok(seen[0]!.endsWith(' Second phrase. Third phrase.'));
+  assert.ok(seen[0]!.length > '진행 중 Second phrase. Third phrase.'.length, 'the active fragment retains its own source tail');
   assert.equal(node.nodeValue, 'FIRST PHRASE. Second phrase. Third phrase.');
   await translator.translateNodes(first.pending);
-  assert.equal(seen[1], 'FIRST PHRASE. 진행 중 Third phrase.');
+  assert.ok(seen[1]!.startsWith('FIRST PHRASE. 진행 중'));
+  assert.ok(seen[1]!.endsWith(' Third phrase.'));
+  assert.ok(seen[1]!.length > 'FIRST PHRASE. 진행 중 Third phrase.'.length);
   assert.equal(node.nodeValue, 'FIRST PHRASE. SECOND PHRASE. Third phrase.');
   translator.restore();
   assert.equal(node.nodeValue, 'First phrase. Second phrase. Third phrase.');
+});
+
+test('streaming estimates token-weighted monotonic grapheme boundaries without committing them', async () => {
+  for (const source of ['ABCDEFGHIJKLMNOPQRST', 'Ae\u0301👩🏽‍💻🇰🇷가क्ष中文مرحباZ']) {
+    const node = t(source);
+    const shown: string[] = [];
+    let emit!: (index: number, text: string) => void;
+    const { promise, resolve: finish } = Promise.withResolvers<string[]>();
+    const { translator } = harness(el('body', {}, [el('p', {}, [node])]), upcase, {
+      presentation: {
+        begin: () => {}, preview: (_node: StubText, text: string) => shown.push(text),
+        clearPreview: () => {}, applied: () => {}, settled: () => {}, forget: () => {},
+        restore: () => {}, ownsMutation: () => false
+      },
+      translate: (_texts: string[], progress: typeof emit) => {
+        emit = progress;
+        return promise;
+      }
+    });
+    const task = translator.translateRoot();
+    await turn();
+    const offsets = new Set([...new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(source)].map(({ index }) => index));
+    let previous = 0;
+    for (const decoded of ['가', '가나', '가', '가나다라마바사아자차카타파하']) {
+      emit(0, decoded);
+      const tail = shown.at(-1)!.slice(decoded.length);
+      const consumed = source.length - tail.length;
+      assert.ok(tail.length > 0 && source.endsWith(tail));
+      assert.ok(offsets.has(consumed), `never split a grapheme: ${JSON.stringify(tail)}`);
+      assert.ok(consumed >= previous, 'a corrected decoded prefix does not move source backwards');
+      previous = consumed;
+      assert.equal(node.nodeValue, source, 'estimates cannot change canonical ownership');
+    }
+    if (source.startsWith('ABCDE')) {
+      assert.equal(shown[0], '가EFGHIJKLMNOPQRST');
+      assert.equal(shown[1], '가나IJKLMNOPQRST');
+      assert.equal(shown[2], '가IJKLMNOPQRST');
+    }
+    finish(['완료된 번역']);
+    await task;
+    assert.equal(node.nodeValue, '완료된 번역');
+    translator.restore();
+    assert.equal(node.nodeValue, source);
+  }
+});
+
+test('generic eligibility preserves numeric identifiers and author metadata but translates short prose', async () => {
+  const skipped = ['123,456.78%', '→ ★ + 12', 'https://example.org/a', 'a.reader@example.org',
+    '@reader.name', '550e8400-e29b-41d4-a716-446655440000', '0xdeadbeef', 'ABC-12345', 'user_identifier'];
+  const prose = ['Go', 'I', 'Thank You', 'The Sun Also Rises', '5 items', 'See @reader today'];
+  const author = t('Alice Reader');
+  const nodes = [...skipped, ...prose].map(t);
+  const root = el('body', {}, [el('span', { classes: ['author-name'] }, [author]),
+    ...nodes.map(node => el('p', {}, [node]))]);
+  const { translator, calls } = harness(root, texts => texts.map(text => `번역 ${text}`));
+  const result = await translator.translateRoot();
+  assert.deepEqual(calls.flat(), prose);
+  assert.equal(result.translated, prose.length);
+  assert.equal(author.nodeValue, 'Alice Reader');
+  assert.deepEqual(nodes.slice(0, skipped.length).map(node => node.nodeValue), skipped);
+  assert.equal(translator.restore().restored, prose.length);
+  assert.deepEqual(nodes.map(node => node.nodeValue), [...skipped, ...prose]);
+});
+
+test('successful bounded fragments are reused for dynamic identical content within the same context', async () => {
+  const source = 'First original sentence. Second original sentence. Third original sentence.';
+  const first = t(source);
+  let scope = 'model-language-context-one';
+  const { translator, calls } = harness(el('body', {}, [el('p', {}, [first])]), upcase, {
+    workLimit: () => ({ maxChars: 26, maxTexts: 1 }), cacheScope: () => scope
+  });
+  let result = await translator.translateNodes([first]);
+  for (let pass = 0; result.pending.length && pass < 10; pass++) result = await translator.translateNodes(result.pending);
+  const paid = calls.length;
+  assert.equal(first.nodeValue, source.toUpperCase());
+  const repeated = t(source);
+  el('p', {}, [repeated]);
+  result = await translator.translateNodes([repeated]);
+  for (let pass = 0; result.pending.length && pass < 10; pass++) result = await translator.translateNodes(result.pending);
+  assert.equal(repeated.nodeValue, source.toUpperCase());
+  assert.equal(calls.length, paid, 'dynamic copies reuse complete successful fragment outputs');
+  scope = 'model-language-context-two';
+  const differentContext = t(source);
+  el('p', {}, [differentContext]);
+  await translator.translateNodes([differentContext]);
+  assert.equal(calls.length, paid + 1, 'context changes never consume an unsafe cache entry');
+});
+
+test('restore aborts the provider signal and cancelled late output never populates the cache', async () => {
+  const source = t('Original request text');
+  const gate = Promise.withResolvers<string[]>();
+  let signal!: AbortSignal;
+  const { translator } = harness(el('body', {}, [el('p', {}, [source])]), upcase, {
+    translate: (_texts: string[], _progress: unknown, abort: AbortSignal) => { signal = abort; return gate.promise; }
+  });
+  const running = translator.translateRoot();
+  assert.equal(signal.aborted, false);
+  translator.restore();
+  assert.equal(signal.aborted, true);
+  gate.resolve(['LATE OUTPUT']);
+  await running;
+  assert.equal(source.nodeValue, 'Original request text');
+  assert.equal(translator.stats().cached, 0);
+  assert.equal(translator.stats().translated, 0);
+});
+
+test('observing cancellation during streaming aborts the active provider and releases presentation', async () => {
+  const source = t('Original streaming text');
+  const gate = Promise.withResolvers<string[]>();
+  let stopped = false, signal!: AbortSignal, emit!: (index: number, text: string) => void;
+  const settled: boolean[] = [];
+  const { translator } = harness(el('body', {}, [el('p', {}, [source])]), upcase, {
+    shouldAbort: () => stopped,
+    presentation: {
+      begin: () => {}, preview: () => {}, clearPreview: () => {}, applied: () => {},
+      settled: (_node: unknown, _status: unknown, interrupted: boolean) => settled.push(interrupted),
+      forget: () => {}, restore: () => {}, ownsMutation: () => false
+    },
+    translate: (_texts: string[], progress: typeof emit, abort: AbortSignal) => {
+      emit = progress; signal = abort; return gate.promise;
+    }
+  });
+  const running = translator.translateRoot();
+  stopped = true;
+  emit(0, 'late preview');
+  assert.equal(signal.aborted, true);
+  assert.deepEqual(settled, [true]);
+  gate.resolve(['LATE FINAL']);
+  await running;
+  assert.equal(source.nodeValue, 'Original streaming text');
+  assert.equal(translator.stats().cached, 0);
 });

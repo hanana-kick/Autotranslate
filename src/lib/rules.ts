@@ -8,6 +8,7 @@ namespace AT.rules {
     host: string;
     path: string;
     scheme: string | null;
+    port: string | null;
   };
 
   /** A rule as storage and the UI agree to store it. */
@@ -39,54 +40,80 @@ namespace AT.rules {
     return host.replace(/^www\./, '');
   }
 
-  // Accepts `example.com`, `*.example.com`, `example.com/news/*`,
-  // `https://example.com/news/*`. Returns null for unusable input.
+  // Bare hosts include subdomains. Explicit host globs preserve label depth;
+  // path globs use * for one segment and ** across separators.
   export function parse(raw: unknown): Pattern | null {
     if (typeof raw !== 'string') return null;
     const input = raw.trim();
-    if (!input || input.length > 200) return null;
-    // Hosts are case-insensitive, paths are not: only the host is folded.
-    let text = input;
-    let scheme: string | null = null;
-    const schemeMatch = /^([a-z][a-z0-9+.-]*):\/\/(.*)$/.exec(text);
-    if (schemeMatch) {
-      scheme = schemeMatch[1] ?? null;
-      text = schemeMatch[2] ?? '';
+    if (!input || input.length > 2048 || /[\s\\]/u.test(input)) return null;
+    let text = input, scheme: string | null = null;
+    const qualified = /^([a-z][a-z0-9+.-]*):\/\//i.exec(text);
+    if (qualified) {
+      scheme = qualified[1]!.toLowerCase();
+      if (scheme !== 'http' && scheme !== 'https') return null;
+      text = text.slice(qualified[0].length);
     }
-    let host = text;
-    let path = '';
-    const slash = text.indexOf('/');
-    if (slash >= 0) {
-      host = text.slice(0, slash);
-      path = text.slice(slash);
+    const split = text.search(/[/?#]/u);
+    const authority = split < 0 ? text : text.slice(0, split);
+    let path = split < 0 ? '' : text.slice(split);
+    if (path && !path.startsWith('/')) path = '/' + path;
+    const parts = /^(\[[0-9a-f:]+\]|[^:]+)(?::(\d{1,5}))?$/i.exec(authority);
+    if (!parts) return null;
+    let host = parts[1]!.toLowerCase();
+    const port = parts[2] ? String(Number(parts[2])) : null;
+    if (host.length > 253) return null;
+    if (port && (Number(port) < 1 || Number(port) > 65535)) return null;
+    if (!/^[a-z0-9.*[\]:-]+$/u.test(host) || host.includes('..')) return null;
+    try { new URL(`http://${host.replace(/\*+/g, 'glob')}${port ? ':' + port : ''}`); }
+    catch { return null; }
+    if (!host.includes('*')) host = stripWww(host);
+    return { host, path: path === '/' ? '' : path, scheme, port };
+  }
+
+  /** Bounded dynamic programming, not a user-controlled backtracking regexp. */
+  function glob(pattern: string, text: string, separator: string): boolean {
+    let previous = new Uint8Array(text.length + 1), next = new Uint8Array(text.length + 1);
+    previous[0] = 1;
+    for (let index = 0; index < pattern.length; index++) {
+      const char = pattern[index]!;
+      const star = char === '*', deep = star && pattern[index + 1] === '*';
+      if (deep) while (pattern[index + 1] === '*') index++;
+      next[0] = star ? previous[0]! : 0;
+      for (let offset = 1; offset <= text.length; offset++) {
+        next[offset] = star
+          ? Number(previous[offset] === 1 || (next[offset - 1] === 1 && (deep || text[offset - 1] !== separator)))
+          : Number(previous[offset - 1] === 1 && char === text[offset - 1]);
+      }
+      const swap = previous; previous = next; next = swap;
     }
-    // Only the host is folded: `example.com/Docs/*` keeps its path casing.
-    host = stripWww(host.replace(/^\*\./, '').toLowerCase());
-    if (!host || !/^[a-z0-9._~%:[\]-]+$/.test(host)) return null;
-    return { host, path, scheme };
+    return previous[text.length] === 1;
   }
 
   export function matches(pattern: Pattern | null | undefined, href: unknown): boolean {
     const url = toUrl(href);
-    if (!url || !pattern) return false;
-    if (pattern.scheme && pattern.scheme !== url.protocol.replace(':', '')) return false;
-    const host = stripWww(url.hostname.toLowerCase());
-    const want = stripWww(pattern.host.toLowerCase());
-    if (host !== want && !host.endsWith(`.${want}`)) return false;
-    if (pattern.path) {
-      const prefix = pattern.path.replace(/\*+$/, '');
-      const target = `${url.pathname}${url.search}`;
-      if (!target.startsWith(prefix)) return false;
+    if (!url || !pattern || !['http:', 'https:'].includes(url.protocol)) return false;
+    if (pattern.scheme && pattern.scheme !== url.protocol.slice(0, -1)) return false;
+    if (pattern.port && pattern.port !== (url.port || (url.protocol === 'https:' ? '443' : '80'))) return false;
+    const host = url.hostname.toLowerCase(), want = pattern.host;
+    if (want.includes('*')) {
+      if (!(want.startsWith('**.') && host === want.slice(3)) && !glob(want, host, '.')) return false;
+    } else {
+      const actual = stripWww(host);
+      if (actual !== want && !actual.endsWith(`.${want}`)) return false;
     }
-    return true;
+    if (!pattern.path) return true;
+    const target = url.pathname + (pattern.path.includes('?') ? url.search : '') +
+      (pattern.path.includes('#') ? url.hash : '');
+    return glob(pattern.path, target, '/');
   }
 
   // Explicit scheme beats a longer host, a longer host beats a path prefix.
   export function score(pattern: Pattern | null | undefined): number {
     if (!pattern) return -1;
-    const labels = stripWww(pattern.host).split('.').length;
-    const pathLength = pattern.path ? pattern.path.replace(/\*+$/, '').length : 0;
-    return (pattern.scheme ? 1e6 : 0) + labels * 1e3 + pathLength;
+    const labels = stripWww(pattern.host).split('.').filter(label => label && !label.includes('*')).length;
+    const pathLength = pattern.path.replace(/\*/g, '').length;
+    return (pattern.scheme ? 1e8 : 0) + labels * 1e4 + pathLength +
+      (pattern.host.includes('*') ? 0 : 1) + (pattern.port ? 100 : 0);
   }
 
   // Highest score wins; on a tie an explicit `never` beats `always` so users
@@ -124,10 +151,16 @@ namespace AT.rules {
   export function canonical(raw: unknown): string | null {
     const parsed = parse(raw);
     if (!parsed) return null;
-    // `example.com/` and `example.com` are the same rule; keeping the bare
-    // slash would let users store both.
-    const scheme = parsed.scheme ? `${parsed.scheme}://` : '';
-    const path = parsed.path === '/' ? '' : parsed.path;
-    return `${scheme}${parsed.host}${path}`;
+    return `${parsed.scheme ? parsed.scheme + '://' : ''}${parsed.host}${parsed.port ? ':' + parsed.port : ''}${parsed.path}`;
+  }
+
+  /** Preserve pre-v3 prefix rules when upgrading persisted preferences. */
+  export function migrateLegacyPattern(raw: unknown): string | null {
+    if (typeof raw !== 'string') return null;
+    const text = raw.trim().replace(/^((?:https?:\/\/)?)\*\./i, '$1');
+    const parsed = parse(text);
+    if (!parsed) return null;
+    const prefix = parsed.path.replace(/\*+$/, '');
+    return canonical(`${parsed.scheme ? parsed.scheme + '://' : ''}${parsed.host}${parsed.port ? ':' + parsed.port : ''}${prefix ? prefix + '**' : ''}`);
   }
 }

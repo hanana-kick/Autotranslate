@@ -63,7 +63,8 @@ async function readingOrder(page, html) {
     observer.disconnect();
     const translated = units.every((element, index) => element.textContent === replacements[index]);
     pipeline.restore();
-    return { boxes, applied, requests, translated, restored: root.innerHTML === original };
+    return { boxes, applied, requests, translated, restored: root.innerHTML === original,
+      unchanged: units.filter((element, index) => !applied.includes(element.dataset.unit)).map(element => element.dataset.unit) };
   }, html);
 }
 
@@ -143,9 +144,153 @@ check('comment bodies and nested replies precede their authors dates and control
       </ytd-comment-thread-renderer>
     </ytd-comments>`);
   assert.deepEqual(result.applied.slice(0, 2), ['body', 'reply']);
-  assert.equal(result.requests.find(({ texts }) => texts.includes('Reader Alice'))?.role, 'metadata');
+  assert.ok(!result.requests.some(({ texts }) => texts.includes('Reader Alice') || texts.includes('Reader Bob')));
   assert.equal(result.requests.find(({ texts }) => texts.includes('Show replies'))?.role, 'form');
+  assert.deepEqual(result.unchanged, ['author', 'reply-author'], 'semantic author identifiers stay source text');
+  assert.equal(result.restored, true);
+});
+
+check('generic news forum and div cards share primary-before-sidebar visual ordering', async (page) => {
+  await page.locator('#fixture').evaluate(root => { root.outerHTML = '<div id="fixture"></div>'; });
+  for (const structure of [
+    { open: '<article>', close: '</article>' },
+    { open: '<div role="main">', close: '</div>' },
+    { open: '<div class="forum replies">', close: '</div>' },
+    { open: '<div class="card-grid">', close: '</div>' }
+  ]) {
+    const result = await readingOrder(page, `
+      <div style="display:grid;grid-template-columns:720px 240px">
+        <div class="sidebar" style="grid-column:2;grid-row:1"><h2 data-unit="sidebar">Related reading list</h2></div>
+        <div style="grid-column:1;grid-row:1">
+          ${structure.open}
+            <div style="display:flex;flex-direction:column">
+              <div data-unit="lower" style="order:3">Lower story card text</div>
+              <h1 data-unit="headline" style="order:1">Daily energy report</h1>
+              <div data-unit="upper" style="order:2">First story card text</div>
+            </div>
+          ${structure.close}
+        </div>
+      </div>`);
+    assert.deepEqual(result.applied, ['headline', 'upper', 'lower', 'sidebar'], structure.open);
+    assert.equal(result.translated, true);
+    assert.equal(result.restored, true);
+  }
+});
+
+check('substantial generic columns preserve reading flow in LTR and RTL layouts', async (page) => {
+  for (const direction of ['ltr', 'rtl']) {
+    const result = await readingOrder(page, `
+      <div dir="${direction}" style="display:grid;grid-template-columns:400px 400px">
+        <div style="grid-column:2;grid-row:1">
+          <p data-unit="end-top" style="height:80px">Second column opening</p>
+          <p data-unit="end-bottom" style="height:80px">Second column conclusion</p>
+        </div>
+        <div style="grid-column:1;grid-row:1">
+          <p data-unit="start-top" style="height:80px">First column opening</p>
+          <p data-unit="start-bottom" style="height:80px">First column conclusion</p>
+        </div>
+      </div>`);
+    assert.deepEqual(result.applied, ['start-top', 'start-bottom', 'end-top', 'end-bottom'], direction);
+    assert.equal(result.translated, true);
+    assert.equal(result.restored, true);
+  }
+});
+
+check('CSS multicolumn prose follows authored flow in both inline directions', async (page) => {
+  for (const direction of ['ltr', 'rtl']) {
+    const result = await readingOrder(page, `
+      <article dir="${direction}" style="columns:2;column-fill:auto;height:240px;width:800px">
+        <p data-unit="first" style="height:120px;margin:0">First source passage</p>
+        <p data-unit="second" style="height:120px;margin:0">Second source passage</p>
+        <p data-unit="third" style="height:120px;margin:0">Third source passage</p>
+        <p data-unit="fourth" style="height:120px;margin:0">Fourth source passage</p>
+      </article>`);
+    assert.deepEqual(result.applied, ['first', 'second', 'third', 'fourth'], direction);
+    assert.equal(result.translated, true);
+    assert.equal(result.restored, true);
+  }
+});
+
+check('visible supporting text is read before next-screen article prefetch', async (page) => {
+  const result = await readingOrder(page, `
+    <aside><p data-unit="support">Visible supporting explanation</p></aside>
+    <article style="margin-top:850px"><p data-unit="body">Next screen article continuation</p></article>`);
+  assert.deepEqual(result.applied, ['support', 'body']);
   assert.equal(result.translated, true);
+  assert.equal(result.restored, true);
+});
+
+check('nested overflow clips viewport admission and scrolling wakes parked generic sources', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = `<div id="pane" style="height:100px;overflow:auto">
+      <div id="first" style="height:300px">First visible card</div>
+      <div id="second" style="height:300px">Second parked card</div>
+      <div id="third" style="height:300px">Third parked card</div>
+    </div>`;
+    const pane = root.querySelector('#pane');
+    const nodes = ['first', 'second', 'third'].map(id => root.querySelector(`#${id}`).firstChild);
+    const sources = nodes.map(node => node.nodeValue);
+    const asked = [];
+    const pipeline = AT.pipeline.create({
+      doc: document, readingWindow: true, settings: () => ({ maxNodes: 100 }),
+      translate: async ({ texts }) => {
+        asked.push(...texts);
+        return texts.map(text => `번역 ${text}`);
+      }
+    });
+    let pass = await pipeline.translate();
+    for (let turn = 0; pass.hasMore && turn < 10; turn++) pass = await pipeline.resume();
+    const initial = { asked: [...asked], hasMore: pass.hasMore, values: nodes.map(node => node.nodeValue) };
+    pane.scrollTop = 300;
+    const rank = pipeline.reprioritize();
+    pass = await pipeline.resume();
+    const moved = { asked: [...asked], hasMore: pass.hasMore, values: nodes.map(node => node.nodeValue) };
+    pipeline.restore();
+    return { initial, moved, rank, restored: nodes.every((node, index) => node.nodeValue === sources[index]),
+      identity: nodes.every((node, index) => root.querySelector(`#${['first', 'second', 'third'][index]}`).firstChild === node) };
+  });
+  assert.deepEqual(result.initial.asked, ['First visible card']);
+  assert.equal(result.initial.hasMore, false);
+  assert.deepEqual(result.initial.values, ['번역 First visible card', 'Second parked card', 'Third parked card']);
+  assert.deepEqual(result.rank, { visible: 1, queued: 2 });
+  assert.deepEqual(result.moved.asked, ['First visible card', 'Second parked card']);
+  assert.equal(result.moved.hasMore, false);
+  assert.equal(result.moved.values[0], '번역 First visible card');
+  assert.equal(result.moved.values[2], 'Third parked card');
+  assert.equal(result.restored, true);
+  assert.equal(result.identity, true);
+});
+
+check('generic semantic names and identifiers stay untouched while short prose and dynamic copies translate', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = `<div><a rel="author">Alice Reader</a><span class="profile-name">Bob Reader</span>
+      <div itemscope itemtype="https://schema.org/Person"><span itemprop="name">Carol Reader</span></div>
+      <div class="ltx_creator ltx_role_author"><span class="ltx_personname">Ashish Vaswani</span>
+        <p class="ltx_author_notes">Contribution details</p></div>
+      <span class="card__author-name">Dana Reader</span><span id="profile_userName">Evan Reader</span>
+      <p>123,456%</p><p>★ → +</p><p>@reader</p><p>https://example.com/path</p>
+      <p>Go</p><p>Thank You</p><p>The Sun Also Rises</p></div>`;
+    const original = root.innerHTML, asked = [];
+    const translator = AT.dom.createTranslator({ doc: document, translate: async texts => {
+      asked.push(...texts); return texts.map(text => `번역 ${text}`);
+    } });
+    await translator.translateRoot(root);
+    const before = asked.length;
+    const duplicate = document.createElement('p');
+    duplicate.textContent = 'Thank You';
+    root.append(duplicate);
+    await translator.translateRoot(root);
+    const translated = translator.stats().translated;
+    const reused = asked.length === before && duplicate.textContent === '번역 Thank You';
+    translator.restore(root);
+    duplicate.remove();
+    return { asked, translated, reused, restored: root.innerHTML === original };
+  });
+  assert.deepEqual(result.asked, ['Contribution details', 'Go', 'Thank You', 'The Sun Also Rises']);
+  assert.equal(result.translated, 5);
+  assert.equal(result.reused, true);
   assert.equal(result.restored, true);
 });
 
@@ -365,6 +510,57 @@ check('revealed text is translated by the observer without toggling or reinjecti
   assert.equal(await page.locator('#detail').textContent(), 'Closed detail');
 });
 
+check('trusted expansion gets a bounded turn without promoting unrelated mutations', async (page) => {
+  await page.locator('#fixture').evaluate(root => {
+    root.innerHTML = `
+      <p id="active">Current reading paragraph</p><p id="reading">Remaining main paragraph</p>
+      <aside style="position:absolute;top:160px;left:650px;width:350px">
+        <details><summary>Expand explanation</summary><p id="expanded">Selected explanation</p></details>
+        <p id="counter">Unrelated sidebar counter</p>
+      </aside>`;
+  });
+  await contentHarness(page);
+  await page.evaluate(() => { window.task = handlers[AT.C.MSG.CONTENT_TRANSLATE]({ settings }); });
+  await page.waitForFunction(() => requests.length === 1);
+  await page.locator('summary').click();
+  await page.locator('#counter').evaluate(element => { element.textContent = 'New unrelated counter'; });
+  await page.evaluate(() => requests[0].resolve({ ok: true, translations: ['현재 읽는 문단'] }));
+  for (let index = 1; index <= 2; index++) {
+    await page.waitForFunction(count => requests.length > count, index);
+    await page.evaluate(i => requests[i].resolve({
+      ok: true, translations: requests[i].message.texts.map(text => '번역 ' + text)
+    }), index);
+  }
+  await page.waitForFunction(() => requests.length >= 4);
+  const order = await page.evaluate(() => requests.slice(0, 4).flatMap(request => request.message.texts));
+  assert.deepEqual(order, ['Current reading paragraph', 'Expand explanation', 'Selected explanation', 'Remaining main paragraph']);
+  await page.evaluate(() => handlers[AT.C.MSG.CONTENT_RESTORE]());
+  assert.equal(await page.locator('#active').textContent(), 'Current reading paragraph');
+  assert.equal(await page.locator('#expanded').textContent(), 'Selected explanation');
+});
+
+check('scrolling retains the active aurora and source until its quantum commits', async (page) => {
+  await page.locator('#fixture').evaluate(root => {
+    root.innerHTML = '<p id="active">Current visible source</p><div style="height:1600px"></div><p id="next">Newly visible source</p>';
+  });
+  await contentHarness(page);
+  await page.evaluate(() => { window.task = handlers[AT.C.MSG.CONTENT_TRANSLATE]({ settings }); });
+  await page.waitForFunction(() => requests.length === 1 && document.querySelector('#active at-translation-text'));
+  const before = await page.locator('#active').innerHTML();
+  await page.locator('#next').scrollIntoViewIfNeeded();
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  assert.equal(await page.locator('#active').innerHTML(), before, 'scrolling does not remove pending presentation');
+  assert.equal(await page.evaluate(() => requests.length), 1, 'one inference quantum remains active');
+  await page.evaluate(() => requests[0].resolve({ ok: true, translations: ['완료된 원문'] }));
+  await page.waitForFunction(() => requests.length === 2);
+  assert.deepEqual(await page.evaluate(() => requests[1].message.texts), ['Newly visible source']);
+  await page.evaluate(() => requests[1].resolve({ ok: true, translations: ['새로 보이는 원문'] }));
+  await page.waitForFunction(() => document.querySelector('#next').textContent === '새로 보이는 원문');
+  await page.evaluate(() => handlers[AT.C.MSG.CONTENT_RESTORE]());
+  assert.equal(await page.locator('#active').textContent(), 'Current visible source');
+  assert.equal(await page.locator('#next').textContent(), 'Newly visible source');
+});
+
 check('long-lived virtualized DOM keeps bounded records and no extra provider work', async (page) => {
   const result = await page.evaluate(async () => {
     const root = document.querySelector('#fixture'); let calls = 0, peakRecords = 0;
@@ -454,7 +650,11 @@ async function auroraState(page, selector = '#fixture') {
       slotted: host.shadowRoot.querySelector('slot')?.assignedNodes().includes(host.firstChild),
       readable: [...range.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0) &&
         getComputedStyle(host).visibility === 'visible' && getComputedStyle(host).opacity !== '0',
-      activeAnimations: animations.filter((animation) => animation.playState === 'running').length
+      activeAnimations: animations.filter((animation) => animation.playState === 'running').length,
+      highlighted: elements.some((element) => {
+        const style = getComputedStyle(element);
+        return style.backgroundImage !== 'none' || style.boxShadow !== 'none';
+      })
     };
   }));
 }
@@ -481,6 +681,7 @@ check('aurora wraps only dispatched units and reveals replies in reading order',
   assert.ok(pending.length > 0 && pending.length < 48, 'queued paragraphs stay unwrapped');
   assert.ok(pending.every((host) => host.state === 'translating' && host.busy === 'true' && host.slotted && host.readable));
   assert.ok(pending.every((host) => host.activeAnimations > 0), 'real CSS animation runs while inference is pending');
+  assert.ok(pending.every((host) => host.highlighted), 'pending progress has a visible highlight');
   await screenshot(page, 'aurora-pending');
   await page.evaluate(async () => {
     requests[1].resolve(requests[1].texts.map((text) => '번역 ' + text));
@@ -615,10 +816,14 @@ check('aurora partial sentence updates stay busy until settled and restore sourc
   assert.equal(intermediate.busy, 'true');
   assert.ok(intermediate.activeAnimations > 0);
   await page.evaluate(async () => { requests[1].resolve(['']); await task; });
+  assert.equal((await auroraState(page))[0].highlighted, false, 'a settled failure clears the painted highlight immediately');
+  await page.waitForFunction(() => document.querySelector('at-translation-text').dataset.state === 'partial');
   const partial = (await auroraState(page))[0];
   assert.equal(partial.text, '첫 문장. Another sentence.');
   assert.equal(partial.state, 'partial');
   assert.notEqual(partial.busy, 'true');
+  assert.equal(partial.highlighted, false, 'a paused animation must not leave a frozen gradient or shadow');
+  await screenshot(page, 'aurora-partial-stopped');
   await page.waitForFunction(() => {
     const host = document.querySelector('at-translation-text');
     return [host, ...host.shadowRoot.querySelectorAll('*')].every((element) =>
@@ -724,11 +929,14 @@ check('aurora translated text has a progressing finite reveal animation', async 
     const task = translator.translateRoot(root);
     reply(['부드럽게 나타나는 번역']); await task;
     const host = root.querySelector('at-translation-text');
-    const elements = [host, ...host.shadowRoot.querySelectorAll('*')];
-    const reveal = elements.flatMap((element) => element.getAnimations({ subtree: true })).find((animation) =>
+    const changed = host.shadowRoot.querySelector('.preview > span');
+    const reveal = changed?.getAnimations().find((animation) =>
       animation instanceof CSSAnimation && animation.playState === 'running' &&
       animation.effect.getComputedTiming().activeDuration > 0 &&
       Number.isFinite(animation.effect.getComputedTiming().activeDuration));
+    // CSS animations can be pending immediately after the commit microtask.
+    // Sample the changed region only once its animation timeline has started.
+    await reveal?.ready;
     const before = reveal?.effect.getComputedTiming().progress;
     await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     const after = reveal?.effect.getComputedTiming().progress;
@@ -738,4 +946,177 @@ check('aurora translated text has a progressing finite reveal animation', async 
     return state;
   });
   assert.deepEqual(result, { state: 'translated', text: '부드럽게 나타나는 번역', same: true, finiteReveal: true, advancing: true });
+});
+
+check('parked partial text has no highlight and resumes the same aurora and original suffix', async (page) => {
+  await page.exposeFunction('captureStopped', () => screenshot(page, 'aurora-partial-stopped'));
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = '<p>First source phrase. Second source phrase.</p>';
+    const original = root.innerHTML, node = root.firstChild.firstChild;
+    let park = false;
+    const requests = [];
+    const translator = AT.dom.createTranslator({
+      doc: document, presentation: AT.translationtext.create(document),
+      sentences: { split: AT.targets.sentences, maxChars: 900, always: true },
+      shouldYield: () => park,
+      translate: (texts) => new Promise(resolve => requests.push({ texts, resolve }))
+    });
+    const task = translator.translateRoot(root);
+    while (requests.length < 1) await new Promise(resolve => setTimeout(resolve, 0));
+    const host = node.parentElement, surface = host.shadowRoot.querySelector('.surface');
+    const aurora = surface.getAnimations()[0];
+    await aurora.ready;
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    park = true;
+    requests[0].resolve(['첫 문장.']);
+    const first = await task;
+    const bridged = host.dataset.state === 'translating' && getComputedStyle(surface).backgroundImage !== 'none';
+    await new Promise(resolve => setTimeout(resolve, 220));
+    const paused = { state: host.dataset.state, busy: host.hasAttribute('aria-busy'),
+      background: getComputedStyle(surface).backgroundImage, shadow: getComputedStyle(surface).boxShadow,
+      text: node.data, sameAnimation: surface.getAnimations()[0] === aurora, playState: aurora.playState };
+    await window.captureStopped();
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const phase = aurora.currentTime;
+    await new Promise(resolve => setTimeout(resolve, 220));
+    const frozen = aurora.currentTime === phase;
+    park = false;
+    const resumed = translator.translateNodes(first.pending);
+    while (requests.length < 2) await new Promise(resolve => setTimeout(resolve, 0));
+    const active = { state: host.dataset.state, busy: host.getAttribute('aria-busy'),
+      highlighted: getComputedStyle(surface).backgroundImage !== 'none',
+      sameHost: node.parentElement === host, sameAnimation: surface.getAnimations()[0] === aurora,
+      source: requests[1].texts };
+    await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const advancing = aurora.currentTime > phase;
+    requests[1].resolve(['둘째 문장.']); await resumed;
+    const completed = node.data;
+    translator.restore(root);
+    return { bridged, paused, frozen, active, advancing, completed,
+      restored: root.innerHTML === original && root.firstChild.firstChild === node };
+  });
+  assert.equal(result.bridged, true, 'ordinary quantum handoff retains the bounded no-blink grace');
+  assert.deepEqual(result.paused, { state: 'partial', busy: false, background: 'none', shadow: 'none',
+    text: '첫 문장. Second source phrase.', sameAnimation: true, playState: 'paused' });
+  assert.equal(result.frozen, true);
+  assert.deepEqual(result.active, { state: 'translating', busy: 'true', highlighted: true,
+    sameHost: true, sameAnimation: true, source: ['Second source phrase.'] });
+  assert.equal(result.advancing, true);
+  assert.equal(result.completed, '첫 문장. 둘째 문장.');
+  assert.equal(result.restored, true);
+});
+
+for (const partial of [false, true]) {
+  check(`observed abort clears pending preview and highlight with partial=${partial}`, async (page) => {
+    const result = await page.evaluate(async (partial) => {
+      const root = document.querySelector('#fixture');
+      root.innerHTML = '<p>First source phrase. Second source phrase.</p>';
+      const original = root.innerHTML, node = root.firstChild.firstChild;
+      const requests = [];
+      let abort = false;
+      const translator = AT.dom.createTranslator({
+        doc: document, presentation: AT.translationtext.create(document), shouldAbort: () => abort,
+        sentences: { split: AT.targets.sentences, maxChars: 900, always: true },
+        translate: (texts, progress) => new Promise(resolve => requests.push({ texts, progress, resolve }))
+      });
+      const task = translator.translateRoot(root);
+      window.abortCase = { root, original, node, requests, translator, setAbort: value => { abort = value; } };
+      while (requests.length < 1) await new Promise(resolve => setTimeout(resolve, 0));
+      if (partial) {
+        requests[0].resolve(['첫 문장.']);
+        while (requests.length < 2) await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      const current = requests.at(-1);
+      current.progress(0, '아직 확정되지 않은 번역');
+      abort = true;
+      current.progress(0, '늦은 미리보기');
+      const host = root.querySelector('at-translation-text');
+      const surface = host?.shadowRoot.querySelector('.surface');
+      const stopped = { text: node.data, state: host?.dataset.state ?? null,
+        busy: host?.hasAttribute('aria-busy') ?? false,
+        background: surface ? getComputedStyle(surface).backgroundImage : 'none',
+        shadow: surface ? getComputedStyle(surface).boxShadow : 'none',
+        streaming: host?.hasAttribute('data-streaming') ?? false };
+      abort = false; // Observed cancellation stays final even if a caller re-enables translation.
+      await new Promise(resolve => setTimeout(resolve, 220));
+      current.progress(0, '또 다른 늦은 미리보기');
+      current.resolve(['늦은 최종 결과']); await task;
+      const unchanged = node.data === stopped.text && !root.querySelector('[data-streaming]');
+      return { stopped, unchanged };
+    }, partial);
+    if (partial) await screenshot(page, 'aurora-partial-cancelled');
+    Object.assign(result, await page.evaluate(async () => {
+      const { root, original, node, requests, translator, setAbort } = abortCase;
+      setAbort(false);
+      const before = requests.length;
+      const retry = translator.translateRoot(root);
+      while (requests.length === before) await new Promise(resolve => setTimeout(resolve, 0));
+      const retrySource = requests.at(-1).texts;
+      translator.restore(root);
+      requests.at(-1).resolve(['복원 이후 늦은 결과']); await retry;
+      await new Promise(resolve => setTimeout(resolve, 220));
+      return { retrySource, restored: root.innerHTML === original && root.firstChild.firstChild === node };
+    }));
+    assert.deepEqual(result.stopped, { text: partial ? '첫 문장. Second source phrase.' : 'First source phrase. Second source phrase.',
+      state: partial ? 'partial' : null, busy: false, background: 'none', shadow: 'none', streaming: false });
+    assert.equal(result.unchanged, true);
+    assert.deepEqual(result.retrySource, [partial ? 'Second source phrase.' : 'First source phrase.']);
+    assert.equal(result.restored, true);
+  });
+}
+
+check('late completion after restore cannot settle a restarted presentation of the same Text', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture'); root.innerHTML = '<p>Original source</p>';
+    const original = root.innerHTML, node = root.firstChild.firstChild, requests = [];
+    const translator = AT.dom.createTranslator({ doc: document, presentation: AT.translationtext.create(document),
+      translate: (texts, progress) => new Promise(resolve => requests.push({ texts, progress, resolve })) });
+    const old = translator.translateRoot(root);
+    requests[0].progress(0, '복원 전 미리보기');
+    translator.restore(root);
+    const next = translator.translateRoot(root), host = node.parentElement;
+    requests[0].progress(0, '복원 후 늦은 미리보기');
+    requests[0].resolve(['복원 후 늦은 결과']); await old;
+    await new Promise(resolve => setTimeout(resolve, 220));
+    const active = { same: node.parentElement === host, state: host.dataset.state, busy: host.getAttribute('aria-busy'),
+      highlighted: getComputedStyle(host.shadowRoot.querySelector('.surface')).backgroundImage !== 'none',
+      text: node.data, streaming: host.hasAttribute('data-streaming') };
+    requests[1].resolve(['새 번역']); await next;
+    const completed = node.data;
+    translator.restore(root);
+    return { active, completed, restored: root.innerHTML === original && root.firstChild.firstChild === node };
+  });
+  assert.deepEqual(result.active, { same: true, state: 'translating', busy: 'true',
+    highlighted: true, text: 'Original source', streaming: false });
+  assert.equal(result.completed, '새 번역');
+  assert.equal(result.restored, true);
+});
+
+check('scoped restore immediately parks active partial text outside its subtree', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = '<p id="scope">Untouched source</p><p id="active">First source phrase. Second source phrase.</p>';
+    const original = root.innerHTML, node = root.querySelector('#active').firstChild, requests = [];
+    const translator = AT.dom.createTranslator({ doc: document, presentation: AT.translationtext.create(document),
+      sentences: { split: AT.targets.sentences, maxChars: 900, always: true },
+      translate: (texts) => new Promise(resolve => requests.push({ texts, resolve })) });
+    const task = translator.translateNodes([node]);
+    while (requests.length < 1) await new Promise(resolve => setTimeout(resolve, 0));
+    requests[0].resolve(['첫 문장.']);
+    while (requests.length < 2) await new Promise(resolve => setTimeout(resolve, 0));
+    translator.restore(root.querySelector('#scope'));
+    const host = node.parentElement, surface = host.shadowRoot.querySelector('.surface');
+    const parked = { state: host.dataset.state, busy: host.hasAttribute('aria-busy'),
+      background: getComputedStyle(surface).backgroundImage, shadow: getComputedStyle(surface).boxShadow,
+      text: node.data };
+    requests[1].resolve(['늦은 결과']); await task;
+    const unchanged = node.data === parked.text;
+    translator.restore(root);
+    return { parked, unchanged, restored: root.innerHTML === original };
+  });
+  assert.deepEqual(result.parked, { state: 'partial', busy: false, background: 'none', shadow: 'none',
+    text: '첫 문장. Second source phrase.' });
+  assert.equal(result.unchanged, true);
+  assert.equal(result.restored, true);
 });

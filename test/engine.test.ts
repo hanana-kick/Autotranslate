@@ -220,3 +220,15 @@ test('progress contains only generated ids and a dropped row stays silent during
   assert.deepEqual(progress, [[2]], 'neither prompt ids nor a pick read after cancellation is published');
   assert.deepEqual(outcomes, [], 'a cancelled generation never becomes a success');
 });
+
+test('dropping the only queued row during coalescing never launches an empty generation', async () => {
+  const runner = engine.create({
+    forward: async () => assert.fail('cancelled queued work must not execute a forward'),
+    eos: [7], batch: 2, pad: 0,
+    onDone: () => assert.fail('cancelled queued work must not produce a result')
+  });
+  runner.add({ id: 1, prompt: [5, 6], maxNewTokens: 4 });
+  runner.drop(1);
+  await runner.drain();
+  assert.equal(runner.waiting(), 0);
+});

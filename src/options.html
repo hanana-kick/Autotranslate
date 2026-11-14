@@ -17,78 +17,21 @@
         <h2 data-i18n="options_behavior"></h2>
         <p class="host" id="tabHost"></p>
         <p class="hint" id="tabStatus" role="status"></p>
-        <div class="grid">
-          <label class="switch">
-            <input type="checkbox" id="enabled" disabled />
-            <span data-i18n="options_enabled"></span>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="showBadge" />
-            <span data-i18n="options_showBadge"></span>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="debug" />
-            <span data-i18n="options_debug"></span>
-          </label>
-        </div>
-      </at-panel>
-
-      <at-panel>
-        <h2 data-i18n="server_engine"></h2>
-        <div class="field">
-          <label for="engine" data-i18n="server_engine"></label>
-          <select id="engine">
-            <option value="local" data-i18n="server_local"></option>
-            <option value="openai" data-i18n="server_openai"></option>
-          </select>
-        </div>
-        <div id="serverSection" hidden>
-          <p class="hint" data-i18n="server_privacy"></p>
-          <div class="field">
-            <label for="serverBaseUrl" data-i18n="server_baseUrl"></label>
-            <input type="url" id="serverBaseUrl" placeholder="http://localhost:8000/v1" spellcheck="false" autocomplete="off" />
-          </div>
-          <div class="field">
-            <label for="serverApiKey" data-i18n="server_apiKey"></label>
-            <input type="password" id="serverApiKey" spellcheck="false" autocomplete="off" />
-          </div>
-          <div class="field">
-            <label for="serverModel" data-i18n="server_model"></label>
-            <input type="text" id="serverModel" list="serverModels" placeholder="big" spellcheck="false" autocomplete="off" />
-            <datalist id="serverModels"></datalist>
-          </div>
-          <div class="field">
-            <label for="serverTimeoutMs" data-i18n="server_timeout"></label>
-            <input type="number" id="serverTimeoutMs" min="5000" max="300000" step="1000" />
-          </div>
-          <button id="loadServerModels" type="button" class="secondary" data-i18n="server_loadModels"></button>
-          <p class="status" id="serverStatus" role="status"></p>
-        </div>
-        <div class="row wrap">
-          <button id="testEngine" type="button" class="secondary" data-i18n="options_test"></button>
-        </div>
-        <p class="status" id="testStatus" role="status"></p>
-        <p class="hint" data-i18n="server_testHint"></p>
+        <label class="switch">
+          <input type="checkbox" id="enabled" disabled />
+          <span data-i18n="options_enabled"></span>
+        </label>
       </at-panel>
 
       <at-panel id="localSection">
         <h2 data-i18n="options_local"></h2>
         <div class="stack">
-          <p class="hint" id="localSupport" data-i18n="options_localHint"></p>
+          <p class="hint" data-i18n="options_localHint"></p>
           <div class="field">
             <label for="localModel" data-i18n="options_localModel"></label>
             <select id="localModel"></select>
           </div>
-          <div class="field">
-            <label for="localMaxTokens" data-i18n="options_localMaxTokens"></label>
-            <input type="number" id="localMaxTokens" min="128" max="8192" step="128" />
-          </div>
-          <p class="hint" id="localUsage"></p>
           <ul class="rules" id="modelList"></ul>
-          <div class="field">
-            <label for="modelUrl" data-i18n="options_modelUrl"></label>
-            <input type="url" id="modelUrl" spellcheck="false" autocomplete="off" />
-          </div>
           <div class="row wrap">
             <button id="downloadModel" type="button" data-i18n="options_download"></button>
             <button id="cancelDownload" type="button" class="secondary" data-i18n="options_cancel" hidden></button>
@@ -104,26 +47,15 @@
 
       <at-panel>
         <h2 data-i18n="options_languages"></h2>
-        <div class="grid">
-          <div class="field">
-            <label for="targetLang" data-i18n="options_targetLang"></label>
-            <select id="targetLang"></select>
-          </div>
-          <div class="field">
-            <label for="sourceLang" data-i18n="options_sourceLang"></label>
-            <select id="sourceLang"></select>
-          </div>
+        <div class="field">
+          <label for="targetLang" data-i18n="options_targetLang"></label>
+          <select id="targetLang"></select>
         </div>
-      </at-panel>
-
-      <at-panel>
-        <h2 data-i18n="options_limits"></h2>
-        <div class="grid">
-          <div class="field">
-            <label for="maxNodes" data-i18n="options_maxNodes"></label>
-            <input type="number" id="maxNodes" min="10" max="5000" step="10" />
-          </div>
-        </div>
+        <label class="switch">
+          <input type="checkbox" id="parallelTranslation" aria-describedby="parallelTranslationHint" />
+          <span data-i18n="options_parallelTranslation"></span>
+        </label>
+        <p class="hint" id="parallelTranslationHint" data-i18n="options_parallelTranslationHint"></p>
       </at-panel>
 
       <at-panel>
@@ -136,18 +68,21 @@
             data-i18n-placeholder="options_rulePlaceholder"
             spellcheck="false"
           />
-          <select id="ruleAction">
-            <option value="always" data-i18n="options_ruleAlways"></option>
-            <option value="never" data-i18n="options_ruleNever"></option>
-          </select>
           <button id="addRule" type="button" data-i18n="options_addRule"></button>
         </div>
+        <p class="hint" data-i18n="options_rulesHint"></p>
         <ul class="rules" id="ruleList"></ul>
+      </at-panel>
+
+      <at-panel>
+        <h2 id="alwaysLanguagesLabel" data-i18n="options_alwaysLanguages"></h2>
+        <p class="hint" id="alwaysLanguagesHint" data-i18n="options_alwaysLanguagesHint"></p>
+        <div id="alwaysTranslateLanguages" class="language-checklist" role="group"
+          aria-labelledby="alwaysLanguagesLabel" aria-describedby="alwaysLanguagesHint"></div>
       </at-panel>
 
       <footer class="row actions">
         <button id="save" type="button" data-i18n="options_save"></button>
-        <button id="reset" type="button" class="secondary" data-i18n="options_reset"></button>
         <p class="status" id="saveStatus" role="status"></p>
       </footer>
     </main>

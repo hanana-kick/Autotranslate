@@ -100,8 +100,8 @@ test('one pass reads the page, plans it, and translates in plan order', async ()
   assert.equal(result.translated, 2);
   assert.deepEqual(
     batches.map((batch) => `${batch.role}:${batch.texts.join(',')}`),
-    ['navigation:Home', 'unknown:Hello there'],
-    'both are visible; the menu outranks unknown prose inside one priority'
+    ['unknown:Hello there', 'navigation:Home'],
+    'generic prose is primary content even without an article landmark'
   );
   assert.ok(batches[0]?.context, 'the page context travels with the batch');
   assert.equal(translator.context()?.site, null);
@@ -373,7 +373,7 @@ test('scrolling during an active request preserves and reorders the unsent tail'
   assert.equal(translator.restore().restored, 3);
 });
 
-test('viewport invalidation stops refilling the active wave and retains its unsent nodes', async () => {
+test('viewport invalidation finishes one active quantum and parks the old window until scrolling back', async () => {
   const fixture = page(Array.from({ length: 21 }, (_, index) => ({
     text: `Reader comment ${index}`, tag: 'main', top: index === 20 ? 3000 : index * 30
   })));
@@ -382,10 +382,10 @@ test('viewport invalidation stops refilling the active wave and retains its unse
   const asked: string[] = [];
   let calls = 0;
   const translator = pipeline.create({
-    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
     translate: async ({ texts }: { texts: string[] }) => {
       asked.push(...texts);
-      if (++calls === AT.C.PAGE_PACKS) started.resolve();
+      if (++calls === 1) started.resolve();
       await release.promise;
       return texts.map((text) => `»${text}«`);
     }
@@ -405,9 +405,19 @@ test('viewport invalidation stops refilling the active wave and retains its unse
   assert.equal(asked.length, dispatched, 'in-flight requests commit, but no old-window refill starts');
   const result = await translator.resume();
   assert.equal(asked[dispatched], 'Reader comment 20');
+  assert.equal(result.translated, 2, 'the active source committed after scrolling out');
+  assert.equal(fixture.texts[0]!.nodeValue, '»Reader comment 0«');
+  assert.equal(fixture.texts[1]!.nodeValue, 'Reader comment 1', 'unsent sources stay intact');
+  assert.equal(result.hasMore, false, 'offscreen sources do not keep the continuation loop alive');
+  for (let index = 0; index < 20; index++) {
+    fixture.texts[index]!.parentElement!.getBoundingClientRect = () => ({ top: index * 30, bottom: index * 30 + 20, width: 600, height: 20 });
+  }
+  translator.invalidatePlan();
+  let resumed = await translator.resume();
+  for (let pass = 0; resumed.hasMore && pass < 30; pass++) resumed = await translator.resume();
   assert.equal(new Set(asked).size, 21);
-  assert.equal(asked.length, 21, 'yielded nodes are retained without retranslating completed ones');
-  assert.equal(result.translated, 21);
+  assert.equal(asked.length, 21, 'returning to the old window resumes without re-requesting completed sources');
+  assert.equal(resumed.translated, 21);
   assert.equal(translator.restore().restored, 21);
 });
 
@@ -433,17 +443,17 @@ test('target-language prose is left untouched without an echo failure', async ()
   assert.equal(translator.restore().restored, 1);
 });
 
-test('interactive comments park unread work and wake it on viewport invalidation without a retry loop', async () => {
+test('generic div prose parks unread work and wakes it on reprioritization without a retry loop', async () => {
   const fixture = page([
-    { text: 'Visible reply', top: 100, attrs: { class: 'comment-body' } },
-    { text: 'Next-screen reply', top: 1000, attrs: { class: 'comment-body' } },
-    { text: 'Unread distant reply', top: 5000, attrs: { class: 'comment-body' } },
+    { text: 'Visible reply', top: 100, tag: 'div' },
+    { text: 'Next-screen reply', top: 1000, tag: 'div' },
+    { text: 'Unread distant reply', top: 5000, tag: 'div' },
     { text: 'Reader author', top: 60, tag: 'time' },
     { text: 'Distant recommendation', top: 4000, tag: 'aside' }
   ]);
   const asked: string[] = [];
   const translator = pipeline.create({
-    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
     translate: async ({ texts }: { texts: string[] }) => {
       asked.push(...texts);
       return texts.map(text => `»${text}«`);
@@ -452,7 +462,7 @@ test('interactive comments park unread work and wake it on viewport invalidation
   let result = await translator.translate();
   for (let pass = 0; result.hasMore && pass < 20; pass++) result = await translator.resume();
   assert.equal(result.hasMore, false, 'parked work does not keep an empty continuation spinning');
-  assert.deepEqual(asked, ['Visible reply', 'Next-screen reply', 'Reader author']);
+  assert.deepEqual(asked, ['Visible reply', 'Reader author']);
   assert.equal(fixture.texts[2]!.nodeValue, 'Unread distant reply');
   const before = asked.length;
   assert.equal((await translator.resume()).hasMore, false);
@@ -461,24 +471,24 @@ test('interactive comments park unread work and wake it on viewport invalidation
     node.parentElement!.getBoundingClientRect = () => ({ top: -4000, bottom: -3980, width: 600, height: 20 });
   }
   fixture.texts[2]!.parentElement!.getBoundingClientRect = () => ({ top: 100, bottom: 120, width: 600, height: 20 });
-  translator.invalidatePlan();
+  assert.deepEqual(translator.reprioritize(), { visible: 1, queued: 3 });
   result = await translator.resume();
   assert.equal(asked[before], 'Unread distant reply');
   assert.equal(result.hasMore, false);
-  assert.equal(translator.restore().restored, 4);
+  assert.equal(translator.restore().restored, 3);
 });
 
-test('interactive comment work keeps one request active and lets new visible replies overtake old pending work', async () => {
+test('generic article work keeps one request active and lets newly visible prose overtake pending work', async () => {
   const fixture = page([
-    { text: 'First visible reply', top: 100, attrs: { class: 'comment-body' } },
-    { text: 'Old pending reply', top: 200, attrs: { class: 'comment-body' } },
-    { text: 'New visible reply', top: 4000, attrs: { class: 'comment-body' } }
+    { text: 'First visible reply', top: 100, tag: 'article' },
+    { text: 'Old pending reply', top: 200, tag: 'article' },
+    { text: 'New visible reply', top: 4000, tag: 'article' }
   ]);
   const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
   const asked: string[][] = [];
   let active = 0, maximum = 0;
   const translator = pipeline.create({
-    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
     translate: async ({ texts }: { texts: string[] }) => {
       asked.push(texts); maximum = Math.max(maximum, ++active);
       if (asked.length === 1) { started.resolve(); await release.promise; }
@@ -502,12 +512,12 @@ test('interactive comment work keeps one request active and lets new visible rep
   assert.equal(result.failed, 0);
 });
 
-test('interactive long comments retain exact source through bounded work and complete every suffix', async () => {
-  const source = 'A reader describes the changing weather and power network. '.repeat(7);
-  const fixture = page([{ text: source, top: 100, attrs: { class: 'comment-body' } }]);
+test('long card text retains exact source through bounded work and completes every suffix', async () => {
+  const source = Array.from({ length: 20 }, (_, index) => `Reader ${index} describes the changing weather and power network. `).join('');
+  const fixture = page([{ text: source, top: 100, tag: 'div', attrs: { class: 'card' } }]);
   const asked: string[] = [];
   const translator = pipeline.create({
-    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
     translate: async ({ texts }: { texts: string[] }) => {
       asked.push(...texts);
       return texts.map(text => text.toUpperCase());
@@ -519,7 +529,7 @@ test('interactive long comments retain exact source through bounded work and com
   for (let pass = 0; result.hasMore && pass < 50; pass++) result = await translator.resume();
   assert.equal(result.hasMore, false);
   assert.equal(result.translated, 1);
-  assert.ok(asked.every(text => text.length <= 64));
+  assert.ok(asked.every(text => text.length <= AT.C.PACKED_TEXT_CHARS));
   assert.equal(fixture.texts[0]!.nodeValue, source.toUpperCase());
   translator.restore();
   assert.equal(fixture.texts[0]!.nodeValue, source);
@@ -529,7 +539,7 @@ test('unchanged failed comment fragments do not consume every mutation tick', as
   const fixture = page([{ text: 'A refused reader comment', top: 100, attrs: { class: 'comment-body' } }]);
   let calls = 0;
   const translator = pipeline.create({
-    doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
     translate: async ({ texts }: { texts: string[] }) => {
       if (++calls === 1) throw new Error('provider refused this comment');
       return texts.map(text => `»${text}«`);
@@ -557,7 +567,7 @@ test('a failed bounded request does not discard the unattempted comments behind 
     ]);
     const asked: string[] = [];
     const translator = pipeline.create({
-      doc: fixture.document, settings: () => ({ maxNodes: 100, engine: 'local' }),
+      doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
       translate: async ({ texts }: { texts: string[] }) => {
         asked.push(...texts);
         if (asked.length === 1) {
@@ -576,4 +586,300 @@ test('a failed bounded request does not discard the unattempted comments behind 
     assert.equal(second.failed, 1, 'the original failure remains visible');
     assert.equal(fixture.texts[1]!.nodeValue, '»Second reader comment«');
   }
+});
+
+test('a sole active card commits offscreen and invalidation wakes newly visible parked work', async () => {
+  const fixture = page([
+    { text: 'First original card', top: 100, tag: 'div' },
+    { text: 'Second original card', top: 4000, tag: 'div' }
+  ]);
+  const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      if (asked.length === 1) { started.resolve(); await release.promise; }
+      return texts.map(text => `»${text}«`);
+    }
+  });
+  const running = translator.translate();
+  await started.promise;
+  fixture.texts[0]!.parentElement!.getBoundingClientRect = () => ({ top: -4000, bottom: -3980, width: 600, height: 20 });
+  fixture.texts[1]!.parentElement!.getBoundingClientRect = () => ({ top: 100, bottom: 120, width: 600, height: 20 });
+  translator.invalidatePlan();
+  release.resolve();
+  assert.equal((await running).hasMore, true);
+  assert.equal(fixture.texts[0]!.nodeValue, '»First original card«', 'scrolling cannot revoke an active answer');
+  assert.equal((await translator.resume()).hasMore, false);
+  assert.deepEqual(asked, ['First original card', 'Second original card']);
+  assert.equal(translator.restore().restored, 2);
+  assert.deepEqual(fixture.texts.map(node => node.nodeValue), ['First original card', 'Second original card']);
+});
+
+test('an offscreen partial card retains its committed prefix and resumes its original suffix on return', async () => {
+  const source = 'The first card contains a long explanation of changing energy systems. '.repeat(15);
+  const fixture = page([{ text: source, top: 100, tag: 'div' }]);
+  const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      if (asked.length === 1) { started.resolve(); await release.promise; }
+      return texts.map(text => text.toUpperCase());
+    }
+  });
+  const running = translator.translate();
+  await started.promise;
+  fixture.texts[0]!.parentElement!.getBoundingClientRect = () => ({ top: -4000, bottom: -3980, width: 600, height: 20 });
+  translator.invalidatePlan();
+  release.resolve();
+  await running;
+  const committed = fixture.texts[0]!.nodeValue;
+  assert.notEqual(committed, source);
+  assert.ok(committed.includes('changing energy systems.'), 'the untranslated suffix remains readable');
+  const parked = await translator.resume();
+  assert.equal(parked.hasMore, false);
+  assert.equal(asked.length, 1);
+  assert.equal(fixture.texts[0]!.nodeValue, committed, 'parking never restores or drops committed text');
+  fixture.texts[0]!.parentElement!.getBoundingClientRect = () => ({ top: 100, bottom: 120, width: 600, height: 20 });
+  translator.reprioritize();
+  let resumed = await translator.resume();
+  for (let pass = 0; resumed.hasMore && pass < 30; pass++) resumed = await translator.resume();
+  assert.equal(resumed.hasMore, false);
+  assert.equal(resumed.translated, 1);
+  assert.equal(fixture.texts[0]!.nodeValue, source.toUpperCase());
+  translator.restore();
+  assert.equal(fixture.texts[0]!.nodeValue, source);
+});
+
+test('visible support precedes near body in both initial and reprioritized plans', async () => {
+  const fixture = page([
+    { text: 'First main heading', tag: 'h1', top: 10 },
+    { text: 'Visible navigation', tag: 'nav', top: 100 },
+    { text: 'Next screen body', tag: 'article', top: 1000 }
+  ]);
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
+    translate: async ({ texts }: { texts: string[] }) => { asked.push(...texts); return texts.map(text => `»${text}«`); }
+  });
+  await translator.translate();
+  translator.reprioritize();
+  await translator.resume();
+  await translator.resume();
+  assert.deepEqual(asked, ['First main heading', 'Visible navigation']);
+  await translator.prefetch();
+  assert.deepEqual(asked, ['First main heading', 'Visible navigation', 'Next screen body']);
+});
+
+test('visible partial prose completes an ordinary reading unit without comment ping-pong', async () => {
+  const source = Array.from({ length: 24 }, (_, index) => `A long original paragraph ${index} explains the winter power network. `).join('');
+  const fixture = page([{ text: source, top: 100 }, { text: 'Another visible paragraph', top: 200 }]);
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
+    translate: async ({ texts }: { texts: string[] }) => { asked.push(...texts); return texts.map(text => text.toUpperCase()); }
+  });
+  await translator.translate();
+  await translator.resume();
+  assert.equal(asked.length, 2);
+  assert.ok(asked.every(text => text !== 'Another visible paragraph'));
+  let result = await translator.resume();
+  assert.notEqual(asked[2], 'Another visible paragraph', 'ordinary prose keeps its reading unit beyond two quanta');
+  for (let pass = 0; result.hasMore && pass < 30; pass++) result = await translator.resume();
+  assert.equal(result.translated, 2, 'the long paragraph is not abandoned or starved');
+  assert.equal(asked.at(-1), 'Another visible paragraph', 'the next unit starts after the first completes');
+  assert.equal(fixture.texts[0]!.nodeValue, source.toUpperCase());
+  translator.restore();
+  assert.equal(fixture.texts[0]!.nodeValue, source);
+});
+
+test('explicit reader engagement is bounded and never cancels an active quantum', async () => {
+  const source = Array.from({ length: 24 }, (_, index) => `Selected sidebar explanation ${index} of the energy storage system. `).join('');
+  const fixture = page([
+    { text: 'Active reading paragraph', top: 10 },
+    { text: 'Unfinished main reading', top: 100 },
+    { text: source, top: 200, tag: 'aside' }
+  ]);
+  const selected = fixture.texts[2]!.parentElement!;
+  selected.contains = ((node: unknown) => node === fixture.texts[2]) as typeof selected.contains;
+  const started = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      if (asked.length === 1) { started.resolve(); await release.promise; }
+      return texts.map(text => text.toUpperCase());
+    }
+  });
+  const active = translator.translate();
+  await started.promise;
+  translator.engage(selected);
+  release.resolve();
+  await active;
+  assert.equal(fixture.texts[0]!.nodeValue, 'ACTIVE READING PARAGRAPH');
+  await translator.resume();
+  await translator.resume();
+  assert.ok(asked.slice(1, 3).every(text => source.includes(text)), 'the selected visible subtree gets two quanta');
+  await translator.resume();
+  assert.equal(asked[3], 'Unfinished main reading', 'persistent focus does not monopolize the model');
+  translator.restore();
+  assert.equal(fixture.texts[2]!.nodeValue, source);
+});
+
+test('pathological reading units yield after a generous cap and viewport changes override continuity', async () => {
+  const source = Array.from({ length: 350 }, (_, index) => `Original explanation number ${index} of winter energy systems. `).join('');
+  const fixture = page([{ text: source, top: 100 }, { text: 'Other visible prose', top: 200 }]);
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }), readingWindow: true,
+    translate: async ({ texts }: { texts: string[] }) => { asked.push(...texts); return texts.map(text => text.toUpperCase()); }
+  });
+  await translator.translate();
+  for (let pass = 1; pass < 32; pass++) await translator.resume();
+  assert.equal(asked.length, 32);
+  assert.ok(!asked.includes('Other visible prose'));
+  await translator.resume();
+  assert.equal(asked[32], 'Other visible prose');
+  fixture.texts[1]!.nodeValue = 'Newly visible reader priority';
+  fixture.texts[1]!.parentElement!.getBoundingClientRect = () => ({ top: 0, bottom: 20, width: 600, height: 20 });
+  translator.invalidatePlan(true);
+  await translator.resume();
+  assert.equal(asked.at(-1), 'Newly visible reader priority');
+});
+
+test('parallel mode dispatches two independent bounded comments, orders commits and aborts both on OFF', async () => {
+  const sources = ['First', 'Second'].map(label =>
+    Array.from({ length: 18 }, (_, index) => `${label} original comment ${index} has many interesting observations. `).join(''));
+  const fixture = page(sources.map((text, index) => ({ text, top: 100 + index * 100, attrs: { class: 'comment-body' } })));
+  const gates: { texts: string[]; signal: AbortSignal; fragmentConcurrency: number; resolve: (value: string[]) => void }[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, translationConcurrency: 2 }), readingWindow: true,
+    translate: ({ texts, signal, fragmentConcurrency }: { texts: string[]; signal: AbortSignal; fragmentConcurrency: number }) => {
+      const { promise, resolve } = Promise.withResolvers<string[]>();
+      gates.push({ texts, signal, fragmentConcurrency, resolve });
+      return promise;
+    }
+  });
+  const running = translator.translate();
+  for (let turn = 0; gates.length < 2 && turn < 20; turn++) await Promise.resolve();
+  assert.equal(gates.length, 2, 'both first fragments start before either whole comment completes');
+  assert.ok(gates.every(gate => gate.texts.length === 1 && gate.texts[0]!.length <= AT.C.PACKED_TEXT_CHARS));
+  assert.ok(gates.every(gate => gate.fragmentConcurrency === 1), 'two reading units share the two slots');
+  assert.ok(gates[0]!.texts[0]!.startsWith('First'));
+  assert.ok(gates[1]!.texts[0]!.startsWith('Second'));
+  gates[1]!.resolve(gates[1]!.texts.map(text => text.toUpperCase()));
+  for (let turn = 0; turn < 10; turn++) await Promise.resolve();
+  assert.deepEqual(fixture.texts.map(node => node.nodeValue), sources, 'lower completion cannot overtake upper commit');
+  gates[0]!.resolve(gates[0]!.texts.map(text => text.toUpperCase()));
+  assert.equal((await running).hasMore, true);
+  assert.ok(fixture.texts.every((node, index) => node.nodeValue !== sources[index]));
+  const resumed = translator.resume();
+  for (let turn = 0; gates.length < 4 && turn < 20; turn++) await Promise.resolve();
+  assert.equal(gates.length, 4, 'exactly two suffix requests, not concurrent suffixes of one comment');
+  translator.restore();
+  assert.ok(gates.slice(2).every(gate => gate.signal.aborted));
+  gates.slice(2).forEach(gate => gate.resolve(['LATE TRANSLATION']));
+  await resumed;
+  assert.deepEqual(fixture.texts.map(node => node.nodeValue), sources);
+  assert.equal(translator.stats().translated, 0);
+});
+
+test('parallel failure releases the next independent unit and preserves immutable roles', async () => {
+  const fixture = page([{ text: 'Upper article paragraph', top: 10, tag: 'article' },
+    { text: 'Lower reader reply', top: 100, attrs: { class: 'comment-body' } }]);
+  const gates: { role: string; texts: string[]; resolve: (texts: string[]) => void; reject: (error: Error) => void }[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, translationConcurrency: 2 }), readingWindow: true,
+    translate: ({ texts, role }: { texts: string[]; role: string }) => {
+      const { promise, resolve, reject } = Promise.withResolvers<string[]>();
+      gates.push({ texts, role, resolve, reject });
+      return promise;
+    }
+  });
+  const running = translator.translate();
+  for (let turn = 0; gates.length < 2 && turn < 20; turn++) await Promise.resolve();
+  assert.deepEqual(Object.fromEntries(gates.map(gate => [gate.role, gate.texts])), {
+    article: ['Upper article paragraph'], comment: ['Lower reader reply']
+  });
+  gates.find(gate => gate.role === 'comment')!.resolve(['LOWER READER REPLY']);
+  gates.find(gate => gate.role === 'article')!.reject(new Error('upper refused'));
+  const result = await running;
+  assert.equal(result.failed, 1);
+  assert.equal(result.translated, 1);
+  assert.equal(result.hasMore, false);
+  assert.equal(fixture.texts[1]!.nodeValue, 'LOWER READER REPLY');
+});
+
+test('idle prefetch reaches distant next content one quantum at a time without retrying failures', async () => {
+  const fixture = page([{ text: 'Visible source', top: 10 },
+    { text: 'Farther source', top: 6000 }, { text: 'Nearest distant source', top: 4000 }]);
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, translationConcurrency: 2 }), readingWindow: true,
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      if (texts[0] === 'Farther source') throw new Error('offscreen refused');
+      return texts.map(text => text.toUpperCase());
+    }
+  });
+  assert.equal((await translator.translate()).hasMore, false);
+  assert.deepEqual(asked, ['Visible source']);
+  assert.equal((await translator.prefetch()).hasMore, true);
+  assert.deepEqual(asked, ['Visible source', 'Nearest distant source']);
+  await assert.rejects(translator.prefetch(), /offscreen refused/);
+  assert.equal((await translator.prefetch()).hasMore, false);
+  assert.equal(asked.length, 3);
+});
+
+test('a many-node comment does not hide the independent second lane behind the node budget', async () => {
+  const fixture = page([
+    { text: 'First original comment fragment', top: 100, attrs: { class: 'comment' } },
+    { text: 'Another fragment in the first comment', top: 110 },
+    { text: 'Third fragment in the first comment', top: 120 },
+    { text: 'Independent second comment', top: 200, attrs: { class: 'comment' } }
+  ]);
+  const first = fixture.texts[0]!.parentElement!;
+  for (const node of fixture.texts.slice(1, 3)) {
+    const previous = node.parentElement!;
+    previous.childNodes = [];
+    node.parentElement = first;
+    first.childNodes.push(node);
+  }
+  const gates: { texts: string[]; resolve: (texts: string[]) => void }[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 2, translationConcurrency: 2 }), readingWindow: true,
+    translate: ({ texts }: { texts: string[] }) => {
+      const { promise, resolve } = Promise.withResolvers<string[]>();
+      gates.push({ texts, resolve });
+      return promise;
+    }
+  });
+  const running = translator.translate();
+  for (let turn = 0; gates.length < 2 && turn < 20; turn++) await Promise.resolve();
+  assert.deepEqual(gates.map(gate => gate.texts), [
+    ['First original comment fragment'], ['Independent second comment']
+  ]);
+  gates.forEach(gate => gate.resolve(gate.texts.map(text => text.toUpperCase())));
+  assert.equal((await running).hasMore, true, 'the first comment retains its unattempted siblings');
+  assert.equal(fixture.texts[1]!.nodeValue, 'Another fragment in the first comment');
+});
+
+test('one visible reading unit borrows both fragment slots, idle prefetch stays serial', async () => {
+  const fixture = page([{ text: '図書館は電子書籍の貸し出しを始めます。利用期間は十四日です。', top: 100 },
+    { text: '説明会は毎週土曜日に開かれます。', top: 4000 }]);
+  const widths: number[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, translationConcurrency: 2 }), readingWindow: true,
+    translate: async ({ texts, fragmentConcurrency }: { texts: string[]; fragmentConcurrency: number }) => {
+      widths.push(fragmentConcurrency);
+      return texts.map(() => '도서관 안내 번역입니다.');
+    }
+  });
+  await translator.translate();
+  await translator.prefetch();
+  assert.deepEqual(widths, [2, 1]);
 });

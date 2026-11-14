@@ -203,6 +203,8 @@ namespace AT.engine {
         // into solo prefills — exactly the cost this engine exists to avoid.
         await new Promise((resolve) => setTimeout(resolve, Math.max(0, coalesceMs)));
         const cohort = queue.splice(0, take());
+        // DROP can empty the queue during the coalescing wait.
+        if (!cohort.length) continue;
         active = cohort;
         try {
           await runCohort(cohort);
