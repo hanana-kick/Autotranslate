@@ -568,3 +568,207 @@ test('interactive source planning never silently falls back to character estimat
   await assert.rejects(localModel({ texts: ['図書館からのお知らせです。'], sourceChunkTokens: 64 }), /no counts/);
   assert.equal(translates().length, 0);
 });
+
+type FragmentGate = {
+  text: string;
+  signal: AbortSignal;
+  progress: ((index: number, text: string) => void) | undefined;
+  resolve: (reply: unknown) => void;
+};
+
+async function flushFragments(): Promise<void> {
+  for (let turn = 0; turn < 80; turn++) await Promise.resolve();
+}
+
+function fragmentHost(plans: Map<string, string[]>) {
+  const gates: FragmentGate[] = [];
+  let active = 0;
+  let peak = 0;
+  AT.local.callHost = async (message: ATNamespace, progress: FragmentGate['progress'], signal: AbortSignal) => {
+    if (message.type === AT.C.MSG.LOCAL_COUNT) {
+      assert.equal(message.sourceChunkTokens, 64);
+      return { ok: true, sourceChunks: message.texts.map((text: string) => plans.get(text) ?? [text]) };
+    }
+    assert.equal(message.type, AT.C.MSG.LOCAL_TRANSLATE);
+    active++;
+    peak = Math.max(peak, active);
+    const gate = Promise.withResolvers<unknown>();
+    gates.push({ text: message.texts[0], signal, progress, resolve: gate.resolve });
+    try { return await gate.promise; } finally { active--; }
+  };
+  return { gates, peak: () => peak };
+}
+
+test('shared fragment slots lend a completed short unit slot to the unfinished long unit', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const parts = ['図書館を開きます。', '本を借りられます。', '予約もできます。'];
+  const source = parts.join('');
+  const { gates, peak } = fragmentHost(new Map([[source, parts]]));
+  const fragmentScheduler = engines.createFragmentScheduler(2);
+  const common = { source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2, fragmentScheduler };
+  const short = localModel({ ...common, texts: ['今日は晴れです。'] });
+  await flushFragments();
+  const seen: string[] = [];
+  const long = localModel({ ...common, texts: [source], onProgress: (_index: number, text: string) => seen.push(text) });
+  await flushFragments();
+  assert.deepEqual(gates.map(gate => gate.text), ['今日は晴れです。', parts[0]]);
+  gates[0]!.resolve({ ok: true, translations: ['오늘은 맑습니다.'] });
+  assert.deepEqual((await short).translations, ['오늘은 맑습니다.']);
+  await flushFragments();
+  assert.equal(gates[2]!.text, parts[1], 'borrows the released slot while the first long fragment is still running');
+  gates[2]!.resolve({ ok: true, translations: ['책을 빌릴 수 있습니다.'] });
+  await flushFragments();
+  assert.equal(gates[3]!.text, parts[2]);
+  assert.ok(seen.every(text => text === ''), 'completed suffix fragments are not exposed ahead of the source prefix');
+  gates[1]!.resolve({ ok: true, translations: ['도서관을 엽니다.'] });
+  gates[3]!.resolve({ ok: true, translations: ['예약도 가능합니다.'] });
+  assert.deepEqual((await long).translations, ['도서관을 엽니다. 책을 빌릴 수 있습니다. 예약도 가능합니다.']);
+  assert.equal(peak(), 2);
+});
+
+test('shared serial admission caps overlapping parallel fragment requests at one generation', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const parts = ['図書館を開きます。', '本を借りられます。'];
+  const source = parts.join('');
+  const { gates, peak } = fragmentHost(new Map([[source, parts]]));
+  const common = { source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(1) };
+  const first = localModel({ ...common, texts: [source] });
+  const second = localModel({ ...common, texts: ['今日は晴れです。'] });
+  await flushFragments();
+  assert.equal(gates.length, 1);
+  for (let index = 0; index < 3; index++) {
+    assert.equal(gates.length, index + 1);
+    gates[index]!.resolve({ ok: true, translations: ['번역했습니다.'] });
+    await flushFragments();
+  }
+  assert.deepEqual((await first).translations, ['번역했습니다. 번역했습니다.']);
+  assert.deepEqual((await second).translations, ['번역했습니다.']);
+  assert.equal(peak(), 1);
+});
+
+test('queued fragment cancellation never generates or publishes and leaves other owners intact', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const { gates } = fragmentHost(new Map());
+  const common = { source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(1) };
+  const survivor = localModel({ ...common, texts: ['今日は晴れです。'] });
+  await flushFragments();
+  const controller = new AbortController();
+  const seen: string[] = [];
+  const cancelled = localModel({ ...common, texts: ['図書館を開きます。'], signal: controller.signal,
+    onProgress: (_index: number, text: string) => seen.push(text) });
+  const rejected = assert.rejects(cancelled, { code: 'cancelled' });
+  await flushFragments();
+  controller.abort();
+  await rejected;
+  assert.equal(gates[0]!.signal.aborted, false);
+  gates[0]!.resolve({ ok: true, translations: ['오늘은 맑습니다.'] });
+  await survivor;
+  await flushFragments();
+  assert.equal(gates.length, 1);
+  assert.deepEqual(seen, []);
+  const next = localModel({ ...common, texts: ['明日も晴れです。'] });
+  await flushFragments();
+  assert.equal(gates.length, 2, 'cancelled queue entries do not leak admission');
+  gates[1]!.resolve({ ok: true, translations: ['내일도 맑습니다.'] });
+  await next;
+});
+
+test('fragment failure removes only its queued siblings before lending the slot to another owner', async t => {
+  const originalHost = AT.local.callHost;
+  t.after(() => { AT.local.callHost = originalHost; });
+  const parts = ['図書館を開きます。', '本を借りられます。', '予約もできます。'];
+  const source = parts.join('');
+  const { gates, peak } = fragmentHost(new Map([[source, parts]]));
+  const common = { source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(2) };
+  const survivor = localModel({ ...common, texts: ['今日は晴れです。'] });
+  await flushFragments();
+  const seen: string[] = [];
+  const failed = localModel({ ...common, texts: [source], onProgress: (_index: number, text: string) => seen.push(text) });
+  const rejected = assert.rejects(failed, /unusable fragment/);
+  await flushFragments();
+  const next = localModel({ ...common, texts: ['明日も晴れです。'] });
+  await flushFragments();
+  gates[1]!.progress?.(0, '도서관');
+  gates[1]!.resolve({ ok: true, translations: [''] });
+  await rejected;
+  await flushFragments();
+  assert.deepEqual(gates.map(gate => gate.text), ['今日は晴れです。', parts[0], '明日も晴れです。']);
+  assert.equal(gates[0]!.signal.aborted, false);
+  assert.equal(gates[2]!.signal.aborted, false);
+  gates[1]!.progress?.(0, '늦은 응답');
+  assert.deepEqual(seen, ['도서관', '']);
+  gates[0]!.resolve({ ok: true, translations: ['오늘은 맑습니다.'] });
+  gates[2]!.resolve({ ok: true, translations: ['내일도 맑습니다.'] });
+  await Promise.all([survivor, next]);
+  assert.equal(peak(), 2);
+});
+
+for (const width of [1, 2, 4, 8]) {
+  test(`fragment workers respect requested width ${width} without dropping source fragments`, async t => {
+    const originalHost = AT.local.callHost;
+    t.after(() => { AT.local.callHost = originalHost; });
+    const parts = Array.from({ length: 10 }, () => '図書館を開きます。');
+    const source = parts.join('');
+    const { gates, peak } = fragmentHost(new Map([[source, parts]]));
+    const result = localModel({ texts: [source], source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: width });
+    await flushFragments();
+    assert.equal(gates.length, width);
+    for (let index = 0; index < parts.length; index++) {
+      gates[index]!.resolve({ ok: true, translations: ['번역했습니다.'] });
+      await flushFragments();
+      assert.equal(gates.length, Math.min(parts.length, width + index + 1));
+    }
+    assert.deepEqual((await result).translations, [Array.from({ length: 10 }, () => '번역했습니다.').join(' ')]);
+    assert.equal(peak(), width);
+  });
+}
+
+test('shared admission rotates pending owners while preserving each owner FIFO', async () => {
+  const scheduler = engines.createFragmentScheduler(1);
+  const signal = new AbortController().signal;
+  const started: string[] = [];
+  const releases: (() => void)[] = [];
+  const jobs = [[7, 'a1'], [7, 'a2'], [7, 'a3'], [8, 'b1'], [8, 'b2'], [9, 'c1'], [9, 'c2']] as const;
+  const pending = jobs.map(([owner, text]) => scheduler.run(async () => {
+    started.push(text);
+    const gate = Promise.withResolvers<void>();
+    releases.push(gate.resolve);
+    await gate.promise;
+  }, signal, owner));
+  await flushFragments();
+  for (let index = 0; index < jobs.length; index++) {
+    assert.equal(releases.length, index + 1);
+    releases[index]!();
+    await flushFragments();
+  }
+  await Promise.all(pending);
+  assert.deepEqual(started, ['a1', 'a2', 'b1', 'c1', 'a3', 'b2', 'c2']);
+});
+
+test('lowering shared admission retains active slot accounting until those generations settle', async () => {
+  const scheduler = engines.createFragmentScheduler(8);
+  const signal = new AbortController().signal;
+  const releases: (() => void)[] = [];
+  const pending = Array.from({ length: 9 }, () => scheduler.run(async () => {
+    const gate = Promise.withResolvers<void>();
+    releases.push(gate.resolve);
+    await gate.promise;
+  }, signal));
+  await flushFragments();
+  assert.equal(releases.length, 8);
+  scheduler.setConcurrency(2);
+  for (let index = 0; index < 6; index++) {
+    releases[index]!();
+    await flushFragments();
+    assert.equal(releases.length, 8);
+  }
+  releases[6]!();
+  await flushFragments();
+  assert.equal(releases.length, 9);
+  releases[7]!();
+  releases[8]!();
+  await Promise.all(pending);
+});

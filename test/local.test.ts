@@ -11,9 +11,9 @@ const priors = local.PRIORS;
 /** The cheapest object that survives normalizeModel. */
 const record = (over: Record<string, unknown> = {}) => ({
   id: 'model-1',
-  name: 'model.gguf',
+  name: 'model.onnx',
   size: 5_000_000,
-  sourceUrl: 'https://example.test/model.gguf',
+  sourceUrl: 'https://example.test/model.onnx',
   createdAt: 1000,
   ...over
 });
@@ -364,18 +364,18 @@ test('the list is capped so one bad store cannot hang the UI', () => {
 });
 
 test('model ids are stable, unique and safe as file names', () => {
-  const first = local.makeModelId('plamo-3-translate-0.8b-Q4_K_M.gguf', 'https://a.test/x', 1);
-  assert.equal(first, local.makeModelId('plamo-3-translate-0.8b-Q4_K_M.gguf', 'https://a.test/x', 1));
-  assert.notEqual(first, local.makeModelId('plamo-3-translate-0.8b-Q4_K_M.gguf', 'https://b.test/x', 1));
-  assert.notEqual(first, local.makeModelId('plamo-3-translate-0.8b-Q4_K_M.gguf', 'https://a.test/x', 2));
+  const first = local.makeModelId('plamo-3-translate-0.8b-q4f16.onnx', 'https://a.test/x', 1);
+  assert.equal(first, local.makeModelId('plamo-3-translate-0.8b-q4f16.onnx', 'https://a.test/x', 1));
+  assert.notEqual(first, local.makeModelId('plamo-3-translate-0.8b-q4f16.onnx', 'https://b.test/x', 1));
+  assert.notEqual(first, local.makeModelId('plamo-3-translate-0.8b-q4f16.onnx', 'https://a.test/x', 2));
   for (const id of [first, local.makeModelId('../../evil/../name', 'https://a.test/x', 1), local.makeModelId('', '', 1)]) {
     assert.match(id, /^[a-z0-9][a-z0-9._-]+$/, id);
     assert.ok(!id.includes('..') && !id.includes('/'));
   }
   // The extension is stripped: the file name is a model name to the user, and
   // two quantisations of the same build must not read as two different models.
-  assert.ok(first.startsWith('plamo-3-translate-0.8b-q4_k_m-'), first);
-  assert.ok(!first.endsWith('.gguf'), first);
+  assert.ok(first.startsWith('plamo-3-translate-0.8b-q4f16-'), first);
+  assert.ok(!first.endsWith('.onnx'), first);
 });
 
 test('bytes are rendered the way the storage card shows them', () => {
@@ -484,11 +484,11 @@ test('the status sentence names the model and the failure', () => {
     '[options_stateError]: boom'
   );
   const ready = local.describeStatus(
-    local.normalizeStatus({ state: 'ready', modelName: 'plamo-3-translate-0.8b-Q4_K_M.gguf', loadMs: 250 }),
+    local.normalizeStatus({ state: 'ready', modelName: 'plamo-3-translate-0.8b-q4f16.onnx', loadMs: 250 }),
     true,
     say
   );
-  assert.ok(ready.includes('plamo-3-translate-0.8b-Q4_K_M.gguf') && ready.includes('250 ms'), ready);
+  assert.ok(ready.includes('plamo-3-translate-0.8b-q4f16.onnx') && ready.includes('250 ms'), ready);
 });
 
 /** The card the options page offers for one artefact. */
@@ -496,6 +496,7 @@ const cardById = (id: string) => local.MODEL_SOURCES.find((source: { id: string 
 
 test('every model card is an artefact the installer can fetch', () => {
   for (const source of local.MODEL_SOURCES) {
+    assert.equal(source.kind, 'onnx', 'only ONNX exports are offered');
     assert.ok(source.label.length > 0 && source.license.length > 0, source.id);
     assert.ok(source.size >= local.MIN_MODEL_BYTES && source.size <= local.MAX_MODEL_BYTES, source.id);
     assert.equal(local.normalizeDownloadUrl(source.url), source.url, `${source.id} is fetchable as written`);
@@ -504,7 +505,6 @@ test('every model card is an artefact the installer can fetch', () => {
   const onnx = cardById('plamo-3-translate-0.8b-onnx-fp16');
   const onnxQ4 = cardById('plamo-3-translate-0.8b-onnx-q4f16');
   assert.ok(onnx && onnxQ4, 'both ONNX exports are offered');
-  assert.equal(local.MODEL_SOURCES.length, 2, 'only the export this build runs is a card');
   assert.equal(onnx.kind, 'onnx');
   assert.equal(onnx.dtype, 'fp16', 'the unquantized export is a card the user can pick');
   assert.equal(onnx.size, 1_781_996_033, 'the byte count the ONNX repo serves for fp16');
@@ -551,7 +551,7 @@ test('a model is bounded by what a browser can hold', () => {
 });
 
 test('only https downloads are offered', () => {
-  assert.equal(local.normalizeDownloadUrl('http://example.test/model.gguf'), null);
+  assert.equal(local.normalizeDownloadUrl('http://example.test/model.onnx'), null);
   assert.equal(local.normalizeDownloadUrl('javascript:alert(1)'), null);
   assert.equal(local.normalizeDownloadUrl(''), null);
   assert.equal(local.normalizeDownloadUrl(undefined), null);
@@ -653,14 +653,19 @@ test('a PLaMo batch is a numbered list inside one input element', () => {
   );
 });
 
-test('only an ONNX graph is read as an installed model', () => {
+test('only installed ONNX files select a supported model backend', () => {
   assert.equal(local.modelKind({ name: 'model_q4f16.onnx' }), 'onnx');
   assert.equal(
     local.modelKind({ sourceUrl: 'https://huggingface.co/x/y/resolve/main/onnx/model_fp16.onnx' }),
     'onnx',
     'the address names the export even when the file was renamed'
   );
-  assert.equal(local.modelKind({ name: 'downloaded.bin' }), 'unknown', 'anything else is the runtime\'s verdict');
+  assert.equal(local.modelKind({ name: 'plamo-3-translate-0.8b-Q4_K_M.gguf' }), 'unknown');
+  assert.equal(local.modelKind({ sourceUrl: 'https://a.test/model.gguf' }), 'unknown');
+  assert.equal(local.modelKind({ sourceUrl: 'https://a.test/onnx/model.bin' }), 'unknown');
+  assert.equal(local.modelKind({ sourceUrl: 'https://a.test/model.onnx?download=true' }), 'onnx');
+  assert.equal(local.modelKind({ name: 'legacy.gguf', sourceUrl: 'https://a.test/onnx/model.onnx' }), 'unknown');
+  assert.equal(local.modelKind({ name: 'downloaded.bin' }), 'unknown', 'unsupported formats cannot load');
 });
 
 

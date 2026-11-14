@@ -30,15 +30,15 @@ function check(name, run, withoutSegmenter = false) {
   });
 }
 
-async function start(page, html = '<p>Original source sentence.</p>', maxChars = 0) {
-  await page.evaluate(({ markup, maxChars }) => {
+async function start(page, html = '<p>Original source sentence.</p>', maxChars = 0, mode = 'aurora') {
+  await page.evaluate(({ markup, maxChars, mode }) => {
     const root = document.querySelector('#fixture');
     root.innerHTML = markup;
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     window.source = walker.nextNode();
     window.original = source.data;
     window.originalHTML = root.innerHTML;
-    window.presentation = AT.translationtext.create(document);
+    window.presentation = AT.translationtext.create(document, mode);
     window.requests = [];
     window.translator = AT.dom.createTranslator({ doc: document, presentation,
       workLimit: maxChars ? () => ({ maxChars, maxTexts: 1 }) : undefined,
@@ -54,9 +54,110 @@ async function start(page, html = '<p>Original source sentence.</p>', maxChars =
       }
       return previewElement();
     };
-  }, { markup: html, maxChars });
+  }, { markup: html, maxChars, mode });
   await page.waitForFunction(() => requests.length === 1);
 }
+
+check('immediate mode exposes each streaming update and final canonical text without a reveal wait', async (page) => {
+  await start(page, '<p><a href="#target">Original source sentence.</a></p>', 0, 'immediate');
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture'), link = root.querySelector('a');
+    const host = source.parentElement, surface = host.shadowRoot.querySelector('.surface');
+    let clicks = 0;
+    link.addEventListener('click', (event) => { event.preventDefault(); clicks++; });
+    emit('첫 번역');
+    const first = previewElement()?.textContent;
+    emit('최신 번역');
+    const preview = previewElement();
+    const latest = preview?.textContent;
+    const range = document.createRange(); range.selectNodeContents(preview);
+    const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    const selected = selection.toString(); selection.removeAllRanges();
+    const during = { first, latest, selected, source: source.data, busy: host.getAttribute('aria-busy'),
+      same: host.firstChild === source, opacity: getComputedStyle(preview).opacity,
+      readable: [...range.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0),
+      hiddenSlot: getComputedStyle(host.shadowRoot.querySelector('slot')).display === 'none',
+      animations: surface.getAnimations({ subtree: true }).length,
+      decoration: getComputedStyle(surface).backgroundImage,
+      spans: preview.children.length };
+    requests[0].resolve(['정확한 최종 번역.']); await task;
+    link.click();
+    const final = { canonical: source.data, preview: Boolean(previewElement()),
+      slot: getComputedStyle(host.shadowRoot.querySelector('slot')).display !== 'none',
+      state: host.dataset.state, busy: host.hasAttribute('aria-busy'),
+      same: host.firstChild === source, clicks };
+    translator.restore();
+    return { during, final, restored: root.innerHTML === originalHTML, identity: link.firstChild === source };
+  });
+  assert.ok(result.during.first.startsWith('첫 번역'));
+  assert.ok(result.during.latest.startsWith('최신 번역'));
+  assert.deepEqual(result.during, {
+    first: result.during.first, latest: result.during.latest, selected: result.during.latest,
+    source: 'Original source sentence.', busy: 'true', same: true, opacity: '1',
+    readable: true, hiddenSlot: true, animations: 0, decoration: 'none', spans: 0
+  });
+  assert.deepEqual(result.final, { canonical: '정확한 최종 번역.', preview: false, slot: true,
+    state: 'translated', busy: false, same: true, clicks: 1 });
+  assert.equal(result.restored, true);
+  assert.equal(result.identity, true);
+});
+
+check('switching to immediate flushes queued previews and cancels an in-progress final reveal', async (page) => {
+  await start(page);
+  const result = await page.evaluate(async () => {
+    const host = source.parentElement;
+    emit('대기 중인 번역');
+    const queued = !previewElement();
+    presentation.setMode('immediate');
+    const flushed = previewElement()?.textContent.startsWith('대기 중인 번역');
+    presentation.setMode('aurora');
+    emit('다음 번역');
+    const stillPrevious = previewElement()?.textContent.startsWith('대기 중인 번역');
+    presentation.setMode('immediate');
+    const latest = previewElement()?.textContent.startsWith('다음 번역');
+    presentation.setMode('aurora');
+    requests[0].resolve(['최종 번역']); await task;
+    const revealing = Boolean(previewElement());
+    presentation.setMode('immediate');
+    const final = !previewElement() && getComputedStyle(host.shadowRoot.querySelector('slot')).display !== 'none';
+    const animations = host.shadowRoot.querySelector('.surface').getAnimations({ subtree: true }).length;
+    await new Promise((resolve) => setTimeout(resolve, 240));
+    const noLatePreview = !previewElement();
+    translator.restore();
+    presentation.setMode('aurora');
+    return { queued, flushed, stillPrevious, latest, revealing, final, animations, noLatePreview,
+      restored: document.querySelector('#fixture').innerHTML === originalHTML,
+      same: document.querySelector('#fixture p').firstChild === source };
+  });
+  assert.deepEqual(result, { queued: true, flushed: true, stillPrevious: true, latest: true,
+    revealing: true, final: true, animations: 0, noLatePreview: true, restored: true, same: true });
+});
+
+check('immediate mode commits non-streaming and partial results directly to the original slot', async (page) => {
+  const result = await page.evaluate(() => {
+    const root = document.querySelector('#fixture'); root.innerHTML = '<p>Original text.</p>';
+    const node = root.firstChild.firstChild;
+    const presentation = AT.translationtext.create(document, 'immediate');
+    presentation.begin(node);
+    const host = node.parentElement;
+    node.data = 'Partial translation.';
+    presentation.applied(node, false);
+    presentation.settled(node, 'partial');
+    const partial = { preview: Boolean(host.shadowRoot.querySelector('.preview')),
+      state: host.dataset.state, busy: host.hasAttribute('aria-busy'), text: host.textContent };
+    presentation.begin(node);
+    node.data = 'Final translation.';
+    presentation.applied(node, true);
+    const final = { preview: Boolean(host.shadowRoot.querySelector('.preview')),
+      state: host.dataset.state, busy: host.hasAttribute('aria-busy'), text: host.textContent };
+    presentation.restore();
+    return { partial, final, same: root.firstChild.firstChild === node };
+  });
+  assert.deepEqual(result, {
+    partial: { preview: false, state: 'partial', busy: false, text: 'Partial translation.' },
+    final: { preview: false, state: 'translated', busy: false, text: 'Final translation.' }, same: true
+  });
+});
 
 check('translated prefix consumes an estimated source prefix in one readable flow', async (page) => {
   await start(page, '<p style="width:300px;font:20px/1.5 system-ui">ABCDEFGHIJKLMNOPQRST</p>');
@@ -326,8 +427,9 @@ check('streaming coalesces bursts bounds spans and corrects an existing suffix',
   assert.equal(result.completed, 0, 'preview is not counted as a completed translation');
 });
 
-check('empty progress failure and restore cancel scheduled previews', async (page) => {
-  await start(page);
+for (const mode of ['aurora', 'immediate']) {
+check(`${mode}: empty progress failure and restore cancel previews`, async (page) => {
+  await start(page, undefined, 0, mode);
   assert.deepEqual(await page.evaluate(async () => {
     emit('임시 번역'); await waitPreview('임시 번역');
     emit('');
@@ -342,7 +444,7 @@ check('empty progress failure and restore cancel scheduled previews', async (pag
       wrappers: document.querySelectorAll('at-translation-text').length };
   }), { cleared: true, exact: true, same: true, wrappers: 0 });
 
-  await start(page);
+  await start(page, undefined, 0, mode);
   assert.deepEqual(await page.evaluate(async () => {
     emit('실패할 임시 번역'); await waitPreview('실패할 임시 번역');
     requests[0].resolve(['']);
@@ -354,9 +456,9 @@ check('empty progress failure and restore cancel scheduled previews', async (pag
   }), { exact: true, wrappers: 0, completed: 0, error: 'empty translation segment' });
 });
 
-check('page edits and detach immediately remove stale previews without resurrection', async (page) => {
+check(`${mode}: page edits and detach immediately remove stale previews without resurrection`, async (page) => {
   for (const kind of ['characterData', 'replace', 'append', 'move', 'detach']) {
-    await start(page);
+    await start(page, undefined, 0, mode);
     const result = await page.evaluate(async (kind) => {
       emit('사라져야 하는 미리보기'); await waitPreview('사라져야 하는 미리보기');
       const root = document.querySelector('#fixture');
@@ -385,6 +487,7 @@ check('page edits and detach immediately remove stale previews without resurrect
     if (kind === 'detach') assert.equal(result.finalText, '');
   }
 });
+}
 
 for (const media of [{ reducedMotion: 'reduce' }, { forcedColors: 'active' }]) {
   check(`streaming respects ${Object.keys(media)[0]} with readable selectable text`, async (page) => {

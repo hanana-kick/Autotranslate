@@ -30,6 +30,8 @@ namespace AT.dom {
     cacheScope: string;
     shouldYield: () => boolean;
     ready: Promise<void>;
+    /** Cancels this subscriber without revoking another unit's shared answer. */
+    signal?: AbortSignal;
   };
 
   /** Only what the engine touches; tests inject a duck-typed document. */
@@ -233,6 +235,66 @@ namespace AT.dom {
     const controllers = new Set<AbortController>();
     const MAX_CACHE_BYTES = 4 * 1024 * 1024;
     const MAX_CACHE_ENTRIES = 2048;
+    type SharedRequest = {
+      controller: AbortController;
+      promise: Promise<string[]>;
+      subscribers: Set<AT.TranslationProgress>;
+      previews: Map<number, string>;
+    };
+    const inFlight = new Map<string, SharedRequest>();
+
+    /** Exact request identity includes context and generation. Different packs
+     * are never merged: their numbered-segment context may change the answer. */
+    function sharedRequest(
+      key: string, texts: string[], provider: Provider, signal: AbortSignal,
+      onProgress: AT.TranslationProgress | undefined, onStart: () => void
+    ): Promise<string[]> {
+      if (signal.aborted) return Promise.reject(new DOMException('Translation cancelled', 'AbortError'));
+      let shared = inFlight.get(key);
+      let start: (() => void) | undefined;
+      if (!shared) {
+        const controller = new AbortController();
+        const result = Promise.withResolvers<string[]>();
+        shared = { controller, promise: result.promise, subscribers: new Set(), previews: new Map() };
+        inFlight.set(key, shared);
+        const entry = shared;
+        const remove = (): void => { if (inFlight.get(key) === entry) inFlight.delete(key); };
+        void result.promise.then(remove, remove);
+        start = () => {
+          onStart();
+          try {
+            void provider(texts, (index, text) => {
+              entry.previews.set(index, text);
+              for (const subscriber of entry.subscribers) subscriber(index, text);
+            }, controller.signal).then(result.resolve, result.reject);
+          } catch (error: unknown) { result.reject(error); }
+        };
+      }
+      const entry = shared;
+      const { promise, resolve, reject } = Promise.withResolvers<string[]>();
+      const preview: AT.TranslationProgress = (index, text) => onProgress?.(index, text);
+      const release = (): void => {
+        signal.removeEventListener('abort', abort);
+        entry.subscribers.delete(preview);
+        if (!entry.subscribers.size && inFlight.get(key) === entry) {
+          inFlight.delete(key);
+          entry.controller.abort();
+        }
+      };
+      const abort = (): void => {
+        release();
+        reject(new DOMException('Translation cancelled', 'AbortError'));
+      };
+      entry.subscribers.add(preview);
+      signal.addEventListener('abort', abort, { once: true });
+      void entry.promise.then(
+        answers => { release(); resolve(answers); },
+        error => { release(); reject(error); }
+      );
+      for (const [index, text] of entry.previews) preview(index, text);
+      start?.();
+      return promise;
+    }
 
     function cached(key: string): string[] | null {
       const value = cache.get(key);
@@ -622,7 +684,7 @@ namespace AT.dom {
       let aborted = false;
       const cancelled = (): boolean => {
         const abortRequested = shouldAbort?.() === true;
-        if (!aborted && epoch === generation && !abortRequested) return false;
+        if (!aborted && epoch === generation && !abortRequested && !execution?.signal?.aborted) return false;
         aborted = true;
         for (const controller of abortRequested && epoch === generation ? controllers : ownedControllers) controller.abort();
         for (const node of presented) {
@@ -684,11 +746,13 @@ namespace AT.dom {
       const keyFor = (kind: string, sources: string[]) => JSON.stringify([scope, kind, sources]);
       const ask = async (texts: string[], onProgress?: AT.TranslationProgress): Promise<string[]> => {
         if (cancelled()) return [];
-        requested += texts.length;
         let active = true;
         const controller = new AbortController();
         controllers.add(controller);
         ownedControllers.add(controller);
+        const abort = (): void => { controller.abort(); };
+        execution?.signal?.addEventListener('abort', abort, { once: true });
+        if (execution?.signal?.aborted) controller.abort();
         let canPreview = !execution;
         const queuedPreviews = new Map<number, string>();
         if (execution) void execution.ready.then(() => {
@@ -700,7 +764,8 @@ namespace AT.dom {
         const previews = new Map<number, (text: string) => string>();
         let answers: string[];
         try {
-          answers = await provider(texts, presentation && onProgress ? (index, text) => {
+          answers = await sharedRequest(JSON.stringify([epoch, scope, texts]), texts, provider, controller.signal,
+            presentation && onProgress ? (index, text) => {
             if (!active || cancelled() || !Number.isInteger(index) || index < 0 || index >= texts.length) return;
             if (text && AT.outputIssue(texts[index]!, text, true)) return;
             let compose = previews.get(index);
@@ -708,11 +773,12 @@ namespace AT.dom {
             const value = compose(text);
             if (canPreview) onProgress(index, value);
             else queuedPreviews.set(index, value);
-          } : undefined, controller.signal);
+          } : undefined, () => { requested += texts.length; });
           if (execution) await execution.ready;
         } finally {
           active = false;
           controllers.delete(controller);
+          execution?.signal?.removeEventListener('abort', abort);
           ownedControllers.delete(controller);
           queuedPreviews.clear();
         }

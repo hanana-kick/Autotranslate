@@ -8,8 +8,8 @@ function transaction(failure?: 'prepare' | 'save' | 'cleanup') {
   resetGlobals();
   const AT = load('lib/constants.js', 'lib/local.js', 'lib/modelstore.js', 'lib/modelflow.js');
   const events: string[] = [];
-  const old = { id: 'old-model', name: 'same.task', size: 1048576 };
-  const next = { id: 'new-model', name: 'same.task', size: 1048576 };
+  const old = { id: 'old-model', name: 'same.onnx', size: 1048576 };
+  const next = { id: 'new-model', name: 'same.onnx', size: 1048576 };
   let selected = old.id;
   const files = new Set([old.id]);
   AT.modelstore.requestPersistence = async () => true;

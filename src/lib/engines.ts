@@ -1,5 +1,5 @@
 // On-device translation dispatch in the background context.
-// Load after lib/constants.js, lib/browser.js.
+// Load after lib/constants.js, lib/browser.js and lib/settings.js.
 namespace AT.engines {
   const C = AT.C;
 
@@ -102,6 +102,62 @@ namespace AT.engines {
     return typeof text === 'string' && text.trim().length > 1 && /[\p{L}\p{N}]/u.test(text);
   }
 
+  /** FIFO within each owner, round-robin between owners; counting uses no slot. */
+  export interface FragmentScheduler {
+    run<T>(job: () => Promise<T>, signal: AbortSignal, owner?: number): Promise<T>;
+  }
+
+  export interface AdjustableFragmentScheduler extends FragmentScheduler {
+    setConcurrency(value: AT.settings.TranslationConcurrency): void;
+  }
+
+  export function createFragmentScheduler(concurrency: AT.settings.TranslationConcurrency): AdjustableFragmentScheduler {
+    type Entry = { start: () => void; cancel: () => void };
+    const queues = new Map<number, Entry[]>();
+    let active = 0;
+    const drain = () => {
+      while (active < concurrency && queues.size) {
+        const [owner, queue] = queues.entries().next().value!;
+        const entry = queue.shift()!;
+        queues.delete(owner);
+        if (queue.length) queues.set(owner, queue);
+        entry.start();
+      }
+    };
+    return {
+      setConcurrency(value) { concurrency = value; drain(); },
+      run<T>(job: () => Promise<T>, signal: AbortSignal, owner = 0): Promise<T> {
+        const { promise, resolve, reject } = Promise.withResolvers<T>();
+        if (signal.aborted) { reject(AT.local.cancelled()); return promise; }
+        const entry = {
+          cancel: () => {
+            const queue = queues.get(owner);
+            const index = queue?.indexOf(entry) ?? -1;
+            if (index >= 0) queue!.splice(index, 1);
+            if (queue && !queue.length) queues.delete(owner);
+            signal.removeEventListener('abort', entry.cancel);
+            reject(AT.local.cancelled());
+          },
+          start: () => {
+            signal.removeEventListener('abort', entry.cancel);
+            active++;
+            const finish = () => { active--; drain(); };
+            // Recheck on admission; an aborted queued job must never reach the host.
+            void Promise.resolve().then(() => {
+              AT.local.throwIfAborted(signal);
+              return job();
+            }).then(value => { resolve(value); finish(); }, error => { reject(error); finish(); });
+          }
+        };
+        signal.addEventListener('abort', entry.cancel, { once: true });
+        const queue = queues.get(owner);
+        if (queue) queue.push(entry); else queues.set(owner, [entry]);
+        drain();
+        return promise;
+      }
+    };
+  }
+
   export type TranslateRequest = {
     signal?: AbortSignal;
     /** Cumulative decoded preview; empty text clears an earlier attempt. */
@@ -119,7 +175,9 @@ namespace AT.engines {
     localMaxTokens?: number;
     /** Interactive pages opt into exact tokenizer-bounded source fragments. */
     sourceChunkTokens?: number;
-    fragmentConcurrency?: 1 | 2;
+    fragmentConcurrency?: AT.settings.TranslationConcurrency;
+    /** Internal shared admission, independent of this request's worker count. */
+    fragmentScheduler?: FragmentScheduler;
   };
 
   export type TranslateResult = {
@@ -238,6 +296,7 @@ namespace AT.engines {
     const started = Date.now();
     const controller = new AbortController();
     const abort = () => controller.abort();
+    let failure: unknown;
     request.signal?.addEventListener('abort', abort, { once: true });
     if (request.signal?.aborted) abort();
     const states = plans.map(parts => parts.map(() => ({ text: '', done: false })));
@@ -262,29 +321,42 @@ namespace AT.engines {
           const job = jobs[cursor++]!;
           const state = states[job.unit]![job.part]!;
           const resolved = await sources[job.unit]!;
-          const result = await translateChunk({
-            ...request, texts: [job.text.trim()], signal: controller.signal,
-            onProgress: (index, text) => {
-              if (index !== 0 || state.done || controller.signal.aborted) return;
+          const generate = async () => {
+            try {
+              const result = await translateChunk({
+                ...request, texts: [job.text.trim()], signal: controller.signal,
+                onProgress: (index, text) => {
+                  if (index !== 0 || state.done || controller.signal.aborted) return;
+                  state.text = text;
+                  publish(job.unit);
+                }
+              }, resolved);
+              const text = result.translations[0] ?? '';
+              if (!text.trim() || AT.outputIssue(job.text, text)) {
+                throw new EngineError('format', 'the on-device host returned an unusable fragment');
+              }
               state.text = text;
+              state.done = true;
               publish(job.unit);
+            } catch (error) {
+              if (!controller.signal.aborted) failure = error;
+              // Invalidate siblings before releasing this shared generation slot.
+              abort();
+              throw error;
             }
-          }, resolved);
-          const text = result.translations[0] ?? '';
-          if (!text.trim() || AT.outputIssue(job.text, text)) {
-            throw new EngineError('format', 'the on-device host returned an unusable fragment');
-          }
-          state.text = text;
-          state.done = true;
-          publish(job.unit);
+          };
+          if (request.fragmentScheduler) await request.fragmentScheduler.run(generate, controller.signal);
+          else await generate();
         }
       } catch (error) {
+        if (!controller.signal.aborted) failure = error;
         abort();
         throw error;
       }
     };
     try {
-      await Promise.all(Array.from({ length: Math.min(jobs.length, request.fragmentConcurrency === 2 ? 2 : 1) }, run));
+      const width = AT.settings.isTranslationConcurrency(request.fragmentConcurrency) ? request.fragmentConcurrency : 1;
+      await Promise.all(Array.from({ length: Math.min(jobs.length, width) }, run));
       AT.local.throwIfAborted(controller.signal);
       const outputs = new Map(unique.map((text, index) => [text, joined(states[index]!.map(part => part.text))]));
       const resolved = await Promise.all(sources);
@@ -294,6 +366,8 @@ namespace AT.engines {
         requested: unique.length,
         timing: { countMs, hostMs: Date.now() - started, chunks: jobs.length }
       };
+    } catch (error) {
+      throw failure ?? error;
     } finally {
       abort();
       request.signal?.removeEventListener('abort', abort);

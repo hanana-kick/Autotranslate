@@ -115,12 +115,12 @@ check('onboarding renders and requires a working model before Start', async () =
 check('native Fetch streams bytes into real OPFS and persists IndexedDB metadata', async () => {
   const bytes = Buffer.alloc(1024 * 1024 + 7, 165);
   let authorization;
-  await context.route('https://model-fixture.invalid/native.task', async (route) => {
+  await context.route('https://model-fixture.invalid/native.onnx', async (route) => {
     authorization = route.request().headers().authorization;
     await route.fulfill({ status: 200, headers: { 'content-type': 'application/octet-stream', 'content-length': String(bytes.length) }, body: bytes });
   });
   const result = await control.evaluate(async () => {
-    const saved = await AT.modelstore.download({ url: 'https://model-fixture.invalid/native.task' });
+    const saved = await AT.modelstore.download({ url: 'https://model-fixture.invalid/native.onnx' });
     if (!saved.ok) throw new Error(saved.error);
     const file = await AT.modelstore.read(saved.record.id);
     return { id: saved.record.id, size: file.size, first: new Uint8Array(await file.slice(0, 1).arrayBuffer())[0] };
@@ -355,13 +355,13 @@ check('source-language checklist enrolls an English page without a URL rule', as
 
 check('parallel option admits two visible units while excluding identity and numeric metadata', async () => {
   await control.goto(`chrome-extension://${extensionId}/options.html`); await optionsReady(control);
-  assert.equal(await control.locator('#parallelTranslation').isChecked(), false);
-  await control.locator('#parallelTranslation').check();
+  assert.equal(await control.locator('#parallelTranslation').inputValue(), '1');
+  await control.locator('#parallelTranslation').selectOption('2');
   await control.locator('#targetLang').selectOption('ko');
   await control.locator('#save').click();
   await until(async () => (await control.evaluate(() => AT.settings.load())).translationConcurrency === 2, 'saved parallel option');
   await control.reload(); await optionsReady(control);
-  assert.equal(await control.locator('#parallelTranslation').isChecked(), true);
+  assert.equal(await control.locator('#parallelTranslation').inputValue(), '2');
   await screenshot(control, 'options-parallel-enabled');
   const page = await fixture('/parallel-generic', `
     <article><a rel="author" href="/people/alice">Alice Smith</a>

@@ -3,6 +3,13 @@
 namespace AT.settings {
   const C = AT.C;
 
+  export type TranslationConcurrency = 1 | 2 | 4 | 8;
+  export type TranslationRendering = 'aurora' | 'immediate';
+
+  export function isTranslationConcurrency(value: unknown): value is TranslationConcurrency {
+    return value === 1 || value === 2 || value === 4 || value === 8;
+  }
+
   export type Settings = {
     version: number;
     enabled: boolean;
@@ -13,8 +20,9 @@ namespace AT.settings {
     /** Combined input and output tokens one generation may spend. */
     localMaxTokens: number;
     maxNodes: number;
-    /** Visible units or short source fragments admitted together; 1 opts into serial translation. */
-    translationConcurrency: 1 | 2;
+    /** Shared page-generation limit across tabs; 1 opts into serial translation. */
+    translationConcurrency: TranslationConcurrency;
+    translationRendering: TranslationRendering;
     showBadge: boolean;
     siteRules: AT.rules.SiteRule[];
     alwaysTranslateLanguages: string[];
@@ -30,7 +38,8 @@ namespace AT.settings {
     targetLang: string;
     sourceLang: string;
     maxNodes: number;
-    translationConcurrency?: 1 | 2;
+    translationConcurrency?: TranslationConcurrency;
+    translationRendering?: TranslationRendering;
     showBadge: boolean;
     debug: boolean;
   };
@@ -45,6 +54,7 @@ namespace AT.settings {
     localMaxTokens?: unknown;
     maxNodes?: unknown;
     translationConcurrency?: unknown;
+    translationRendering?: unknown;
     showBadge?: unknown;
     siteRules?: { pattern?: unknown; action?: unknown }[] | null;
     alwaysTranslateLanguages?: unknown;
@@ -62,7 +72,8 @@ namespace AT.settings {
       localModelId: '',
       localMaxTokens: AT.local.DEFAULT_MAX_TOKENS,
       maxNodes: C.DEFAULT_MAX_NODES,
-      translationConcurrency: 2,
+      translationConcurrency: 8,
+      translationRendering: 'aurora',
       showBadge: true,
       siteRules: [],
       alwaysTranslateLanguages: [],
@@ -131,8 +142,10 @@ namespace AT.settings {
           ? input.sourceLang
           : 'auto',
       maxNodes: clampInt(input.maxNodes, 10, 5000, base.maxNodes),
-      translationConcurrency: input.translationConcurrency === 1 || input.translationConcurrency === 2
+      translationConcurrency: isTranslationConcurrency(input.translationConcurrency)
         ? input.translationConcurrency : base.translationConcurrency,
+      translationRendering: input.translationRendering === 'aurora' || input.translationRendering === 'immediate'
+        ? input.translationRendering : base.translationRendering,
       showBadge: input.showBadge !== false,
       siteRules,
       alwaysTranslateLanguages,
@@ -157,6 +170,7 @@ namespace AT.settings {
       sourceLang: s.sourceLang,
       maxNodes: s.maxNodes,
       translationConcurrency: s.translationConcurrency,
+      translationRendering: s.translationRendering,
       showBadge: s.showBadge,
       debug: s.debug
     };

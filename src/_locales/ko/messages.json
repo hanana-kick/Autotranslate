@@ -52,8 +52,16 @@
   "options_enabled": { "message": "이 탭을 번역 대상으로 선택" },
   "options_languages": { "message": "언어" },
   "options_targetLang": { "message": "번역 언어" },
-  "options_parallelTranslation": { "message": "짧은 조각 또는 화면 안 읽기 단위를 최대 두 개씩 동시 번역" },
-  "options_parallelTranslationHint": { "message": "기본값은 켜짐입니다. 처리량이 늘 수 있지만 첫 결과는 늦어질 수 있습니다. 끄면 하나씩 번역합니다. 백그라운드 미리 번역은 항상 하나씩 진행합니다." },
+  "options_parallelTranslation": { "message": "동시 번역 조각 수" },
+  "options_parallelTranslationHint": { "message": "기본값은 8입니다. 번역 중인 모든 탭이 하나의 모델 실행기에서 이 한도를 공유합니다. 하나씩 번역하려면 1을 선택하세요. 한도를 높이면 전체 페이지 처리량이 늘 수 있지만 첫 결과는 늦어질 수 있습니다." },
+  "options_parallelTranslation1": { "message": "1 (하나씩)" },
+  "options_parallelTranslation2": { "message": "2" },
+  "options_parallelTranslation4": { "message": "4" },
+  "options_parallelTranslation8": { "message": "8 (기본값)" },
+  "options_translationRendering": { "message": "번역 표시 방식" },
+  "options_translationRenderingHint": { "message": "즉시 표시 모드는 번역이 도착하면 애니메이션이나 표시 지연 없이 보여 줍니다. 모델 생성 방식은 바뀌지 않습니다. 오로라는 동작 줄이기 설정을 따릅니다." },
+  "options_translationRenderingAurora": { "message": "오로라 (기본값)" },
+  "options_translationRenderingImmediate": { "message": "즉시 표시 (애니메이션 없음)" },
   "options_alwaysLanguages": { "message": "항상 번역할 원문 언어" },
   "options_alwaysLanguagesHint": { "message": "원문 언어는 자동 감지합니다. URL 패턴 또는 선택한 언어 중 하나가 일치하면 활성 탭을 번역합니다. 번역 대상 언어와 같은 언어는 선택해도 건너뜁니다. 탭에서 직접 끄면 탭을 닫을 때까지 자동 번역보다 우선합니다." },
   "options_rules": { "message": "항상 번역할 URL" },
@@ -90,7 +98,7 @@
     "message": "디스크에서 가져오기"
   },
   "options_pickFileHint": {
-    "message": ".onnx 그래프와 함께 같은 폴더의 tokenizer.json, tokenizer_config.json, config.json을 한 번에 선택하세요."
+    "message": "PLaMo 3 Translate 0.8B .onnx 그래프와 tokenizer.json, tokenizer_config.json, config.json을 함께 선택하세요."
   },
   "options_prepare": {
     "message": "지금 불러오기"

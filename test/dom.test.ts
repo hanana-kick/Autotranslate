@@ -1282,3 +1282,52 @@ test('observing cancellation during streaming aborts the active provider and rel
   assert.equal(source.nodeValue, 'Original streaming text');
   assert.equal(translator.stats().cached, 0);
 });
+
+test('overlapping runs share exact in-flight inputs and cancellation belongs to each subscriber', async () => {
+  const nodes = [t('shared source'), t('shared source')];
+  const gates: { signal: AbortSignal; resolve: (answers: string[]) => void }[] = [];
+  const provider = (_texts: string[], _progress: unknown, signal: AbortSignal) => {
+    const gate = Promise.withResolvers<string[]>();
+    gates.push({ signal, resolve: gate.resolve });
+    return gate.promise;
+  };
+  const { translator } = harness(el('body', {}, nodes.map(node => el('p', {}, [node]))), upcase);
+  const first = new AbortController(), second = new AbortController();
+  const execution = (signal: AbortSignal, cacheScope = 'same-context') =>
+    ({ translate: provider, cacheScope, ready: Promise.resolve(), shouldYield: () => false, signal });
+  const cancelled = translator.translateNodes([nodes[0]], execution(first.signal));
+  const surviving = translator.translateNodes([nodes[1]], execution(second.signal));
+  assert.equal(gates.length, 1);
+  first.abort();
+  await cancelled;
+  assert.equal(gates[0]!.signal.aborted, false, 'another subscriber still owns the model request');
+  assert.equal(nodes[0]!.nodeValue, 'shared source');
+  gates[0]!.resolve(['SHARED SOURCE']);
+  await surviving;
+  assert.equal(nodes[0]!.nodeValue, 'shared source');
+  assert.equal(nodes[1]!.nodeValue, 'SHARED SOURCE');
+  assert.equal(translator.restore().restored, 1);
+
+  const next = new AbortController(), other = new AbortController();
+  const left = translator.translateNodes([nodes[0]], execution(next.signal, 'left-context'));
+  const right = translator.translateNodes([nodes[1]], execution(other.signal, 'right-context'));
+  assert.equal(gates.length, 3, 'different contexts never share an in-flight request');
+  next.abort();
+  await left;
+  assert.equal(gates[1]!.signal.aborted, true, 'the last subscriber cancels its model request');
+  assert.equal(gates[2]!.signal.aborted, false);
+  translator.restore();
+  assert.equal(gates[2]!.signal.aborted, true);
+  await right;
+  const fresh = translator.translateNodes([nodes[0]], execution(new AbortController().signal, 'right-context'));
+  assert.equal(gates.length, 4, 'a restored generation never subscribes to an obsolete request');
+  gates[1]!.resolve(['STALE LEFT']);
+  gates[2]!.resolve(['STALE RIGHT']);
+  await turn();
+  assert.deepEqual(nodes.map(node => node.nodeValue), ['shared source', 'shared source']);
+  gates[3]!.resolve(['FRESH SOURCE']);
+  await fresh;
+  assert.deepEqual(nodes.map(node => node.nodeValue), ['FRESH SOURCE', 'shared source']);
+  translator.restore();
+  assert.deepEqual(nodes.map(node => node.nodeValue), ['shared source', 'shared source']);
+});

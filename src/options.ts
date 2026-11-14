@@ -11,7 +11,8 @@ namespace AT.options {
     enabled: HTMLInputElement;
     targetLang: HTMLSelectElement;
     alwaysTranslateLanguages: HTMLDivElement;
-    parallelTranslation: HTMLInputElement;
+    parallelTranslation: HTMLSelectElement;
+    translationRendering: HTMLSelectElement;
     localModel: HTMLSelectElement;
     modelList: HTMLUListElement;
     downloadModel: HTMLButtonElement;
@@ -33,7 +34,7 @@ namespace AT.options {
   }
 
   type FormValues = Pick<AT.settings.Settings,
-    'enabled' | 'targetLang' | 'sourceLang' | 'alwaysTranslateLanguages' | 'siteRules' | 'localModelId' | 'translationConcurrency'>;
+    'enabled' | 'targetLang' | 'sourceLang' | 'alwaysTranslateLanguages' | 'siteRules' | 'localModelId' | 'translationConcurrency' | 'translationRendering'>;
 
   // Set by the DOMContentLoaded handler before any listener is wired, so every
   // read below happens after the first load resolved.
@@ -54,6 +55,13 @@ namespace AT.options {
   function buildSelects(): void {
     el('targetLang').replaceChildren(
       ...C.LANGS.map((lang) => option(lang.code, `${lang.native} (${lang.code})`))
+    );
+    el('parallelTranslation').replaceChildren(
+      ...[1, 2, 4, 8].map(width => option(String(width), AT.i18n.msg(`options_parallelTranslation${width}`)))
+    );
+    el('translationRendering').replaceChildren(
+      option('aurora', AT.i18n.msg('options_translationRenderingAurora')),
+      option('immediate', AT.i18n.msg('options_translationRenderingImmediate'))
     );
     el('alwaysTranslateLanguages').replaceChildren(
       ...C.LANGS.map((lang) => {
@@ -101,7 +109,8 @@ namespace AT.options {
 
   function render(): void {
     el('targetLang').value = settings!.targetLang;
-    el('parallelTranslation').checked = settings!.translationConcurrency === 2;
+    el('parallelTranslation').value = String(settings!.translationConcurrency);
+    el('translationRendering').value = settings!.translationRendering;
     for (const input of el('alwaysTranslateLanguages').querySelectorAll<HTMLInputElement>('input')) {
       input.checked = settings!.alwaysTranslateLanguages.includes(input.value);
     }
@@ -112,11 +121,13 @@ namespace AT.options {
   }
 
   function collect(): FormValues {
+    const concurrency = Number(el('parallelTranslation').value);
     return {
       enabled: true,
       targetLang: el('targetLang').value,
       sourceLang: 'auto',
-      translationConcurrency: el('parallelTranslation').checked ? 2 : 1,
+      translationConcurrency: AT.settings.isTranslationConcurrency(concurrency) ? concurrency : settings!.translationConcurrency,
+      translationRendering: el('translationRendering').value === 'immediate' ? 'immediate' : 'aurora',
       alwaysTranslateLanguages: [...el('alwaysTranslateLanguages').querySelectorAll<HTMLInputElement>('input')]
         .filter((input) => input.checked).map((input) => input.value),
       siteRules: settings!.siteRules,

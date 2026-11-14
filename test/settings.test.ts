@@ -14,7 +14,8 @@ test('defaults are a complete, normalised object', () => {
   assert.equal(base.localModelId, '', 'nothing is downloaded out of the box');
   assert.equal(base.localMaxTokens, AT.local.DEFAULT_MAX_TOKENS, 'the budget starts at the shared default');
   assert.equal(base.maxNodes, AT.C.DEFAULT_MAX_NODES);
-  assert.equal(base.translationConcurrency, 2);
+  assert.equal(base.translationConcurrency, 8);
+  assert.equal(base.translationRendering, 'aurora');
   assert.deepEqual(base.siteRules, []);
   assert.deepEqual(base.alwaysTranslateLanguages, []);
   // The whole stored blob: an extra field here would be persisted forever.
@@ -30,6 +31,7 @@ test('defaults are a complete, normalised object', () => {
     'sourceLang',
     'targetLang',
     'translationConcurrency',
+    'translationRendering',
     'version'
   ]);
 });
@@ -120,26 +122,41 @@ test('the content snapshot carries only what a page needs', () => {
     'sourceLang',
     'targetLang',
     'translationConcurrency',
-    'translationKey'
+    'translationKey',
+    'translationRendering'
   ]);
   assert.equal(snapshot.maxNodes, 400);
   assert.equal(snapshot.debug, false);
 });
 
-test('parallel admission defaults to two while preserving an explicit serial choice', () => {
+test('parallel admission defaults to eight while preserving every explicit supported width', () => {
   const parallel = settings.normalize({});
-  const serial = settings.normalize({ translationConcurrency: 1 });
-  assert.equal(settings.defaults().translationConcurrency, 2);
-  assert.equal(parallel.translationConcurrency, 2);
-  assert.equal(settings.normalize({ translationConcurrency: 2 }).translationConcurrency, 2);
-  assert.equal(serial.translationConcurrency, 1);
-  assert.equal(settings.contentSnapshot().translationConcurrency, 2);
-  assert.equal(settings.contentSnapshot(parallel).translationConcurrency, 2);
-  assert.equal(settings.contentSnapshot(serial).translationConcurrency, 1);
-  assert.equal(settings.contentSnapshot(serial).translationKey, settings.contentSnapshot(parallel).translationKey);
-  for (const value of [undefined, 0, 3, 8, '1', '2', null, false]) {
-    assert.equal(settings.normalize({ translationConcurrency: value }).translationConcurrency, 2);
-    assert.equal(settings.normalize({ translationConcurrency: value }, serial).translationConcurrency, 1);
+  assert.equal(settings.defaults().translationConcurrency, 8);
+  assert.equal(parallel.translationConcurrency, 8);
+  assert.equal(settings.contentSnapshot().translationConcurrency, 8);
+  for (const width of [1, 2, 4, 8]) {
+    const chosen = settings.normalize({ translationConcurrency: width });
+    assert.equal(chosen.translationConcurrency, width);
+    assert.equal(settings.contentSnapshot(chosen).translationConcurrency, width);
+    assert.equal(settings.contentSnapshot(chosen).translationKey, settings.contentSnapshot(parallel).translationKey);
+    for (const value of [undefined, 0, 3, 16, '1', '2', '4', '8', null, false]) {
+      assert.equal(settings.normalize({ translationConcurrency: value }).translationConcurrency, 8);
+      assert.equal(settings.normalize({ translationConcurrency: value }, chosen).translationConcurrency, width);
+    }
+  }
+});
+
+test('rendering mode defaults safely and never changes generation identity', () => {
+  const base = settings.defaults();
+  for (const mode of ['aurora', 'immediate']) {
+    const chosen = settings.normalize({ translationRendering: mode });
+    assert.equal(chosen.translationRendering, mode);
+    assert.equal(settings.contentSnapshot(chosen).translationRendering, mode);
+    assert.equal(settings.contentSnapshot(chosen).translationKey, settings.contentSnapshot(base).translationKey);
+    for (const value of [undefined, null, false, 1, '', 'none']) {
+      assert.equal(settings.normalize({ translationRendering: value }).translationRendering, 'aurora');
+      assert.equal(settings.normalize({ translationRendering: value }, chosen).translationRendering, mode);
+    }
   }
 });
 
@@ -179,18 +196,20 @@ test('storage round-trips through normalisation', async () => {
 
   assert.deepEqual(await settings.load(), settings.normalize(undefined));
 
-  assert.equal((await settings.load()).translationConcurrency, 2);
+  assert.equal((await settings.load()).translationConcurrency, 8);
   const saved = await settings.save({ targetLang: 'ko', alwaysTranslateLanguages: ['en', 'ja', 'en'] });
   assert.equal(saved.targetLang, 'ko');
   assert.equal(store.settings.targetLang, 'ko');
   const reloaded = await settings.load();
   assert.equal(reloaded.targetLang, 'ko');
   assert.deepEqual(reloaded.alwaysTranslateLanguages, ['en', 'ja']);
-  await settings.save({ translationConcurrency: 1 });
-  assert.equal(store.settings.translationConcurrency, 1);
-  assert.equal((await settings.load()).translationConcurrency, 1);
-  await settings.save({ targetLang: 'ja' });
-  assert.equal((await settings.load()).translationConcurrency, 1, 'unrelated saves preserve the serial choice');
+  for (const width of [1, 2, 4, 8]) {
+    await settings.save({ translationConcurrency: width });
+    assert.equal(store.settings.translationConcurrency, width);
+    assert.equal((await settings.load()).translationConcurrency, width);
+    await settings.save({ targetLang: 'ja' });
+    assert.equal((await settings.load()).translationConcurrency, width, 'unrelated saves preserve the selected width');
+  }
 
   // Hand-edited garbage in storage is normalised on read.
   store.settings = { targetLang: 42, siteRules: 'nope', maxNodes: '700' };
@@ -198,7 +217,7 @@ test('storage round-trips through normalisation', async () => {
   assert.equal(repaired.targetLang, 'en');
   assert.deepEqual(repaired.siteRules, []);
   assert.equal(repaired.maxNodes, 700);
-  assert.equal(repaired.translationConcurrency, 2);
+  assert.equal(repaired.translationConcurrency, 8);
 
   // The on-device choices are stored like any other setting.
   const local = await settings.save({ localModelId: 'model-a', localMaxTokens: 2048 });
@@ -222,7 +241,7 @@ test('storage round-trips through normalisation', async () => {
   const reset = await settings.reset();
   assert.equal(store.settings.targetLang, 'en');
   assert.equal(reset.localModelId, '', 'a reset stops pointing at a model the user may have deleted');
-  assert.equal(reset.translationConcurrency, 2);
+  assert.equal(reset.translationConcurrency, 8);
 });
 
 test('loading legacy settings erases retired credentials from storage while preserving local choices', async () => {

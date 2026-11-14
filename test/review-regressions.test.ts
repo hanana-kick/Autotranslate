@@ -58,7 +58,7 @@ test('review: model download accepts a native Fetch Response', async () => {
   AT.modelstore.configure({ fetchImpl: async () => new Response(payload, {
     headers: { 'content-length': String(payload.length) }
   }) });
-  const result = await AT.modelstore.download({ url: 'https://models.example.test/model.task' });
+  const result = await AT.modelstore.download({ url: 'https://models.example.test/model.onnx' });
   assert.equal(result.ok, true, result.error);
   assert.deepEqual(memory.bytes.get(result.record.id), payload);
 });
@@ -68,7 +68,7 @@ test('review: storing a replacement does not delete an unverified working copy',
   const memory = store(AT);
   let now = 1000;
   AT.modelstore.configure({ now: () => now });
-  const ingest = () => AT.modelstore.ingest({ name: 'model.task', sourceUrl: 'https://models.example.test/model.task',
+  const ingest = () => AT.modelstore.ingest({ name: 'model.onnx', sourceUrl: 'https://models.example.test/model.onnx',
     stream: new Blob([new Uint8Array(AT.local.MIN_MODEL_BYTES)]).stream() });
   const old = await ingest();
   now += 1;

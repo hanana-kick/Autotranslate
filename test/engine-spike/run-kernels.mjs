@@ -1,4 +1,4 @@
-// Real ONNX weights + our WebGPU kernels; no build, extension, ORT or tokenizer.
+// Real ONNX q4f16 weights + our WebGPU kernels; no build, extension, ORT or tokenizer.
 //   LENGTHS=128 BATCHES=3 STEPS=4 REPEATS=1 CURRENT_ONLY=1 node test/engine-spike/run-kernels.mjs
 //   BASELINE_KERNEL=/tmp/autotranslate-kernel-baseline.ts node test/engine-spike/run-kernels.mjs
 //   MODE=heterogeneous LENGTHS=32,128,512 BATCHES=3 STEPS=32 REPEATS=1 ...
@@ -12,8 +12,8 @@
 // WARM_STEPS=4, HETERO_REQUESTS=16, RUN_TIMEOUT_MS=1800000 are configurable.
 // VARIANT_OPTIONS='{"current":{"prefillPositions":64},"tile32":{"prefillPositions":32}}'
 // computeMs is host-observed submission/queue wait, NOT a GPU timestamp.
-// CHECK_LOGITS=1 compares all active rows' vocabulary logits after the final
-// uniform-batch step; its diagnostic copy happens outside the timed workload.
+// CHECK_LOGITS=1 replays requests outside timing and captures each job's final
+// logical output step, including batches whose prompts finish on different steps.
 // UNSAFE_WEBGPU=1 opts into experimental browser features; default uses ordinary WebGPU.
 // VARIANT_OPTIONS can select matmul:"portable"|"f16"|"matrix" or attention:"decode"|"tiled".
 // mixedPositions:8..64 independently caps total tokens in mixed prefill/decode steps.
@@ -88,9 +88,19 @@ for (const source of sources) {
   }
 }
 const scripts = new Map();
-async function transpile(path) {
+async function transpile(path, captureLogits = false) {
   const source = await readFile(path, 'utf8');
-  const result = ts.transpileModule(source, {
+  let input = source;
+  if (captureLogits) {
+    const anchor = 'step(tokens, positions, cacheRows, width, collectRows, width - inputTokens);';
+    if (source.split(anchor).length !== 2) throw new Error(`Missing unique logits diagnostic anchor in ${path}`);
+    input = source.replace(anchor, `${anchor}
+          (globalThis as any).__captureKernelLogits?.(act.logits, collectRows.map(row => ({
+            id: slots[row]!.job.id, step: slots[row]!.job.generated.length + 1,
+            limit: slots[row]!.job.maxNewTokens
+          })));`);
+  }
+  const result = ts.transpileModule(input, {
     fileName: path,
     reportDiagnostics: true,
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
@@ -121,7 +131,7 @@ for (const [index, source] of sources.entries()) {
     shaderSources.push({ variant: source.name, name, path, sha256: compiled.sha256 });
     modules.push(compiled.code);
   }
-  const compiled = await transpile(source.path);
+  const compiled = await transpile(source.path, config.checkLogits);
   source.sha256 = compiled.sha256;
   scripts.set(`/kernel-${index}.js`, `(() => {
     var AT = { onnxweights: window.AT.onnxweights };
@@ -144,7 +154,8 @@ const artifact = join(qaDir, `kernels-${new Date().toISOString().replaceAll(':',
 const report = {
   version: 1, startedAt: new Date().toISOString(), config, variants: sources,
   shaderSources,
-  model: { path: modelPath, bytes: modelStat.size, mtime: modelStat.mtime.toISOString(), parserSha256: weightsSource.sha256 },
+  model: { path: modelPath, bytes: modelStat.size, mtime: modelStat.mtime.toISOString(),
+    parserSha256: weightsSource.sha256 },
   timingDefinition: 'Step wall includes encode + submission/queue wait + readback. computeMs is host wall time, not GPU timestamps. Pure and mixed phases are separate. First output may occur in prefill.',
   runs: [], comparisons: [], aggregates: [], validationErrors: [], pageErrors: [], console: [], cleanupErrors: []
 };
@@ -276,10 +287,16 @@ try {
   report.comparisons = compareRuns(report.runs);
   report.aggregates = aggregateRuns(report.runs);
   await save();
-  console.log(JSON.stringify({ artifact, runs: report.runs.length, mismatchedComparisons: report.comparisons.filter((entry) => !entry.equal).length, error: report.error ?? null }));
+  console.log(JSON.stringify({ artifact, runs: report.runs.length,
+    mismatchedComparisons: report.comparisons.filter(entry => !entry.equal).length,
+    mismatchedVariants: report.comparisons.filter(entry => entry.kind === 'variants' && !entry.equal).length,
+    error: report.error ?? null }));
 }
 if (failure) throw failure;
 if (report.validationErrors.length || report.cleanupErrors.length) throw new Error('GPU or cleanup errors; see artifact');
+if (report.comparisons.some(entry => entry.kind === 'variants' && !entry.equal)) {
+  throw new Error('Same-model variant output mismatch; see artifact');
+}
 
 function phaseTotals(samples) {
   const result = {};
@@ -349,7 +366,7 @@ function installBenchmark() {
     if (!adapter) throw new Error('No WebGPU adapter');
     if (settings.profileDispatch && !adapter.features.has('timestamp-query')) throw new Error('timestamp-query unavailable');
     const opening = settings.profileDispatch ? {
-      features: adapter.features, info: adapter.info,
+      features: adapter.features, info: adapter.info, limits: adapter.limits,
       requestDevice: options => adapter.requestDevice({ ...options,
         requiredFeatures: [...options.requiredFeatures, 'timestamp-query'] })
     } : adapter;
@@ -443,24 +460,9 @@ function installBenchmark() {
     let onComplete = null;
     record.warmup = { samples, outputs: outcomes };
     let failed;
-    let logitsBuffer;
-    // Observe allocation only; every buffer and operation remains a real WebGPU
-    // object. The full vocabulary output has a unique size in this model.
+    const captures = [];
     const profiler = settings.profileDispatch ? window.kernelProfiler.wrap(device) : null;
-    const sourceDevice = profiler?.device ?? device;
-    const measuredDevice = settings.checkLogits ? new Proxy(sourceDevice, {
-      get(target, key) {
-        if (key === 'createBuffer') return (descriptor) => {
-          const buffer = target.createBuffer(descriptor);
-          if (descriptor.size === settings.rows * model.vocab * 4 &&
-              (descriptor.usage & GPUBufferUsage.STORAGE)) logitsBuffer = buffer;
-          return buffer;
-        };
-        const value = Reflect.get(target, key, target);
-        return typeof value === 'function' ? value.bind(target) : value;
-      },
-      set(target, key, value) { return Reflect.set(target, key, value, target); }
-    }) : sourceDevice;
+    const measuredDevice = profiler?.device ?? device;
     device.pushErrorScope('validation');
     device.pushErrorScope('out-of-memory');
     device.pushErrorScope('internal');
@@ -513,29 +515,55 @@ function installBenchmark() {
       await device.queue.onSubmittedWorkDone();
       validate(outcomes, record.requests, samples);
       if (profiler) record.gpuProfile = await profiler.flush();
+      const statsAfter = activeRunner.stats();
       if (settings.checkLogits) {
-        if (!logitsBuffer) throw new Error('Vocabulary output buffer not found');
-        if (samples.at(-1)?.outputTokens !== condition.batch) {
-          throw new Error('Final step did not produce logits for the full uniform batch');
-        }
-        const logitBytes = condition.batch * model.vocab * 4;
-        const staging = device.createBuffer({ size: logitBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-        let values;
-        try {
+        // Diagnostic replay cannot contribute GPU copies or allocation to wallMs.
+        samples = []; outcomes = [];
+        const rowBytes = model.vocab * 4;
+        window.__captureKernelLogits = (buffer, rows) => {
           const encoder = device.createCommandEncoder();
-          encoder.copyBufferToBuffer(logitsBuffer, 0, staging, 0, logitBytes);
-          device.queue.submit([encoder.finish()]);
-          await staging.mapAsync(GPUMapMode.READ);
-          values = new Float32Array(staging.getMappedRange().slice(0));
-          staging.unmap();
-        } finally { staging.destroy(); }
-        if (values.some((value) => !Number.isFinite(value))) throw new Error('Nonfinite logits');
-        const key = `${condition.key}/${repeat}`;
+          let copied = false;
+          rows.forEach((row, index) => {
+            if (row.step !== row.limit) return;
+            if (captures.some(c => c.id === row.id)) throw new Error(`Duplicate final logits for job ${row.id}`);
+            const staging = device.createBuffer({ size: rowBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            captures.push({ id: row.id, step: row.step, staging });
+            encoder.copyBufferToBuffer(buffer, index * rowBytes, staging, 0, rowBytes);
+            copied = true;
+          });
+          if (copied) device.queue.submit([encoder.finish()]);
+        };
+        try {
+          await execute(record.requests, schedule === 'individual');
+          validate(outcomes, record.requests, samples);
+        } finally { delete window.__captureKernelLogits; }
+        for (const request of record.requests) {
+          const original = record.outputs.find(o => o.id === request.id);
+          const replayed = outcomes.find(o => o.id === request.id);
+          if (JSON.stringify(original?.tokens) !== JSON.stringify(replayed?.tokens)) {
+            throw new Error(`Logits diagnostic replay changed tokens for job ${request.id}`);
+          }
+          if (!captures.some(c => c.id === request.id && c.step === request.steps)) {
+            throw new Error(`Missing final logits for job ${request.id} step ${request.steps}`);
+          }
+        }
+        if (captures.length !== record.requests.length) throw new Error('Unexpected logits capture count');
+        captures.sort((a,b) => a.id - b.id);
+        const values = new Float32Array(captures.length * model.vocab);
+        for (const [index, capture] of captures.entries()) {
+          await capture.staging.mapAsync(GPUMapMode.READ);
+          values.set(new Float32Array(capture.staging.getMappedRange()), index * model.vocab);
+          capture.staging.unmap();
+        }
+        if (values.some(value => !Number.isFinite(value))) throw new Error('Nonfinite logits');
+        const keys = captures.map(({id,step}) => ({id,step}));
+        const key = `${condition.key}/${repeat}/${schedule}`;
         const reference = referenceLogits.get(key);
         if (!reference) {
-          referenceLogits.set(key, { variant, values });
-          record.logits = { referenceVariant: variant, rows: condition.batch, count: values.length };
+          referenceLogits.set(key, { variant, values, keys });
+          record.logits = { referenceVariant: variant, rows: captures.length, count: values.length, keys };
         } else {
+          if (JSON.stringify(keys) !== JSON.stringify(reference.keys)) throw new Error('Logits job/step identity differs');
           let dot = 0, aa = 0, bb = 0, error2 = 0, absolute = 0, maxAbs = 0;
           for (let i = 0; i < values.length; i++) {
             const a = reference.values[i], b = values[i], delta = a - b;
@@ -544,7 +572,7 @@ function installBenchmark() {
           }
           const cosine = dot / Math.sqrt(aa * bb);
           const relativeL2 = Math.sqrt(error2 / aa);
-          record.logits = { referenceVariant: reference.variant, rows: condition.batch, count: values.length,
+          record.logits = { referenceVariant: reference.variant, rows: captures.length, count: values.length, keys,
             cosine, relativeL2, meanAbs: absolute / values.length, maxAbs };
           if (!Number.isFinite(cosine) || cosine < 0.99999 || relativeL2 > 0.005) {
             throw new Error(`Logits differ: ${JSON.stringify(record.logits)}`);
@@ -554,12 +582,13 @@ function installBenchmark() {
       record.outputs.sort((a, b) => a.id - b.id);
       record.inputTokens = record.requests.reduce((sum, request) => sum + request.length, 0);
       record.outputTokens = record.outputs.reduce((sum, outcome) => sum + outcome.tokens.length, 0);
-      const statsAfter = activeRunner.stats();
       record.statsDelta = Object.fromEntries(Object.entries(statsAfter).map(([key, value]) => [key, value - (statsBefore[key] ?? 0)]));
     } catch (error) {
       failed = error;
       record.error = error.stack ?? String(error);
     } finally {
+      delete window.__captureKernelLogits;
+      for (const capture of captures) capture.staging.destroy();
       try { await device.queue.onSubmittedWorkDone(); } catch (error) { failed ??= error; }
       activeRunner?.dispose();
       activeRunner = null;

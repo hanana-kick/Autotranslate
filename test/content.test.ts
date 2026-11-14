@@ -576,7 +576,7 @@ test('the page context travels with the batch, and only when it says something',
   assert.equal(context.title, 'Headline', 'the title is read when no og:title is present');
 });
 
-test('visible content and chrome finish before idle prefetch of distant prose', async () => {
+test('visible content and chrome lead whole-document admission of distant prose', async () => {
   // A menu label at the very top, a paragraph on screen, another far below.
   const env = environment();
   env.page.body.childNodes.length = 0;
@@ -589,7 +589,7 @@ test('visible content and chrome finish before idle prefetch of distant prose', 
   env.page.documentElement.append(menu, body);
 
   const reply = await env.send(translateMessage(snapshot({ targetLang: 'de' })));
-  assert.equal(reply.status, 'translated', 'both visible reading units finish in the admitted wave');
+  assert.equal(reply.status, 'translated', 'the finite page finishes without an idle discovery pass');
   while (testClock.pending.some(timer => timer.delay === 0)) await testClock.run();
 
   const batches = env.recorded.batch;
@@ -601,16 +601,16 @@ test('visible content and chrome finish before idle prefetch of distant prose', 
     'menu labels travel in their own batch, marked as navigation'
   );
   const farBatch = batches.find((batch: ATNamespace) => batch.texts.includes('Far away text'));
-  assert.equal(farBatch, undefined, 'distant prose waits for idle admission');
+  assert.equal(farBatch?.role, 'article');
   const menuBatch = batches.find((batch: ATNamespace) => batch.texts.includes('Home'));
   assert.equal(menuBatch?.role, 'navigation');
-  assert.deepEqual(pageTexts(second), ['Far away text']);
+  assert.deepEqual(pageTexts(second), ['»Far away text«']);
   await env.finish();
   assert.equal(batches.at(-1)?.texts[0], 'Far away text');
   assert.deepEqual(pageTexts(second), ['»Far away text«']);
 });
 
-test('visible sidebar is dispatched before near article prefetch', async () => {
+test('visible sidebar is dispatched before near article continuation', async () => {
   const env = environment({ texts: [] });
   const article = env.page.make('article', {}, [
     env.page.make('p', { attrs: { top: '100' } }, [t('Visible main reading')]),
@@ -689,7 +689,7 @@ test('a second injection registers no extra listener', async () => {
 
 // --- translate --------------------------------------------------------------
 
-test('serial opt-out yields after one request and finishes visible text through continuations', async () => {
+test('serial opt-out completes the page with one request at a time', async () => {
   const env = environment();
   const before = pageTexts(env.page.documentElement);
   assert.deepEqual(before, DEFAULT_TEXTS);
@@ -697,9 +697,9 @@ test('serial opt-out yields after one request and finishes visible text through 
   const reply = await env.send(translateMessage(snapshot({ targetLang: 'de', sourceLang: 'auto', translationConcurrency: 1 })));
   assert.deepEqual(reply, {
     ok: true,
-    status: 'translating',
-    translated: 1,
-    requested: 1,
+    status: 'translated',
+    translated: 2,
+    requested: 2,
     failed: 0,
     error: null
   });
@@ -718,7 +718,6 @@ test('serial opt-out yields after one request and finishes visible text through 
   });
 
   assert.deepEqual(pageTexts(env.page.documentElement), wrap(DEFAULT_TEXTS), 'every text node holds its translation');
-  assert.ok(env.recorded.state.some(patch => patch.status === 'translating'));
   assert.deepEqual(env.recorded.state.at(-1),
     { type: 'at/state-changed', status: 'translated', translated: 2, error: null });
 
@@ -744,6 +743,45 @@ test('a repeated translate pass asks the provider nothing new', async () => {
     error: null
   });
   assert.deepEqual(pageTexts(env.page.documentElement), wrap(DEFAULT_TEXTS));
+});
+
+test('rendering changes apply during inference and survive later passes without a new session', async () => {
+  const gate = deferred<string[]>();
+  const env = environment({ texts: ['Pending source'], translate: () => gate.promise });
+  const modes: string[] = [];
+  let creates = 0;
+  // The DOM-free harness has no custom elements; observe the presentation
+  // boundary here, with real rendering/ownership covered by browser tests.
+  env.AT.translationtext.create = (_doc: unknown, mode: string) => {
+    creates++;
+    modes.push(mode);
+    return {
+      setMode: (next: string) => modes.push(next),
+      begin() {}, preview() {}, clearPreview() {}, applied() {}, settled() {},
+      forget() {}, restore() {}, ownsMutation: () => false
+    };
+  };
+  const running = env.send(translateMessage());
+  await drain();
+  const epoch = env.boot.state.epoch;
+  const changed = env.send(translateMessage(snapshot({ translationRendering: 'immediate' })));
+  await drain(); // Runtime message handlers run in a microtask; inference is still gated.
+  assert.equal(modes.at(-1), 'immediate', 'no wait for the pending model result');
+  assert.equal(env.boot.state.settings.translationRendering, 'immediate');
+  assert.equal(env.boot.state.epoch, epoch);
+  assert.equal(env.recorded.batch.length, 1);
+  gate.resolve(['Translated source']);
+  await Promise.all([running, changed]);
+  await env.finish();
+  await env.send(translateMessage(env.boot.state.settings));
+  assert.equal(modes.at(-1), 'immediate');
+  await env.send(translateMessage(snapshot({ translationRendering: 'aurora' })));
+  assert.equal(modes.at(-1), 'aurora');
+  assert.equal(creates, 1);
+  assert.equal(env.boot.state.epoch, epoch);
+  assert.equal(env.recorded.batch.length, 1, 'appearance changes do not regenerate translated text');
+  await env.send({ type: 'at/content-restore' });
+  assert.deepEqual(pageTexts(env.page.documentElement), ['Pending source']);
 });
 
 // --- decisions that must not translate -------------------------------------
@@ -1008,7 +1046,7 @@ test('a page with more text than one tick may take finishes on its own', async (
   try {
     await env.send(translateMessage(snapshot({ maxNodes: 40 })));
     const translated = pageTexts(env.page.body).filter((text) => text.startsWith('»'));
-    assert.equal(translated.length, 2, 'the initial pass yields after the two-slot wave');
+    assert.equal(translated.length, Math.min(40, env.AT.C.OBSERVER_BATCH_NODES), 'the initial pass respects its node budget');
     assert.ok(clock.pending.length > 0, 'the spent budget schedules the next tick without a mutation');
 
     // Nothing new in the DOM: only the self-scheduled ticks can finish it.
@@ -1063,13 +1101,10 @@ test('simultaneous inserted regions compete by visibility instead of mutation or
     ]);
     await clock.run();
     assert.deepEqual(env.recorded.batch.slice(before).flatMap((batch) => batch.texts),
-      ['New visible reply']);
+      ['New visible reply', 'Distant counter update']);
     assert.deepEqual(pageTexts(visible), ['»New visible reply«']);
-    assert.deepEqual(pageTexts(distant), ['Distant counter update']);
-    distant.attrs.top = '20';
-    env.scroll();
-    await clock.finish();
     assert.deepEqual(pageTexts(distant), ['»Distant counter update«']);
+    await clock.finish();
   } finally {
     clock.restore();
   }
@@ -1334,12 +1369,12 @@ test('a new target takes effect without waiting for the obsolete target response
 test('speed: a known continuation yields without the 300 ms mutation debounce', async () => {
   const clock = installClock();
   try {
-    // Three two-slot waves: each continuation must resume immediately.
+    // Three bounded slices: each continuation must resume immediately.
     const env = environment({ texts: [] });
     const slice = 2;
     const texts = Array.from({ length: slice * 3 }, (_, i) => 'Unique sentence number ' + i + '.');
     for (const text of texts) env.page.body.appendChild(env.page.make('p', {}, [t(text)]));
-    const first = await env.send(translateMessage(snapshot({ maxNodes: slice * 3 })));
+    const first = await env.send(translateMessage(snapshot({ maxNodes: slice })));
     assert.equal(first.translated, slice);
     assert.equal(clock.pending[0]?.delay, 0, 'work already waiting is scheduled immediately');
     await clock.run();
@@ -1347,55 +1382,44 @@ test('speed: a known continuation yields without the 300 ms mutation debounce', 
     assert.equal(clock.pending[0]?.delay, 0);
     await clock.run();
     assert.equal(env.boot.state.pipeline.stats().translated, slice * 3);
-    assert.ok((clock.pending[0]?.delay ?? 0) > 0, 'idle discovery yields instead of spinning immediately');
-    await clock.run();
-    assert.equal(clock.pending.length, 0, 'empty idle discovery leaves no polling loop');
+    assert.equal(clock.pending.length, 0, 'completed work leaves no polling loop');
     await env.send({ type: 'at/content-restore' });
     assert.deepEqual(pageTexts(env.page.documentElement), texts);
   } finally { clock.restore(); }
 });
 
-test('idle prefetch waits for stability, cancels admission on scroll and mutation, and stops in hidden documents', async () => {
+test('whole-document completion drains above, below and support content without scroll or idle delay', async () => {
   const env = environment({ texts: [] });
+  const sources = ['Visible opening prose', 'Earlier offscreen prose', 'Distant prose', 'Distant footer'];
   env.page.body.append(
-    env.page.make('p', { attrs: { top: '100' } }, [t('Visible opening prose')]),
-    env.page.make('p', { attrs: { top: '4000' } }, [t('Distant idle prose')])
+    env.page.make('p', { attrs: { top: '100' } }, [t(sources[0]!)]),
+    env.page.make('p', { attrs: { top: '-4000' } }, [t(sources[1]!)]),
+    env.page.make('p', { attrs: { top: '4000' } }, [t(sources[2]!)]),
+    env.page.make('footer', { attrs: { top: '8000' } }, [t(sources[3]!)])
   );
-  await env.send(translateMessage());
-  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), ['Visible opening prose']);
-  const firstIdle = testClock.pending.find(timer => timer.delay > 400);
-  assert.ok(firstIdle && firstIdle.delay <= 500, 'offscreen admission waits for the stable viewport delay');
-  env.scroll();
-  assert.ok(!testClock.pending.includes(firstIdle), 'scroll cancels the old idle admission immediately');
-  await testClock.run();
-  await testClock.run();
-  assert.equal(env.recorded.batch.length, 1, 'the visible-only continuation cannot prefetch');
-  const afterScroll = testClock.pending.find(timer => timer.delay > 400);
-  assert.ok(afterScroll);
-  const inserted = env.page.make('p', { attrs: { top: '200' } }, [t('New visible insertion')]);
-  env.page.body.append(inserted);
-  env.mutate([{ type: 'childList', target: env.page.body, addedNodes: [inserted] }]);
-  assert.ok(!testClock.pending.includes(afterScroll), 'mutation cancels idle admission');
-  await testClock.run();
-  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), ['Visible opening prose', 'New visible insertion']);
-  env.visibility(true);
-  await testClock.finish();
-  assert.equal(env.recorded.batch.length, 2, 'a hidden document never prefetches');
-  env.visibility(false);
-  await env.finish();
-  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts),
-    ['Visible opening prose', 'New visible insertion', 'Distant idle prose']);
-  assert.equal(testClock.pending.length, 0, 'drained work leaves no idle polling loop');
+  const first = await env.send(translateMessage(snapshot({ maxNodes: 1 })));
+  assert.equal(first.status, 'translating');
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), [sources[0]]);
+  while (testClock.pending.length) {
+    assert.ok(testClock.pending.every(timer => timer.delay === 0), 'known page work never waits for idle');
+    await testClock.run();
+  }
+  assert.deepEqual(pageTexts(env.page.body), wrap(sources));
+  assert.equal(env.boot.state.lastStatus, 'translated');
+  assert.equal(env.boot.state.lastTranslated, sources.length);
+  assert.equal(env.recorded.batch.flatMap(batch => batch.texts).length, sources.length);
+  await env.send({ type: 'at/content-restore' });
+  assert.deepEqual(pageTexts(env.page.body), sources);
 });
 
-test('an active idle quantum survives scrolling but later prefetch yields to newly visible work', async () => {
+test('an active offscreen request survives scrolling while unsent work is reprioritized', async () => {
   const idle = deferred<string[]>();
   const env = environment({ texts: [], translate: texts =>
     texts[0] === 'Active distant prose' ? idle.promise : wrap(texts) });
   const nearer = env.page.make('p', { attrs: { top: '3000' } }, [t('Active distant prose')]);
   const farther = env.page.make('p', { attrs: { top: '5000' } }, [t('Next distant prose')]);
   env.page.body.append(env.page.make('p', { attrs: { top: '100' } }, [t('Visible opening prose')]), nearer, farther);
-  await env.send(translateMessage());
+  await env.send(translateMessage(snapshot({ maxNodes: 1, translationConcurrency: 1 })));
   await testClock.run();
   assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), ['Visible opening prose', 'Active distant prose']);
   farther.attrs.top = '200';

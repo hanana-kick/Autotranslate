@@ -5,10 +5,10 @@
 // string that comes off a page is scrubbed of the token markers that would
 // otherwise let page text close an element and write the rest of the prompt.
 //
-// The element order, the language codes and the GGUF workaround below are taken
-// from the model card (`pfnet/plamo-3-translate-0.8b` and its GGUF twin) and the
-// `chat_template.jinja` shipped with it, which the builders here reproduce byte
-// for byte. Re-check all of them when the card is revised.
+// The element order and language codes follow the model card
+// (`pfnet/plamo-3-translate-0.8b`) and the shipped `chat_template.jinja`,
+// which the builders here reproduce byte for byte.
+// Re-check them when the card is revised.
 //
 // Load after lib/constants.js.
 namespace AT.plamo3 {

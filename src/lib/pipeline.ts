@@ -14,7 +14,7 @@ namespace AT.pipeline {
   /** The settings the engine needs; the rest belong to the UI. */
   export type Settings = {
     maxNodes: number;
-    translationConcurrency?: 1 | 2;
+    translationConcurrency?: 1 | 2 | 4 | 8;
   };
 
   /** One request to the translation layer: texts, the region, the page. */
@@ -24,8 +24,8 @@ namespace AT.pipeline {
     context: AT.pagecontext.PageContext | null;
     onProgress?: AT.TranslationProgress | undefined;
     signal?: AbortSignal | undefined;
-    /** Shares the page's two slots between reading units and their fragments. */
-    fragmentConcurrency?: 1 | 2;
+    /** Shares the page's selected slots between units and their fragments. */
+    fragmentConcurrency?: 1 | 2 | 4 | 8;
   };
 
   export type Request = {
@@ -38,6 +38,8 @@ namespace AT.pipeline {
     /** Bound work to the visible/next-screen reading window, yielding after
      * each inference quantum. Omit for explicit whole-document processing. */
     readingWindow?: boolean;
+    /** Keep source segmentation independent of viewport admission policy. */
+    workLimit?: AT.dom.Options['workLimit'];
     sentences?: AT.dom.Sentences | undefined;
     presentation?: AT.translationtext.Presentation | undefined;
     shouldTranslate?: ((text: string) => boolean) | undefined;
@@ -408,7 +410,10 @@ namespace AT.pipeline {
         const marker = `${element.tagName.toLowerCase()} ${element.getAttribute?.('class') ?? ''} ${element.id ?? ''}`;
         if (element.getAttribute?.('role') === 'comment' ||
             /(?:^|[\s_-])(?:comment|reply|card)(?:$|[\s_-])/.test(marker)) return element;
-        if (!block && /^(P|LI|BLOCKQUOTE|ARTICLE|DIV)$/.test(element.tagName)) block = element;
+        if (!block && (/^(P|LI|BLOCKQUOTE|ARTICLE|DIV)$/.test(element.tagName) ||
+            (!viewportMode && /^(ADDRESS|ASIDE|BODY|CAPTION|DD|DETAILS|DIALOG|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|MAIN|NAV|OL|PRE|SECTION|SUMMARY|TABLE|TBODY|TD|TFOOT|TH|THEAD|TR|UL)$/.test(element.tagName)))) {
+          block = element;
+        }
       }
       return block ?? node;
     }
@@ -442,7 +447,7 @@ namespace AT.pipeline {
         sentences: request.sentences,
         presentation: request.presentation,
         shouldTranslate: request.shouldTranslate,
-        workLimit: () => viewportMode ? viewportWork : ordinaryWork,
+        workLimit: request.workLimit ?? (() => viewportMode ? viewportWork : ordinaryWork),
         shouldAbort: request.shouldAbort,
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
         translate: (texts, onProgress, signal) => request.translate({ texts, role: 'unknown', context, onProgress, signal })
@@ -520,18 +525,19 @@ namespace AT.pipeline {
       // scheduling empty continuations. Scroll/expansion invalidation rediscovers
       // it; no source is discarded or marked translated.
       const eligible = candidates.filter((candidate) =>
-        !failures.has(ordered[Number(candidate.id)]!) && !candidate.deferred);
+        !failures.has(ordered[Number(candidate.id)]!) && !candidate.deferred && Number.isFinite(candidate.top));
       const visible = eligible.filter((candidate) => candidate.priority === 'visible');
       const offscreen = eligible.filter((candidate) => candidate.priority !== 'visible' &&
         Number.isFinite(candidate.top) && Number(candidate.top) >= height && AT.targets.isContent(candidate.role))
         .sort((left, right) => Number(left.top) - Number(right.top) || left.order - right.order);
-      const admitted = viewportMode ? (prefetch && !visible.length ? offscreen.slice(0, 1) : visible) : candidates;
+      const admitted = viewportMode ? (prefetch && !visible.length ? offscreen.slice(0, 1) : visible) : eligible;
       const plan: Plan = previousPlan ?? { nodes: ordered, cursor: 0,
         entries: AT.targets.plan(admitted, { band: height }).flatMap((group) =>
           group.ids.map((id) => ({ id, role: group.role, priority: group.priority }))) };
       const groups: AT.targets.Group[] = [];
       const count = Number.isFinite(limit) && limit > 0 ? limit : plan.entries.length;
-      const width = Math.min(count, viewportMode && !prefetch && settings.translationConcurrency === 2 ? 2 : 1);
+      const concurrency = settings.translationConcurrency ?? 1;
+      const width = Math.min(count, prefetch ? 1 : concurrency);
       const selectedUnits = new Set<Element | Text>();
       let groupChars = 0;
       // A wave is bounded as well as each model pack: scrolling must not wait
@@ -550,6 +556,7 @@ namespace AT.pipeline {
         let group = groups[groups.length - 1];
         const chars = ordered[Number(entry.id)]?.nodeValue?.length ?? 0;
         if (!group || group.role !== entry.role || group.priority !== entry.priority ||
+            (!viewportMode && unitOf(ordered[Number(group.ids[0])]!) !== unitOf(ordered[Number(entry.id)]!)) ||
             group.ids.length >= waveNodes || groupChars + chars > waveChars) {
           group = { role: entry.role, priority: entry.priority, ids: [] };
           groups.push(group);
@@ -594,8 +601,8 @@ namespace AT.pipeline {
       const perform = async (group: AT.targets.Group, ready: Promise<void>): Promise<void> => {
         if (cancelled()) return;
         // Reserve only the active wave; reprioritize retains every later node.
-        // The sequential path consumes its cursor; viewport waves rebuild so
-        // a reserved second unit can skip siblings of the first safely.
+        // Whole-page work consumes its cursor; viewport waves rebuild so a
+        // reserved second unit can skip siblings of the first safely.
         if (!viewportMode) plan.cursor += group.ids.length;
         const subset = group.ids
           .map((id) => ordered[Number(id)])
@@ -618,7 +625,7 @@ namespace AT.pipeline {
             jobRequests++;
             dispatched++;
             return request.translate({ texts, role: group.role, context: jobContext, onProgress, signal,
-              fragmentConcurrency: viewportMode && !prefetch && settings.translationConcurrency === 2 && groups.length === 1 ? 2 : 1 });
+              fragmentConcurrency: prefetch ? 1 : concurrency });
           }
         };
         subset.forEach((node) => activeNodes.add(node));
@@ -693,23 +700,45 @@ namespace AT.pipeline {
           }
         }
       };
-      for (const group of groups) {
-        if (cancelled()) break;
-        if (replanned) { yielded = true; break; }
-        if (viewportMode && inFlight.length >= width) { yielded = true; break; }
-        const node = ordered[Number(group.ids[0])];
-        if (viewportMode && node) {
-          const unit = unitOf(node);
-          if (reservedUnits.has(unit)) { yielded = true; continue; }
-          reservedUnits.add(unit);
+      if (viewportMode) {
+        for (const group of groups) {
+          if (cancelled()) break;
+          if (replanned || inFlight.length >= width) { yielded = true; break; }
+          const node = ordered[Number(group.ids[0])];
+          if (node) {
+            const unit = unitOf(node);
+            if (reservedUnits.has(unit)) { yielded = true; continue; }
+            reservedUnits.add(unit);
+          }
+          const ready = committed;
+          const job = perform(group, ready);
+          committed = job.then(() => ready);
+          inFlight.push(committed);
         }
-        const ready = committed;
-        const job = perform(group, ready);
-        committed = job.then(() => ready);
-        inFlight.push(committed);
-        if (!viewportMode) await committed;
+        await Promise.all(inFlight);
+      } else {
+        // Independent units commit as soon as ready. Only fragments belonging
+        // to the same unit serialize; a slow paragraph cannot hold another's
+        // completed translation or prevent a free slot from being refilled.
+        const active = new Set<Promise<void>>();
+        const ready = Promise.resolve();
+        while (groups.length && !cancelled() && !replanned) {
+          const next = groups.findIndex(group => !reservedUnits.has(unitOf(ordered[Number(group.ids[0])]!)));
+          if (active.size >= width || next < 0) {
+            await Promise.race(active);
+            continue;
+          }
+          const group = groups.splice(next, 1)[0]!;
+          const unit = unitOf(ordered[Number(group.ids[0])]!);
+          reservedUnits.add(unit);
+          const job = perform(group, ready).finally(() => {
+            active.delete(job);
+            reservedUnits.delete(unit);
+          });
+          active.add(job);
+        }
+        await Promise.all(active);
       }
-      await Promise.all(inFlight);
       if (viewportMode && (processedNodes || dispatched)) savedPlan = null;
       // Invalidation may arrive during the final admitted request too. Wake a
       // fresh pass even when there was no later old-plan group to interrupt.
@@ -726,7 +755,7 @@ namespace AT.pipeline {
       pass.error = error;
       const unfinished = plan.entries.some((entry) => {
         const node = ordered[Number(entry.id)];
-        return node && !dom.has(node) && !failures.has(node) && !dom.deferred(node);
+        return node && node.isConnected !== false && !dom.has(node) && !failures.has(node) && !dom.deferred(node);
       });
       if (viewportMode && !prefetch && !unfinished && !replanned) {
         savedPlan = { nodes: ordered, entries: [], cursor: 0 };
@@ -735,7 +764,7 @@ namespace AT.pipeline {
       for (const unit of continuity.keys()) if (!liveUnits.has(unit)) continuity.delete(unit);
       pass.hasMore = !cancelled() && (viewportMode
         ? replanned || unfinished || (prefetch && offscreen.length > 1)
-        : yielded ? !savedPlan || savedPlan.cursor < savedPlan.entries.length : plan.cursor < plan.entries.length);
+        : replanned || unfinished);
       // Nothing got through: fail the pass so the caller shows the host's own
       // error instead of a silent no-op. A partial pass returns normally.
       if (!cancelled() && attempted > 0 && groupFailures === attempted && !pass.hasMore) throw firstError;
@@ -777,8 +806,9 @@ namespace AT.pipeline {
       }
       const viewport = { top: 0, height: viewportHeight(), width: globalThis.innerWidth || 1200 };
       const candidates = candidatesFor(nodes, viewport);
-      const admitted = viewportMode ? candidates.filter((candidate) =>
-        !failures.has(nodes[Number(candidate.id)]!) && !candidate.deferred && candidate.priority === 'visible') : candidates;
+      const admitted = candidates.filter((candidate) =>
+        !failures.has(nodes[Number(candidate.id)]!) && !candidate.deferred && Number.isFinite(candidate.top) &&
+        (!viewportMode || candidate.priority === 'visible'));
       const entries = AT.targets.plan(admitted, { band: viewport.height }).flatMap((group) =>
         group.ids.map((id) => ({ id, role: group.role, priority: group.priority })));
       savedPlan = { nodes, entries, cursor: 0 };

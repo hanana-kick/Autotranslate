@@ -344,13 +344,18 @@ namespace AT.local {
 
   /** What an installed file is, read off its own name and the address it came
    *  from - the only identity that survives download, import and a hand-typed
-   *  URL alike. `onnx` is the Transformers.js export and is stored as a set of
-   *  files; anything else is a file the runtime's own verdict can judge. */
+   *  URL alike. Only ONNX exports are supported; unknown records remain listed
+   *  so the user can explicitly remove their stored bytes. */
   export type ModelKind = 'onnx' | 'unknown';
   export function modelKind(record: { name?: unknown; sourceUrl?: unknown }): ModelKind {
-    const text = `${String(record?.name ?? '')} ${String(record?.sourceUrl ?? '')}`.toLowerCase();
-    if (/\.onnx\b|[-/]onnx[-/]|model_(q4f16|q4|fp16)\.onnx/.test(text)) return 'onnx';
-    return 'unknown';
+    const name = String(record?.name ?? '').trim().toLowerCase();
+    if (/\.[^./]+$/.test(name)) return name.endsWith('.onnx') ? 'onnx' : 'unknown';
+    try {
+      const path = new URL(String(record?.sourceUrl ?? '')).pathname.toLowerCase();
+      return path.endsWith('.onnx') ? 'onnx' : 'unknown';
+    } catch {
+      return 'unknown';
+    }
   }
 
   /** Page text before it reaches a prompt. PLaMo's template raises on a
@@ -766,7 +771,7 @@ namespace AT.local {
       .replace(/[^a-z0-9._-]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 48);
-    const stem = base.replace(/\.(gguf|task|onnx)$/, '') || 'model';
+    const stem = base.replace(/\.onnx$/, '') || 'model';
     let hash = 2166136261;
     for (const char of `${sourceUrl}|${when}`) {
       hash ^= char.charCodeAt(0);

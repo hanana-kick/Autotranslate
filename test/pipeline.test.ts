@@ -8,6 +8,12 @@ import { load, type ATNamespace } from './helpers.ts';
 const AT = load('lib/constants.js', 'lib/pagecontext.js', 'lib/targets.js', 'lib/dom.js', 'lib/pipeline.js');
 const { pipeline } = AT;
 
+function nextTurn(): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+  setImmediate(resolve);
+  return promise;
+}
+
 type StubElement = {
   nodeType: 1;
   tagName: string;
@@ -177,7 +183,7 @@ test('a node the provider answered with nothing is retried, not marked done', as
   assert.equal(texts[0]!.nodeValue, 'Subspecies', 'the heading kept its source text');
 
   emptyFor = null;
-  const second = await translator.refresh();
+  const second = await translator.translate();
   assert.equal(second.requested, 1, 'the heading is asked again');
   assert.deepEqual(asked.at(-1), ['Subspecies'], 'and only the heading');
   assert.deepEqual(asked.flat(), ['Subspecies', 'The body', 'Subspecies'],
@@ -768,7 +774,7 @@ test('parallel mode dispatches two independent bounded comments, orders commits 
   for (let turn = 0; gates.length < 2 && turn < 20; turn++) await Promise.resolve();
   assert.equal(gates.length, 2, 'both first fragments start before either whole comment completes');
   assert.ok(gates.every(gate => gate.texts.length === 1 && gate.texts[0]!.length <= AT.C.PACKED_TEXT_CHARS));
-  assert.ok(gates.every(gate => gate.fragmentConcurrency === 1), 'two reading units share the two slots');
+  assert.ok(gates.every(gate => gate.fragmentConcurrency === 2), 'each visible unit can borrow a released background generation slot');
   assert.ok(gates[0]!.texts[0]!.startsWith('First'));
   assert.ok(gates[1]!.texts[0]!.startsWith('Second'));
   gates[1]!.resolve(gates[1]!.texts.map(text => text.toUpperCase()));
@@ -882,4 +888,131 @@ test('one visible reading unit borrows both fragment slots, idle prefetch stays 
   await translator.translate();
   await translator.prefetch();
   assert.deepEqual(widths, [2, 1]);
+});
+
+test('whole-document admission bounds each selected width and commits independent ready units', async () => {
+  for (const width of [1, 2, 4, 8]) {
+    const sources = Array.from({ length: 12 }, (_, index) => `Independent paragraph ${index}`);
+    const fixture = page(sources.map((text, index) => ({ text, top: index * 1000 })));
+    const gates: { texts: string[]; resolve: (answers: string[]) => void }[] = [];
+    let active = 0, peak = 0;
+    const translator = pipeline.create({
+      doc: fixture.document, settings: () => ({ maxNodes: 100, translationConcurrency: width }),
+      translate: async ({ texts, fragmentConcurrency }: { texts: string[]; fragmentConcurrency: number }) => {
+        assert.equal(fragmentConcurrency, width);
+        peak = Math.max(peak, ++active);
+        const gate = Promise.withResolvers<string[]>();
+        gates.push({ texts, resolve: gate.resolve });
+        try { return await gate.promise; } finally { active--; }
+      }
+    });
+    const running = translator.translate();
+    await nextTurn();
+    assert.equal(gates.length, width);
+    if (width > 1) {
+      gates[1]!.resolve(gates[1]!.texts.map(text => text.toUpperCase()));
+      await nextTurn();
+      assert.equal(fixture.texts[0]!.nodeValue, sources[0]);
+      assert.equal(fixture.texts[1]!.nodeValue, sources[1]!.toUpperCase());
+      assert.equal(gates.length, width + 1, 'a completed lower unit refills without waiting for the first');
+    }
+    for (let index = 0; index < sources.length; index++) {
+      const gate = gates[index];
+      assert.ok(gate, `request ${index} is eventually admitted at width ${width}`);
+      gate.resolve(gate.texts.map(text => text.toUpperCase()));
+      await nextTurn();
+    }
+    const result = await running;
+    assert.equal(peak, width);
+    assert.equal(result.translated, sources.length);
+    assert.equal(result.hasMore, false);
+    assert.deepEqual(fixture.texts.map(node => node.nodeValue), sources.map(text => text.toUpperCase()));
+    assert.equal(translator.restore().restored, sources.length);
+    assert.deepEqual(fixture.texts.map(node => node.nodeValue), sources);
+  }
+});
+
+test('whole-document slices finish offscreen support and exclude unmeasurable or editable sources', async () => {
+  const fixture = page([
+    { text: 'Below the document view', top: 4000 },
+    { text: 'Above the document view', top: -4000 },
+    { text: 'Visible paragraph', top: 100 },
+    { text: 'Distant footer text', top: 8000, tag: 'footer' },
+    { text: 'Clipped source', top: Infinity },
+    { text: 'Editable source', top: 200 }
+  ]);
+  const sources = fixture.texts.map(node => node.nodeValue);
+  fixture.texts[5]!.parentElement!.isContentEditable = true;
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 1, translationConcurrency: 8 }),
+    translate: async ({ texts }: { texts: string[] }) => { asked.push(...texts); return texts.map(text => text.toUpperCase()); }
+  });
+  let result = await translator.translate();
+  assert.deepEqual(asked, ['Visible paragraph']);
+  for (let pass = 0; result.hasMore && pass < 10; pass++) result = await translator.resume();
+  assert.equal(result.hasMore, false);
+  assert.equal(result.translated, 4);
+  assert.deepEqual(new Set(asked), new Set(sources.slice(0, 4)));
+  assert.equal(fixture.texts[4]!.nodeValue, 'Clipped source');
+  assert.equal(fixture.texts[5]!.nodeValue, 'Editable source');
+  assert.equal((await translator.resume()).hasMore, false);
+  assert.equal(asked.length, 4);
+  assert.equal(translator.restore().restored, 4);
+});
+
+test('whole-document duplicate units share in-flight work while context remains isolated', async () => {
+  const fixture = page([
+    { text: 'Repeated source', top: 100 },
+    { text: 'Repeated source', top: 200 },
+    { text: 'Repeated source', top: 300, tag: 'nav' }
+  ]);
+  const gates: { role: string; resolve: (answers: string[]) => void }[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100, translationConcurrency: 4 }),
+    translate: ({ role }: { role: string }) => {
+      const gate = Promise.withResolvers<string[]>();
+      gates.push({ role, resolve: gate.resolve });
+      return gate.promise;
+    }
+  });
+  const running = translator.translate();
+  await nextTurn();
+  assert.deepEqual(gates.map(gate => gate.role), ['unknown', 'navigation']);
+  gates.forEach(gate => gate.resolve(['REPEATED SOURCE']));
+  const result = await running;
+  assert.equal(result.translated, 3);
+  assert.equal(result.hasMore, false);
+  assert.equal(translator.restore().restored, 3);
+});
+
+test('whole-page admission preserves bounded source partitions and exact restoration', async () => {
+  const source = Array.from({ length: 20 }, (_, index) =>
+    `Sentence ${index} keeps the original context and never drops the remaining source.`
+  ).join(' ');
+  const requests: string[][] = [];
+  for (const readingWindow of [true, false]) {
+    const fixture = page([{ text: source, top: 100 }]);
+    const asked: string[] = [];
+    const translator = pipeline.create({
+      doc: fixture.document, settings: () => ({ maxNodes: 100, translationConcurrency: 8 }),
+      readingWindow,
+      ...(!readingWindow ? { workLimit: () => ({ maxChars: AT.C.PACKED_TEXT_CHARS, maxTexts: 1 }) } : {}),
+      sentences: { split: AT.targets.sentences, maxChars: AT.C.SENTENCE_MAX_CHARS, always: false },
+      translate: async ({ texts }: { texts: string[] }) => {
+        asked.push(...texts);
+        return texts.map(text => text.toUpperCase());
+      }
+    });
+    let result = await translator.translate();
+    for (let pass = 0; result.hasMore && pass < 20; pass++) result = await translator.resume();
+    assert.equal(result.hasMore, false);
+    assert.equal(fixture.texts[0]!.nodeValue, source.toUpperCase());
+    assert.ok(asked.every(text => text.length <= AT.C.PACKED_TEXT_CHARS));
+    assert.equal(asked.join(' ').replace(/\s+/g, ' '), source);
+    requests.push(asked);
+    translator.restore();
+    assert.equal(fixture.texts[0]!.nodeValue, source);
+  }
+  assert.deepEqual(requests[1], requests[0], 'admission must not change model inputs');
 });

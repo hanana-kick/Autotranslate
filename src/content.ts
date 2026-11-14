@@ -206,22 +206,24 @@ declare var __autotranslate: AT.content.Boot | undefined;
     return response.translations;
   }
 
+  let presentation: AT.translationtext.Presentation | undefined;
+
   /** One engine per page: it keeps the records restore() needs. */
   function ensurePipeline(settings: AT.settings.ContentSnapshot): AT.pipeline.PageTranslator {
     if (!state.pipeline) {
       const epoch = state.epoch;
       const snapshot = { ...settings };
+      presentation = AT.translationtext.create(document, settings.translationRendering ?? 'aurora');
       state.pipeline = AT.pipeline.create({
         doc: document,
-        presentation: AT.translationtext.create(document),
-        settings: () => ({ maxNodes: snapshot.maxNodes, translationConcurrency: state.settings?.translationConcurrency ?? 2 }),
-        readingWindow: true,
+        presentation,
+        settings: () => ({ maxNodes: snapshot.maxNodes, translationConcurrency: state.settings?.translationConcurrency ?? 8 }),
+        // The host owns the exact 64-source-token plan and bounded admission.
+        // Do not serialize that plan behind a second character-based split.
+        workLimit: () => ({ maxChars: 0, maxTexts: 1 }),
         shouldTranslate: (text) => !AT.isTargetLanguage(text, snapshot.targetLang),
         // A pass owns an immutable settings snapshot, not mutable global state.
         translate: (batch) => requestBatch(batch, snapshot),
-        // Keep short semantic units intact. The executor sends a small leading
-        // chunk, packs short neighbours, and progressively applies long prose.
-        sentences: { split: AT.targets.sentences, maxChars: C.SENTENCE_MAX_CHARS, always: false },
         // A restore in another task owns the page: stop writing.
         shouldAbort: () => state.stopped || state.epoch !== epoch,
         // A pass over a long page takes a minute; say so while it works.
@@ -497,53 +499,13 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.viewportTimer = 0;
   }
 
-  const IDLE_PREFETCH_MS = 500;
-  let idleTimer = 0;
-  let idleEpoch = 0;
-  let stableSince = Date.now();
-  function interruptPrefetch(): void {
-    clearTimeout(idleTimer);
-    idleTimer = 0;
-    idleEpoch++;
-    stableSince = Date.now();
-  }
-  function schedulePrefetch(): void {
-    if (idleTimer || state.stopped || !state.pipeline || document.hidden || state.working ||
-        state.timer || state.viewportTimer || state.dirty || state.continuation || state.full || state.roots.length) return;
-    const epoch = state.epoch, idle = idleEpoch, pipeline = state.pipeline;
-    idleTimer = setTimeout(() => {
-      idleTimer = 0;
-      if (epoch !== state.epoch || idle !== idleEpoch || document.hidden || state.working ||
-          state.timer || state.continuation || state.dirty || state.full || state.roots.length) return;
-      state.working = true;
-      let more = false;
-      void pipeline.prefetch().then(async (result) => {
-        if (epoch !== state.epoch || state.stopped) return;
-        more = result.hasMore && result.processedNodes > 0;
-        if (result.processedNodes) await report({ status: result.failed ? 'error' : 'translated',
-          translated: result.translated, error: result.error });
-        updateDebug(pipeline);
-      }).catch(async (error: unknown) => {
-        if (epoch === state.epoch && !state.stopped) await report({ status: 'error',
-          translated: pipeline.stats().translated, error: String((error as Error)?.message ?? error) });
-      }).finally(() => {
-        if (epoch !== state.epoch) return;
-        state.working = false;
-        if (state.dirty || state.continuation || state.full || state.roots.length) scheduleTick(state.continuation);
-        else if (more && idle === idleEpoch) schedulePrefetch();
-      });
-    }, Math.max(0, IDLE_PREFETCH_MS - (Date.now() - stableSince))) as unknown as number;
-  }
   function visibilityChanged(): void {
-    interruptPrefetch();
     state.pipeline?.invalidatePlan(true);
     if (!document.hidden) scheduleViewportPass();
   }
 
   function scheduleTick(immediate = false): void {
     if (state.stopped || !state.pipeline) return;
-    clearTimeout(idleTimer);
-    idleTimer = 0;
     if (state.working) { state.dirty = true; return; }
     if (state.timer !== 0 && immediate && !state.immediateTimer) {
       clearTimeout(state.timer);
@@ -571,7 +533,6 @@ declare var __autotranslate: AT.content.Boot | undefined;
         })
         .finally(() => {
           if (state.dirty || state.continuation) scheduleTick(state.continuation);
-          else schedulePrefetch();
         });
     }, immediate ? 0 : C.OBSERVER_DEBOUNCE_MS);
   }
@@ -661,7 +622,6 @@ declare var __autotranslate: AT.content.Boot | undefined;
   function onMutations(records: MutationRecord[]): void {
     const regions = changedRegions(records);
     if (regions === null || regions.length) {
-      interruptPrefetch();
       state.pipeline?.invalidatePlan();
     }
     enqueue(regions);
@@ -697,7 +657,6 @@ declare var __autotranslate: AT.content.Boot | undefined;
    *  and jump to whatever scrolls back into view. */
   function scheduleViewportPass(): void {
     if (!state.settings?.enabled || !state.pipeline || state.stopped) return;
-    interruptPrefetch();
     // Stop refilling the active inference window immediately. Geometry is read
     // once by the next pass, not on every scroll event.
     state.pipeline.invalidatePlan(true);
@@ -767,7 +726,6 @@ declare var __autotranslate: AT.content.Boot | undefined;
 
   function stopViewportPass(): void {
     stopViewportTimer();
-    interruptPrefetch();
     if (!state.scrollBound) return;
     const target = globalThis as unknown as ScrollTarget;
     if (typeof target.removeEventListener === 'function') {
@@ -873,6 +831,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     state.overlayClosed = false;
     const restored = state.pipeline?.restore().restored ?? 0;
     state.pipeline = null;
+    presentation = undefined;
     return restored;
   }
 
@@ -886,15 +845,18 @@ declare var __autotranslate: AT.content.Boot | undefined;
       state.targetLang = settings.targetLang;
       state.stopped = false;
     } else if (state.settings && (state.settings.debug !== settings.debug ||
-        state.settings.translationConcurrency !== settings.translationConcurrency)) {
+        state.settings.translationConcurrency !== settings.translationConcurrency ||
+        state.settings.translationRendering !== settings.translationRendering)) {
       // The overlay switch is not page content: apply it to what is already
       // translated instead of rebuilding a session to draw a box.
       const snapshot: AT.settings.ContentSnapshot = { ...state.settings, debug: settings.debug,
-        translationConcurrency: settings.translationConcurrency ?? 2 };
+        translationConcurrency: settings.translationConcurrency ?? 8,
+        translationRendering: settings.translationRendering ?? 'aurora' };
       state.settings = Object.freeze(snapshot);
       if (settings.debug) state.overlayClosed = false;
       updateDebug(state.pipeline);
     }
+    presentation?.setMode(settings.translationRendering ?? 'aurora');
     const epoch = state.epoch;
     const pipeline = ensurePipeline(settings);
     state.working = true;
@@ -918,7 +880,6 @@ declare var __autotranslate: AT.content.Boot | undefined;
           state.dirty = false;
           scheduleTick(state.continuation);
         }
-        else schedulePrefetch();
       }
     }
   }
@@ -1051,7 +1012,14 @@ declare var __autotranslate: AT.content.Boot | undefined;
     [C.MSG.CONTENT_TRANSLATE]: (message) => {
       const request = message as AT.content.TranslateRequest;
       if (state.commandPending && request.settings?.enabled && request.decision?.action !== 'skip' &&
-          state.settingsKey === sessionKey(request.settings)) return state.busy;
+          state.settingsKey === sessionKey(request.settings)) {
+        // Presentation changes take effect even while the same model request
+        // is pending; they must not wait for completion or restart inference.
+        presentation?.setMode(request.settings.translationRendering ?? 'aurora');
+        if (state.settings) state.settings = Object.freeze({ ...state.settings,
+          translationRendering: request.settings.translationRendering ?? 'aurora' });
+        return state.busy;
+      }
       const task = translate(request);
       const epoch = state.epoch;
       state.commandPending = true;

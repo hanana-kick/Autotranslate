@@ -175,7 +175,8 @@ namespace AT.hostworker {
   async function bootKernels(modelId: string): Promise<void> {
     const blob = await AT.modelstore.read(modelId);
     if (!blob) throw new Error(`model ${modelId} is not stored`);
-    const weights = AT.onnxweights.parse(await blob.arrayBuffer());
+    const buffer = await blob.arrayBuffer();
+    const weights = AT.onnxweights.parse(buffer);
     const gpu = (navigator as unknown as { gpu?: { requestAdapter: () => Promise<unknown> } }).gpu;
     const adapter = (await gpu?.requestAdapter()) as AT.kernels.GpuAdapter | null;
     if (!adapter) throw new Error('this worker has no WebGPU adapter');
@@ -214,6 +215,11 @@ namespace AT.hostworker {
   }
 
   async function boot(modelId: string, dtype: string): Promise<void> {
+    const record = await AT.modelstore.get(modelId);
+    if (record && L.modelKind(record) !== 'onnx') {
+      post({ type: L.WORKER_MESSAGE.READY, ok: false, error: 'Only ONNX models are supported; the stored file has not been deleted', code: 'worker-init' });
+      return;
+    }
     if (AT.C.ENGINE_KERNELS) {
       try {
         await bootKernels(modelId);

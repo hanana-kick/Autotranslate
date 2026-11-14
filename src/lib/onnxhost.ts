@@ -65,10 +65,40 @@ namespace AT.onnxhost {
     lastError: null
   };
 
+  // Exact, document-memory-only tokenizer work; never generated translations.
+  // Each FIFO has at most 256 entries of at most 8192 text/ID units. Large
+  // inputs still tokenize in full but are not retained.
+  const expandedTexts = new Map<string, string>();
+  const countedTexts = new Map<string, number>();
+  const encodedPrompts = new Map<string, number[]>();
+
+  function remember<T>(memo: Map<string, T>, key: string, value: T, size = 0): T {
+    if (key.length + size > 8192) return value;
+    if (memo.size >= 256) memo.delete(memo.keys().next().value!);
+    memo.set(key, value);
+    return value;
+  }
+
+  function setTokenizer(next: Tokenizer | null): void {
+    expandedTexts.clear();
+    countedTexts.clear();
+    encodedPrompts.clear();
+    tokenizer = next;
+  }
+
+  function promptIds(prompt: string): number[] {
+    const cached = encodedPrompts.get(prompt);
+    if (cached) return cached;
+    // Encode the complete rendered prompt, with the tokenizer's default
+    // special-token behavior. Source counts deliberately use a separate memo.
+    const ids = Array.from(tokenizer!(prompt).input_ids.data, Number);
+    return remember(encodedPrompts, prompt, ids, ids.length);
+  }
+
   export function configure(patch: Seams): void {
     seams = { ...seams, ...patch };
     AT.pipelinehost.installSeams(seams);
-    if (patch.tokenizer) tokenizer = patch.tokenizer;
+    if (patch.tokenizer) setTokenizer(patch.tokenizer);
   }
 
   export function install(place: 'offscreen' | 'background', report: (status: AT.local.LocalStatus) => void): AT.local.LocalStatus {
@@ -140,10 +170,12 @@ namespace AT.onnxhost {
    *  characters to their UTF-8 bytes as `<0xXX>` tokens, which are in the
    *  vocab, reproducing the ids the Rust tokenizer produces. */
   export function expandByteFallback(text: string): string {
+    const cached = expandedTexts.get(text);
+    if (cached !== undefined) return cached;
     const tok = tokenizer ?? seams.tokenizer!;
     const encoded = tok(text, { add_special_tokens: false });
     const ids = Array.from(encoded.input_ids.data as ArrayLike<number | bigint>).map(Number);
-    if (!ids.includes(0)) return text;
+    if (!ids.includes(0)) return remember(expandedTexts, text, text, text.length);
     let out = '';
     for (const ch of text) {
       const one = Array.from(tok(ch, { add_special_tokens: false }).input_ids.data as ArrayLike<number | bigint>).map(Number);
@@ -155,7 +187,7 @@ namespace AT.onnxhost {
         out += '<0x' + byte.toString(16).toUpperCase().padStart(2, '0') + '>';
       }
     }
-    return out;
+    return remember(expandedTexts, text, out, out.length);
   }
 
   /** The PFML3 prompt exactly as `AT.plamo3.buildPrompt` builds it, rendered
@@ -209,6 +241,7 @@ namespace AT.onnxhost {
       const record = await AT.modelstore.get(modelId);
       requireLifecycle(version);
       if (!record) fail('model-missing', `model ${modelId} is not stored`);
+      if (L.modelKind(record) !== 'onnx') fail('model-backend', 'Only ONNX models are supported; the stored file has not been deleted');
       state.state = 'loading';
       state.modelName = record.name;
       state.lastError = null;
@@ -218,16 +251,30 @@ namespace AT.onnxhost {
       loadedDtype = card?.dtype ?? AT.pipelinehost.dtypeOf(record.name);
       const lazy = C.ENGINE_KERNELS && Math.floor(C.ENGINE_BATCH) >= 1;
       if (lazy) {
-        const opened = await AT.pipelinehost.openTokenizer(modelId);
-        requireLifecycle(version);
-        tokenizer = opened.tokenizer;
+        // The worker opens its own model store and never needs host text or
+        // token IDs until generation. Start it alongside tokenizer I/O, but
+        // keep the shared load pending until both are ready.
+        const openingTokenizer = AT.pipelinehost.openTokenizer(modelId);
+        const openingEngine = ensureEngine(modelId);
+        try {
+          const [opened] = await Promise.all([openingTokenizer, openingEngine]);
+          requireLifecycle(version);
+          setTokenizer(opened.tokenizer);
+        } catch (error: unknown) {
+          if (version === lifecycle) stopEngine('the tokenizer could not start');
+          await openingEngine;
+          // A failed tokenizer load must not strand the next attempt on an
+          // engine that was deliberately retired alongside it.
+          if (version === lifecycle) engineUnavailable = false;
+          throw error;
+        }
       } else {
         const opened = await AT.pipelinehost.open(modelId, loadedDtype);
         if (version !== lifecycle) {
           await opened.pipe.dispose?.();
           requireLifecycle(version);
         }
-        tokenizer = opened.tokenizer;
+        setTokenizer(opened.tokenizer);
         pipe = opened.pipe;
       }
       loadedId = modelId;
@@ -310,7 +357,7 @@ namespace AT.onnxhost {
     const session = pipe;
     pipe = null;
     inlineWarmed = false;
-    tokenizer = null;
+    setTokenizer(null);
     loadedId = null;
     loadedBytes = 0;
     loadMs = null;
@@ -503,7 +550,7 @@ namespace AT.onnxhost {
 
   /** Opens the engine and waits for its session. A worker that never answers is
    *  a dead engine, caught by the same deadline the pool used. */
-  async function startEngine(): Promise<void> {
+  async function startEngine(modelId: string): Promise<void> {
     const version = lifecycle;
     // 0 is the documented way to run without the engine: the in-document
     // session answers everything, exactly as it did before the engine existed.
@@ -553,20 +600,20 @@ namespace AT.onnxhost {
       if (slot.dead) continue;
       slot.worker.postMessage({
         type: L.WORKER_MESSAGE.INIT,
-        modelId: loadedId ?? '',
+        modelId,
         dtype: loadedDtype,
         target: lastTarget
       } satisfies AT.local.WorkerInit);
     }
     await ready;
-    if (version !== lifecycle) return;
+    if (version !== lifecycle || engines !== slots) return;
     if (!liveEngines().length) disableEngine('the decode engine did not start in time');
   }
 
-  async function ensureEngine(): Promise<void> {
+  async function ensureEngine(modelId = loadedId ?? ''): Promise<void> {
     if (engineUnavailable || liveEngines().length) return;
     if (engineStarting) return await engineStarting;
-    const starting = startEngine();
+    const starting = startEngine(modelId);
     engineStarting = starting;
     try {
       await starting;
@@ -597,7 +644,7 @@ namespace AT.onnxhost {
     await L.withSignal(ensureEngine(), signal);
     L.throwIfAborted(signal);
     if (!liveEngines().length || !tokenizer) throw engineFailure('the decode engine is not running');
-    const inputIds = Array.from(tokenizer(prompt).input_ids.data as ArrayLike<number | bigint>).map(Number);
+    const inputIds = promptIds(prompt);
     const slot = acquire();
     const id = (jobId += 1);
     const tokens = await new Promise<number[]>((resolve, reject) => {
@@ -775,7 +822,7 @@ namespace AT.onnxhost {
   function answerOf(generated: unknown, prompt: string): string {
     const text = typeof generated === 'string' ? generated : '';
     if (prompt && text.startsWith(prompt)) return text.slice(prompt.length);
-    const input = tokenizer!(prompt).input_ids.data;
+    const input = promptIds(prompt);
     const decoded = tokenizer!.decode(input, { skip_special_tokens: true });
     if (decoded && text.startsWith(decoded)) return text.slice(decoded.length);
     fail('invalid-output', 'The generated response did not contain the complete decoded prompt.');
@@ -796,12 +843,17 @@ namespace AT.onnxhost {
     const leadIsPlain = hint === null || text.length >= SELF_SUFFICIENT_CHARS;
     const lead = leadIsPlain ? plain : framed;
     const cap = L.answerTokens(text, lastMaxTokens, lead);
+    const backend = liveEngines()[0] ?? 'inline';
     const answer = await generate(lead, cap, text, onProgress, signal);
     L.throwIfAborted(signal);
     if (usable(answer, text, target)) return answer;
     onProgress?.('');
     const follow = leadIsPlain ? framed : plain;
-    const retry = await generate(follow, L.answerTokens(text, lastMaxTokens, follow), text, onProgress, signal);
+    const followCap = L.answerTokens(text, lastMaxTokens, follow);
+    // Greedy generation with identical input, budget and resident backend
+    // cannot repair a script/runaway failure. Different context still retries.
+    if (follow === lead && followCap === cap && backend === (liveEngines()[0] ?? 'inline')) return '';
+    const retry = await generate(follow, followCap, text, onProgress, signal);
     L.throwIfAborted(signal);
     if (usable(retry, text, target)) return retry;
     onProgress?.('');
@@ -899,7 +951,9 @@ namespace AT.onnxhost {
   /** The tokens a prompt string costs in the model's own tokenizer. */
   function promptTokens(prompt: string): number {
     if (!tokenizer) return L.estimateTokens(prompt);
-    return Array.from(tokenizer(prompt, { add_special_tokens: false }).input_ids.data as ArrayLike<number | bigint>).length;
+    const cached = countedTexts.get(prompt);
+    if (cached !== undefined) return cached;
+    return remember(countedTexts, prompt, tokenizer(prompt, { add_special_tokens: false }).input_ids.data.length);
   }
 
   /** The tokens one segment costs inside a prompt: sanitized and byte-expanded

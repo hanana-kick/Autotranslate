@@ -1,6 +1,6 @@
 // Browser-injected diagnostics only; production device/dispatch APIs are unchanged.
 export function installKernelProfiler() {
-  const family = code => code.includes('q4: array') ? 'matmul'
+  const family = code => code.includes('q4: array') || code.includes('var<storage, read> quant: array') ? 'matmul'
     : code.includes('bestAt:') || code.includes('struct Pick {') ? 'argmax'
     : code.includes('VALUE_OFFSET:') ? 'rope-kv'
     : code.includes('QUERY_ROWS:') ? 'attention-prefill'
@@ -21,8 +21,15 @@ export function installKernelProfiler() {
       const modules = new WeakMap(), pipelines = new WeakMap(), groups = new WeakMap();
       const uniforms = new WeakSet(), values = new WeakMap();
       const waiting = [], reads = [], records = [];
+      let initializing = true;
       const queue = new Proxy(device.queue, {
         get(target, key) {
+          if (key === 'onSubmittedWorkDone') return async () => {
+            await target.onSubmittedWorkDone();
+            // Serial repacking must release timestamp resources per matrix,
+            // rather than retaining 65 query sets until create() returns.
+            if (initializing) await collectInitialization();
+          };
           if (key === 'writeBuffer') return (buffer, offset, data, ...rest) => {
             if (uniforms.has(buffer)) {
               if (offset !== 0 || rest.length) throw new Error('Profiler expects complete uniform writes');
@@ -115,7 +122,7 @@ export function installKernelProfiler() {
         },
         set(target, key, value) { return Reflect.set(target, key, value, target); }
       });
-      return {
+      const profile = {
         device: wrapped,
         sample(sample) {
           const entry = waiting.shift();
@@ -148,10 +155,8 @@ export function installKernelProfiler() {
           reads.push(read);
         },
         async initialization() {
-          // Weight preparation submits before any inference onStep callback.
-          // Keep those timings separate instead of shifting all step records.
-          while (waiting.length) this.sample({ phase: 'initialization', context: 0,
-            inputTokens: 0, outputTokens: 0, activeRows: 0 });
+          initializing = false;
+          await collectInitialization();
           return this.flush();
         },
         async flush() {
@@ -161,6 +166,12 @@ export function installKernelProfiler() {
           return records.splice(0);
         }
       };
+      const collectInitialization = async () => {
+        while (waiting.length) profile.sample({ phase: 'initialization', context: 0,
+          inputTokens: 0, outputTokens: 0, activeRows: 0 });
+        await Promise.all(reads);
+      };
+      return profile;
     },
     async bandwidth(device) {
       // Four distinct 64MiB inputs exceed a single small-cache working set.

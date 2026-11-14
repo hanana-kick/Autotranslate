@@ -382,9 +382,9 @@ function environment({
     id === 'model-a'
       ? {
           id,
-          name: 'plamo-3-translate-0.8b-Q4_K_M.gguf',
-          size: 573_125_952,
-          sourceUrl: 'https://model.localhost/plamo-3-translate-0.8b-Q4_K_M.gguf'
+          name: 'model_q4f16.onnx',
+          size: 705_040_380,
+          sourceUrl: 'https://model.localhost/model_q4f16.onnx'
         }
       : null;
 
@@ -399,7 +399,7 @@ function environment({
 }
 
 /** The name the shipped model card publishes; the host echoes it back. */
-const MODEL_NAME = 'PLaMo 3 Translate 0.8B (Q4_K_M)';
+const MODEL_NAME = 'PLaMo 3 Translate 0.8B (ONNX q4f16)';
 
 /** A host that has the model resident, in the shape `normalizeStatus` accepts. */
 const readyStatus = {
@@ -594,7 +594,8 @@ test('navigation injects the content script and asks it to translate', async () 
       targetLang: 'en',
       sourceLang: 'auto',
       maxNodes: AT.C.DEFAULT_MAX_NODES,
-      translationConcurrency: 2,
+      translationConcurrency: 8,
+      translationRendering: 'aurora',
       showBadge: true,
       debug: false,
       translationKey: AT.settings.contentSnapshot(AT.settings.defaults()).translationKey
@@ -1302,4 +1303,225 @@ test('changing parallel scheduling retargets selected tabs without unloading the
   const retarget = env.recorded.tabMessages.find(entry => entry.message.type === env.AT.C.MSG.CONTENT_TRANSLATE);
   assert.equal(retarget?.message.settings.translationConcurrency, 2);
   assert.equal(env.recorded.inline.handled.includes(env.AT.C.MSG.LOCAL_UNLOAD), false);
+});
+
+test('changing rendering mode retargets selected tabs without unloading their model', async () => {
+  const env = environment({
+    settings: { localModelId: 'model-a' }, inlineHost: 'stub', selectedTabs: [7]
+  });
+  await env.send({ type: env.AT.C.MSG.BATCH, texts: ['Hello'] });
+  env.recorded.tabMessages.length = 0;
+  env.recorded.inline.handled.length = 0;
+  await env.AT.settings.save({ translationRendering: 'immediate' });
+  await fire([]);
+  const retarget = env.recorded.tabMessages.find(entry => entry.message.type === env.AT.C.MSG.CONTENT_TRANSLATE);
+  assert.equal(retarget?.message.settings.translationRendering, 'immediate');
+  assert.equal(env.recorded.inline.handled.includes(env.AT.C.MSG.LOCAL_UNLOAD), false);
+});
+
+function scheduledBatchEnvironment(translationConcurrency: 1 | 2 | 4 | 8) {
+  const env = environment({ settings: { localModelId: 'model-a', sourceLang: 'ja', targetLang: 'ko', translationConcurrency },
+    inlineHost: 'stub', selectedTabs: [7, 8] });
+  const plans = new Map<string, string[]>();
+  const gates: { text: string; signal: AbortSignal; resolve: (reply: unknown) => void }[] = [];
+  const widths: number[] = [];
+  let active = 0;
+  let peak = 0;
+  const create = env.AT.engines.createFragmentScheduler;
+  env.AT.engines.createFragmentScheduler = (width: number) => { widths.push(width); return create(width); };
+  env.AT.local.callHost = async (message: ATNamespace, _progress: unknown, signal: AbortSignal) => {
+    if (message.type === env.AT.C.MSG.LOCAL_COUNT) {
+      assert.equal(message.sourceChunkTokens, 64);
+      return { ok: true, sourceChunks: message.texts.map((text: string) => plans.get(text) ?? [text]) };
+    }
+    assert.equal(message.type, env.AT.C.MSG.LOCAL_TRANSLATE);
+    active++;
+    peak = Math.max(peak, active);
+    const gate = deferred<unknown>();
+    gates.push({ text: message.texts[0], signal, resolve: gate.resolve });
+    try { return await env.AT.local.withSignal(gate.promise, signal); } finally { active--; }
+  };
+  const batch = (text: string, fragmentConcurrency: unknown = 2, tabId = 7) =>
+    env.send({ type: env.AT.C.MSG.BATCH, texts: [text], fragmentConcurrency }, { tab: { id: tabId } });
+  return { ...env, plans, gates, widths, batch, peak: () => peak };
+}
+
+test('tab batches share generation slots and reuse admission after the last owner finishes', async () => {
+  const env = scheduledBatchEnvironment(2);
+  const parts = ['図書館を開きます。', '本を借りられます。', '予約もできます。'];
+  env.plans.set(parts.join(''), parts);
+  const short = env.batch('今日は晴れです。');
+  await fire([]);
+  const long = env.batch(parts.join(''));
+  await fire([]);
+  assert.deepEqual(env.gates.map(gate => gate.text), ['今日は晴れです。', parts[0]]);
+  assert.deepEqual(env.widths, [2]);
+  env.gates[0]!.resolve({ ok: true, translations: ['오늘은 맑습니다.'] });
+  assert.deepEqual((await short).translations, ['오늘은 맑습니다.']);
+  await fire([]);
+  assert.equal(env.gates[2]!.text, parts[1], 'the long unit borrows the completed short unit slot');
+  const third = env.batch('明日も晴れです。');
+  await fire([]);
+  assert.deepEqual(env.widths, [2], 'a finished batch cannot replace shared admission');
+  assert.equal(env.gates.length, 3);
+  env.gates[2]!.resolve({ ok: true, translations: ['책을 빌릴 수 있습니다.'] });
+  await fire([]);
+  assert.equal(env.gates[3]!.text, '明日も晴れです。', 'admission is FIFO across batches');
+  env.gates[1]!.resolve({ ok: true, translations: ['도서관을 엽니다.'] });
+  await fire([]);
+  assert.equal(env.gates[4]!.text, parts[2]);
+  env.gates[3]!.resolve({ ok: true, translations: ['내일도 맑습니다.'] });
+  env.gates[4]!.resolve({ ok: true, translations: ['예약도 가능합니다.'] });
+  assert.deepEqual((await long).translations, ['도서관을 엽니다. 책을 빌릴 수 있습니다. 예약도 가능합니다.']);
+  await third;
+  const next = env.batch('また会いましょう。');
+  await fire([]);
+  assert.deepEqual(env.widths, [2], 'later batches reuse the extension-wide scheduler');
+  env.gates[5]!.resolve({ ok: true, translations: ['다시 만나요.'] });
+  await next;
+  assert.equal(env.peak(), 2);
+});
+
+test('stored serial width caps all overlapping batches despite requested parallel fragments', async () => {
+  const env = scheduledBatchEnvironment(1);
+  const parts = ['図書館を開きます。', '本を借りられます。'];
+  env.plans.set(parts.join(''), parts);
+  const first = env.batch(parts.join(''));
+  const second = env.batch('今日は晴れです。');
+  const third = env.batch('明日も晴れです。');
+  await fire([]);
+  for (let index = 0; index < 4; index++) {
+    assert.equal(env.gates.length, index + 1);
+    env.gates[index]!.resolve({ ok: true, translations: ['번역했습니다.'] });
+    await fire([]);
+  }
+  assert.deepEqual((await first).translations, ['번역했습니다. 번역했습니다.']);
+  assert.deepEqual((await second).translations, ['번역했습니다.']);
+  assert.deepEqual((await third).translations, ['번역했습니다.']);
+  assert.deepEqual(env.widths, [1]);
+  assert.equal(env.peak(), 1);
+});
+
+test('serial prefetch keeps one fragment worker even when the shared scheduler has two slots', async () => {
+  const env = scheduledBatchEnvironment(2);
+  const parts = ['図書館を開きます。', '本を借りられます。'];
+  env.plans.set(parts.join(''), parts);
+  const prefetch = env.batch(parts.join(''), 1);
+  await fire([]);
+  assert.equal(env.gates.length, 1);
+  const visible = env.batch('今日は晴れです。');
+  await fire([]);
+  assert.equal(env.gates[1]!.text, '今日は晴れです。');
+  env.gates[1]!.resolve({ ok: true, translations: ['오늘은 맑습니다.'] });
+  await visible;
+  await fire([]);
+  assert.equal(env.gates.length, 2, 'prefetch does not borrow a second fragment worker');
+  env.gates[0]!.resolve({ ok: true, translations: ['도서관을 엽니다.'] });
+  await fire([]);
+  assert.equal(env.gates[2]!.text, parts[1]);
+  env.gates[2]!.resolve({ ok: true, translations: ['책을 빌릴 수 있습니다.'] });
+  assert.deepEqual((await prefetch).translations, ['도서관을 엽니다. 책을 빌릴 수 있습니다.']);
+});
+
+for (const invalidation of ['OFF', 'navigation', 'settings'] as const) {
+  test(`${invalidation} cancels active and queued tab generations without leaking admission`, async () => {
+    const env = scheduledBatchEnvironment(1);
+    const parts = ['図書館を開きます。', '本を借りられます。'];
+    env.plans.set(parts.join(''), parts);
+    const active = env.batch(parts.join(''));
+    const queued = env.batch('今日は晴れです。');
+    await fire([]);
+    assert.equal(env.gates.length, 1);
+    if (invalidation === 'OFF') {
+      await env.send({ type: env.AT.C.MSG.SET_TAB_ENABLED, tabId: 7, enabled: false });
+    } else if (invalidation === 'navigation') {
+      await fire(env.events.updated, 7, { status: 'loading' }, { id: 7, url: 'https://example.com/next' });
+    } else {
+      await env.AT.settings.save({ translationConcurrency: 2 });
+    }
+    assert.equal((await active).code, 'cancelled');
+    assert.equal((await queued).code, 'cancelled');
+    assert.equal(env.gates[0]!.signal.aborted, true);
+    env.gates[0]!.resolve({ ok: true, translations: ['늦은 응답'] });
+    await fire([]);
+    assert.equal(env.gates.length, 1, 'neither the cancelled sibling nor the queued batch reaches the host');
+    if (invalidation === 'OFF') {
+      await env.send({ type: env.AT.C.MSG.SET_TAB_ENABLED, tabId: 7, enabled: true });
+    }
+    const next = env.batch('明日も晴れです。');
+    await fire([]);
+    assert.deepEqual(env.widths, [1], 'invalidation updates the existing admission instead of replacing it');
+    assert.equal(env.gates.length, 2);
+    env.gates[1]!.resolve({ ok: true, translations: ['내일도 맑습니다.'] });
+    assert.deepEqual((await next).translations, ['내일도 맑습니다.']);
+  });
+}
+
+test('tabs share one admission budget while OFF cancellation remains isolated', async () => {
+  const env = scheduledBatchEnvironment(1);
+  const first = env.batch('図書館を開きます。', 2, 7);
+  const firstQueued = env.batch('本を借りられます。', 2, 7);
+  const second = env.batch('今日は晴れです。', 2, 8);
+  const secondQueued = env.batch('明日も晴れです。', 2, 8);
+  await fire([]);
+  assert.equal(env.gates.length, 1, 'both tabs share the serial generation limit');
+  assert.deepEqual(env.widths, [1]);
+  const cancelledGate = env.gates.find(gate => gate.text === '図書館を開きます。')!;
+  await env.send({ type: env.AT.C.MSG.SET_TAB_ENABLED, tabId: 7, enabled: false });
+  assert.equal((await first).code, 'cancelled');
+  assert.equal((await firstQueued).code, 'cancelled');
+  await fire([]);
+  const survivorGate = env.gates.find(gate => gate.text === '今日は晴れです。')!;
+  assert.equal(cancelledGate.signal.aborted, true);
+  assert.equal(survivorGate.signal.aborted, false);
+  cancelledGate.resolve({ ok: true, translations: ['늦은 응답'] });
+  survivorGate.resolve({ ok: true, translations: ['오늘은 맑습니다.'] });
+  assert.deepEqual((await second).translations, ['오늘은 맑습니다.']);
+  await fire([]);
+  assert.equal(env.gates.length, 3);
+  assert.equal(env.gates[2]!.text, '明日も晴れです。');
+  env.gates[2]!.resolve({ ok: true, translations: ['내일도 맑습니다.'] });
+  assert.deepEqual((await secondQueued).translations, ['내일도 맑습니다.']);
+  assert.equal(env.peak(), 1);
+});
+
+test('batch messages clamp valid widths to the stored limit and reject invalid widths to serial', async () => {
+  for (const limit of [1, 2, 4, 8] as const) {
+    const env = scheduledBatchEnvironment(limit);
+    const admitted: number[] = [];
+    env.AT.engines.translate = async (request: ATNamespace) => {
+      admitted.push(request.fragmentConcurrency);
+      return { translations: ['번역했습니다.'], detected: 'ja' };
+    };
+    for (const requested of [1, 2, 4, 8]) {
+      assert.equal((await env.batch('今日は晴れです。', requested)).ok, true);
+      assert.equal(admitted.at(-1), Math.min(limit, requested));
+    }
+    for (const requested of [0, -1, 3, 16, 1.5, '8', null, false, {}, NaN, Infinity]) {
+      assert.equal((await env.batch('今日は晴れです。', requested)).ok, true);
+      assert.equal(admitted.at(-1), 1);
+    }
+    await env.send({ type: env.AT.C.MSG.BATCH, texts: ['今日は晴れです。'] }, { tab: { id: 7 } });
+    assert.equal(admitted.at(-1), 1, 'omitting a request width remains serial');
+  }
+});
+
+test('eight generation slots bound overlapping multi-fragment requests across tabs', async () => {
+  const env = scheduledBatchEnvironment(8);
+  const parts = Array.from({ length: 10 }, () => '図書館を開きます。');
+  env.plans.set(parts.join(''), parts);
+  const first = env.batch(parts.join(''), 8, 7);
+  const second = env.batch(parts.join(''), 8, 8);
+  await fire([]);
+  assert.equal(env.gates.length, 8);
+  for (let index = 0; index < 20; index++) {
+    env.gates[index]!.resolve({ ok: true, translations: ['번역했습니다.'] });
+    await fire([]);
+    assert.equal(env.gates.length, Math.min(20, 9 + index));
+  }
+  const expected = Array.from({ length: 10 }, () => '번역했습니다.').join(' ');
+  assert.deepEqual((await first).translations, [expected]);
+  assert.deepEqual((await second).translations, [expected]);
+  assert.deepEqual(env.widths, [8]);
+  assert.equal(env.peak(), 8, 'tab and fragment worker counts do not multiply the GPU budget');
 });

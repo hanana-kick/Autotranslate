@@ -51,11 +51,16 @@
           <label for="targetLang" data-i18n="options_targetLang"></label>
           <select id="targetLang"></select>
         </div>
-        <label class="switch">
-          <input type="checkbox" id="parallelTranslation" aria-describedby="parallelTranslationHint" />
-          <span data-i18n="options_parallelTranslation"></span>
-        </label>
+        <div class="field">
+          <label for="parallelTranslation" data-i18n="options_parallelTranslation"></label>
+          <select id="parallelTranslation" aria-describedby="parallelTranslationHint"></select>
+        </div>
         <p class="hint" id="parallelTranslationHint" data-i18n="options_parallelTranslationHint"></p>
+        <div class="field">
+          <label for="translationRendering" data-i18n="options_translationRendering"></label>
+          <select id="translationRendering" aria-describedby="translationRenderingHint"></select>
+        </div>
+        <p class="hint" id="translationRenderingHint" data-i18n="options_translationRenderingHint"></p>
       </at-panel>
 
       <at-panel>
@@ -93,6 +98,7 @@
     <script src="lib/browser.js"></script>
     <script src="lib/rules.js"></script>
     <script src="lib/local.js"></script>
+    <script src="lib/onnxweights.js"></script>
     <script src="lib/modelstore.js"></script>
     <script src="lib/modelflow.js"></script>
     <script src="lib/settings.js"></script>

@@ -336,6 +336,8 @@ function validate(): Check {
 
 function compile(): string | null {
   if (!existsSync(TSC)) return 'typescript is not installed (run npm install)';
+  // TypeScript does not remove outputs of deleted source files.
+  rmSync(COMPILED, { recursive: true, force: true });
   return tsc('tsconfig.json', true);
 }
 

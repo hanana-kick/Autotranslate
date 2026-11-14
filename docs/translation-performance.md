@@ -1,5 +1,11 @@
 # Translation performance: 0.1.4
 
+> **Current shipping format: ONNX only.** The extension retains the existing
+> PLaMo 3 q4f16 custom WebGPU kernels and ONNX Runtime fallback. GGUF loading,
+> tokenizers, shaders and benchmark entry points have been removed. GGUF
+> measurements below are historical evidence, not currently supported paths.
+> This cutover changes supported formats, not the accepted ONNX arithmetic.
+
 ## Removed scheduling overhead
 
 The identified 0.1.3 scheduling regressions were outside the locked inference SDK/model:
@@ -2752,3 +2758,1863 @@ Verification: TypeScript checks; Chrome/Firefox build and package gates;
 affected suites rerun (final background/content run: 82/82, preceding
 engine/pipeline focused cases passed); installed-extension browser regression
 suite 17/17, plus the real-model Japanese scenario above.
+
+## Scroll-stop completion: shared fragment admission
+
+The acceptance metric is now the time from the **last actual scroll event**
+until **all eligible visible-at-rest targets have final committed translations**.
+First preview latency is not the success criterion. The harness confirms
+100ms of scroll quiet but retains the preceding event timestamp as t0.
+Work begun while scrolling remains included as in-flight work; no fresh
+cohort target was already complete at t0. Cached revisits are separate.
+
+### Change
+
+`AT.engines.createFragmentScheduler` provides FIFO admission of individual
+generations. The background shares one scheduler across overlapping batches
+from a tab, capped at its stored one/two-slot setting. Every visible parallel
+unit can request two internal workers, so completion of a short unit frees
+its slot for another fragment of a long unit immediately. Counting does not
+occupy a generation slot. Idle prefetch retains one worker.
+
+Queued cancellation removes work before generation. A failed fragment
+cancels only its own request's siblings, while other units continue.
+OFF/navigation/settings invalidation preserves tab ownership and cannot
+let stale cleanup remove a newer scheduler. Ordered source-prefix display,
+exact restoration, 64-source-token partitions, 480-character DOM quanta,
+model weights and GPU kernels are unchanged.
+
+### Actual installed Chrome evaluation
+
+Frozen baseline: the verified build from `5b71786`, copied before rebuilding.
+Both builds used the same Japanese-to-Korean fixtures, 1440×1600 viewport,
+warm q4f16 model and two-slot setting. Three rounds per scenario per build;
+baseline rounds ran before candidate rounds. Installed hashes differ only
+for `background.js`, `lib/pipeline.js` and `lib/engines.js`.
+
+| Visible-at-rest cohort | Baseline median ms | Shared-slot median ms | Observed median reduction | Baseline range ms | Shared-slot range ms |
+|---|---:|---:|---:|---:|---:|
+| Short comment + long paragraph | 12822.0 | 10151.7 | 20.8% | 10150.1–13135.4 | 9963.9–10420.1 |
+| Four reading units | 10372.8 | 10347.8 | 0.2% | 9931.0–12275.8 | 10122.5–10823.6 |
+
+The mixed-length scenario confirms the intended borrowing behavior: in the
+candidate's first round, the short comment released its slot at t0+677ms
+and the long paragraph's next fragment started immediately, before its
+first fragment finished at t0+2812ms. The baseline waited for the long
+paragraph's first fragment to finish before dispatching its second.
+This is host-request admission evidence, not a GPU utilization measurement.
+
+The four-unit result is effectively unchanged: a 25ms median difference
+does not establish an improvement against this variation. Even the mixed
+scenario has overlapping ranges, and the baseline's fastest round is near
+the candidate median. Report 20.8% as the observed median reduction in
+this experiment, **not a stable or universal speedup**. More simultaneous
+work can lengthen individual generations; filling slots alone does not
+guarantee faster completion for every viewport. Fixed DOM-wave boundaries
+and single-request tails remain.
+
+All 12 fresh runs passed, with 18/18 targets complete per build and no
+omitted failures. Every paired full output was identical across builds.
+Actual peak host generations remained two. Scroll-away/back checks in both
+directions retained completed DOM, issued no new generations and had zero
+remaining completion time. In-flight cancellation restored exact originals
+and left no presentation hosts, including after the host became idle.
+Final and restored screenshots were inspected.
+
+Evidence:
+- `test-results/browser/scroll-completion-baseline/scroll-completion-baseline.json`
+- `test-results/browser/scroll-completion-shared/scroll-completion-candidate.json`
+- `test-results/browser/scroll-completion-comparison.json`
+
+Verification: TypeScript checks; 156 focused engine/background/pipeline/content
+cases exercised (155 initially passed; the new borrowing test's empty-clear
+callback expectation was corrected and its rerun passed); Chrome/Firefox
+build and package verification; the real-model scroll scenarios above.
+No cold-start, public-site or sub-second full-viewport completion claim is made.
+
+## Quantified viewport-completion targets on M5
+
+These are proposed acceptance targets, not achieved public-site results.
+The hardware check reports Apple M5, 10 GPU cores and 24 GiB unified memory.
+Apple specifies 153 GB/s shared whole-chip bandwidth; this is not sustained
+WebGPU bandwidth. The main display uses a 3200x1350 logical desktop, whereas
+the historical public-page sample below used a 1280x1000 CSS viewport.
+Do not scale text workload by display pixel area.
+
+### Observed workload and provisional standard
+
+Re-analysis of `test-results/browser/site-matrix-live/youtube-comments.json`
+uses seven whole-viewport comment cohorts from the Japanese video
+`https://www.youtube.com/watch?v=DBjiUz0H9HY`. Exclude the three reply-only
+cohorts (`open-first-thread`, `load-more-first-replies`, `open-second-thread`),
+already-Korean units and sources without Japanese kana. Authors and IDs
+are outside the comment-body selector. Counts include revisits.
+
+| Population | Measured value |
+| --- | ---: |
+| Whole-viewport observations / distinct comment bodies | 7 / 40 |
+| Mean eligible bodies per observation | 7.57 |
+| Range of eligible bodies per observation | 5–10 |
+| Mean original UTF-16 code units per observation | 1031 |
+| Range of original code units per observation | 286–1843 |
+
+This is a single-page convenience sample, not a cross-site average.
+An intersecting comment contributes its entire source, including text beyond
+the viewport or a collapsed preview. Several stored source strings are
+truncated to 180 characters, but `sourceChars` retains their full lengths.
+Do not tokenize those prefixes and call the result the full workload.
+
+The independent Japanese calibration in
+`test-results/browser/length6-comparison/chunk-benchmark.json` contains
+868 source code units / 318 source tokens. Its 64-token serial partition
+generated 886 decode tokens. Applying those ratios gives approximately
+378 source / 1052 generated tokens per sampled viewport: **an estimate from
+one calibration document**, not measured token counts for those comments.
+Adopt a provisional standard of **8 bodies, 400 source tokens, approximately
+1100 generated tokens**, and report actual tokens on every future run.
+Prompt overhead is additional; fragment length and longest output must also
+be recorded. English is excluded from this performance population.
+
+### Hardware feasibility
+
+At context 128, the existing ideal streamed-weight roofline gives 784.8
+aggregate decode tok/s at B2 and 3039.6 at B8. Generating 1100 tokens alone
+therefore costs at least 1.40s / 0.362s under those optimistic assumptions,
+before prefill, dispatch, UI work and unequal sequence tails. Larger contexts
+make this worse. These are conditional bandwidth bounds, not measured rates.
+Fresh completion in 200ms requires 5500 aggregate output tok/s, already above
+both scenarios. Kernel optimization alone cannot satisfy that target under
+this execution model.
+
+The Japanese calibration completed in mean 5.032s at width 2 and 3.177s at
+width 8; the latter actually had six live fragments. Linear workload scaling
+to the sampled mean gives approximately 6.0s / 3.8s. This is a planning
+estimate, not a public-page prediction. Production currently admits two
+generations. The newer installed-extension scroll fixtures still measured
+10.152s and 10.348s medians for their different two-/four-body workloads.
+
+### Acceptance targets
+
+Measure from the last actual scroll event to all eligible bodies at that
+position having final translated text painted, with no remaining source
+overlay or busy effect. Count quiet-period detection and final animation
+inside the interval; first preview is not completion. Fix the cohort at
+scroll stop, retain unfinished cases as deadline misses, and separately
+report new arrivals, warm/cold model state and cache/pretranslation coverage.
+
+| Workload/state | Proposed p50 | Proposed p95 |
+| --- | ---: | ---: |
+| Warm, ordinary scrolling; provisional standard viewport | 100ms | 200ms |
+| Warm, entirely unseen standard viewport; no prior translation | 4s | 6s |
+
+The first row is the **instant-completion SLO**; 500ms is a long-tail alert,
+not an alternative definition of instant. The second is an engineering
+milestone requiring improved scheduling/concurrency, not an instant claim.
+Model loading is reported separately and is not covered by these warm SLOs.
+Existing four-/three-round experiments do not establish population p95.
+
+Reserving 50ms of the 200ms budget for selection/presentation leaves 150ms
+for inference. Using the calibration's end-to-end work-equivalent throughput
+allows only about 26 residual output tokens at width 2 or 42 at width 8:
+roughly **98% / 97% of a 1100-token workload must already be processed**.
+These rounded requirements are optimistic necessary conditions, not
+sufficient ones: a new request still pays prefill and a sequential tail.
+In practice aim for all visible bodies to have completed cached results.
+The 50ms presentation allocation is a target, not the current fade duration.
+
+Track **whole-viewport readiness**, not just per-body cache hit rate.
+For illustration only, independent 95% per-body readiness gives
+`0.95 ** 8 = 66.3%` all-ready viewports; 95% all-ready requires
+`0.95 ** (1 / 8) = 99.36%` per body. Real hits are correlated, so measure
+the viewport event directly. Reuse completed translations and pretranslate
+likely next content while the current screen is being read; a new distant
+scroll jump remains a fresh-inference case rather than a hidden SLO pass.
+
+This analysis reuses recorded browser experiments and recomputes counts,
+token calibration and budgets locally. It adds no new live-browser speed
+measurement and makes no claim of Reddit/Pixiv/news/PDF-wide average load.
+
+## PLaMo 3 ONNX versus GGUF: direct browser kernels
+
+The four user-provided files in `weight/plamo-3-translate-0.8b-GGUF/`
+now load directly from the extension's model file picker. This is not
+a llama.cpp/native companion integration or a GGUF-to-ONNX conversion.
+The parser validates PLaMo 3 geometry and preserves packed GGML weights;
+the existing scheduler/attention engine dispatches per-matrix quantized
+GEMV/GEMM kernels. Embedded vocabulary, special tokens and chat template
+produce the tokenizer sidecars during import. Unsupported architectures
+fail rather than falling back to ONNX Runtime.
+
+ONNX describes a computational graph and tensors; GGUF stores tensors
+and model/tokenizer metadata, with the architecture supplied by the
+inference engine. Neither container itself determines throughput.
+These files differ in quantization policy as well as container, so
+this comparison does not isolate a pure container-format speed effect.
+
+### Weight traffic and numerical checks
+
+| Variant | File bytes | Matrix bytes per decode step | Embedding bytes |
+| --- | ---: | ---: | ---: |
+| ONNX q4f16 | 705701446 | 385204224 | 330301440 |
+| GGUF Q2_K | 410138816 | 352923648 | 54190080 |
+| GGUF Q3_K_M | 486385856 | 412397568 | 70963200 |
+| GGUF Q4_0 | 547543232 | 451620864 | 92897280 |
+| GGUF Q4_K_M | 573126848 | 477204480 | 92897280 |
+
+Matrix bytes sum packed linear weights and their scales, excluding norms,
+KV/activation traffic and repeated reads. ONNX counts its uploaded FP32
+scales. This is an inventory-based lower bound, not measured DRAM traffic.
+GGUF embeddings are decoded one requested row at a time; shrinking this
+table saves storage/residency but does not save a full-table read per token.
+All four GGUF files have a 135475200-byte Q6_K output matrix, versus
+87736320 bytes for ONNX Q4 including scales. Q4_K_M therefore has about
+24% more per-step matrix bytes than ONNX despite its smaller file;
+Q2_K reduces that inventory by only about 8.4%.
+
+The names are mixed-precision policies, not uniform bit widths. Q4_0
+also contains Q4_1, Q3_K_M contains Q4_K and Q5_K, and Q4_K_M contains
+Q6_K. All seven required block formats are supported without requantizing.
+The GGUF output matrix exceeds WebGPU's baseline 128MiB binding limit;
+the engine requests a larger supported limit and rejects incapable devices.
+
+Independent `gguf-py` 0.19.0 dequantization of actual tensor rows was
+compared against CPU row decoding and browser GPU matrix multiplication:
+49 GPU cases across seven formats, GEMV widths 1/2/8 and GEMM widths 9/33
+with both FP32 and FP16 staging. CPU values matched exactly. Maximum
+GPU error scaled by `1 + abs(reference)` was below 0.000009.
+FP16 staging uses an explicitly FP16-rounded reference; its separate
+maximum drift from full-precision operands was 0.020618.
+Evidence: `test-results/browser/gguf-numerics/numerics.json`;
+harness: `test/engine-spike/check-gguf.mjs` with `GGUF_REFERENCE`
+pointing to independently generated packed rows and dequantized values.
+
+For all four actual GGUF files, the full 107520-token vocabulary matched
+ONNX. Three Japanese prompt cases, including repeated spaces and emoji,
+produced identical rendered prompts and token IDs. RoPE frequencies
+differed by at most 1.14e-13. Norms differed by up to 0.000782 because
+the GGUF/ONNX exports retain different precision; the quantized models
+are not bit-identical mathematical models.
+
+The [upstream model card](https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF)
+reports FLORES Ja↔multilingual scores of 36.08 for BF16, 35.90 for
+Q4_K_M, 34.97 for Q4_0, 35.32 for Q3_K_M and 33.56 for Q2_K.
+These are publisher results, not our Japanese→Korean quality measurements.
+Block layouts follow upstream
+[ggml-quants.c](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-quants.c)
+and [ggml-common.h](https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-common.h);
+PLaMo geometry follows
+[plamo3.cpp](https://github.com/ggml-org/llama.cpp/blob/master/src/models/plamo3.cpp).
+
+### Installed extension completion measurements
+
+M5 / 24GiB, headed Chrome 143.0.7499.4, ordinary WebGPU (no unsafe
+features), eight fixed Japanese comments to Korean, warm model, two
+measured rounds after an eight-request warmup. A single case translates
+the first comment; the eight-request case translates all comments as
+independent sequences. Source counts were identical across all five
+models: `[22,22,21,17,21,20,20,26]`.
+
+| Model | Single completion mean ms | Eight-request completion mean ms | Single pure decode tok/s | Eight-request pure decode tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| ONNX q4f16 | 1398 | 2458 | 66.8 | 298.5 |
+| GGUF Q4_K_M | 5010 | 6698 | 17.3 | 95.6 |
+| GGUF Q4_0 | 3221 | 5115 | 26.1 | 121.4 |
+| GGUF Q3_K_M | 3776 | 5815 | 21.4 | 105.7 |
+| GGUF Q2_K | 3903 | 5839 | 19.9 | 106.7 |
+
+Completion includes counting, prompt construction, inference and output
+validation; it excludes model loading and DOM presentation. Pure decode
+counters exclude mixed prefill/decode steps and aggregate all active
+sequences. Output length differs by quantization. Models ran in fixed
+order and two rounds are insufficient for tail latency or thermal
+normalization. ONNX single runs were 1143/1653ms and eight-request runs
+2024/2893ms, so these means are not precision claims.
+
+All 20 measured cohorts passed automatic output validation on the
+`kernels` backend; all four files imported through the real options UI.
+Manual inspection of the first eight-request round found the 14-day
+loan term, no abolition of paper books, free Saturday sessions and
+non-disclosure of reading history preserved in every variant.
+Q2_K nevertheless changed “understood the meaning” to “it was meaningful”
+in the first comment and rendered model loading as “모델 로플” in another.
+Q4_0 produced the awkward “첫 번째 번”. Automatic validity is therefore
+not semantic quality certification; eight short sources cannot establish
+general quality rankings.
+
+Evidence: `test-results/browser/gguf-installed/gguf-comparison.json`,
+including full source/output text, timings, installed hashes and status.
+`gguf-<variant>-options.png` records actual imported-model UI state.
+The harness status request was corrected to use the options→background
+route before this completed run; no application fallback was introduced.
+
+### Equal-token kernel workload
+
+Separate headed-browser runs used identical synthetic 128-token prompts,
+32 generated tokens per sequence, widths 1/8, two repeats, a 64-position
+prefill budget and four warmup tokens. EOS stopping was disabled.
+Each model ran serially; no extension/tokenizer/translation formatting
+was inside these timings. Rates sum phase tokens divided by phase wall
+time across the two repeats, not the arithmetic mean of per-run rates.
+
+| Model | Width 1 prefill tok/s | Width 8 prefill tok/s | Width 1 decode tok/s | Width 8 decode tok/s |
+| --- | ---: | ---: | ---: | ---: |
+| ONNX q4f16 | 980.1 | 790.3 | 135.5 | 443.2 |
+| GGUF Q4_K_M | 435.9 | 543.7 | 20.2 | 139.7 |
+| GGUF Q4_0 | 701.4 | 797.8 | 39.6 | 209.6 |
+| GGUF Q3_K_M | 601.4 | 542.0 | 27.1 | 148.7 |
+| GGUF Q2_K | 568.3 | 546.8 | 28.4 | 142.5 |
+
+Width 8 is aggregate throughput, not per-sequence TPS. The first output
+token belongs to prefill; pure decode has 31 steps per sequence. The
+eight-request scheduler shares a total 64-position prefill budget, not
+64 positions per request. Short synthetic runs can differ substantially
+from real translation rates above and must not replace completion latency.
+Artifacts: `test-results/browser/gguf-kernels-<variant>/kernels-*.json`.
+
+The throughput gap survives identical token counts. For Q4_K_M single
+decode, 3059.1 of 3065.8ms across the measured steps was host-observed
+GPU submission/queue completion; command encoding took 5.6ms and readback
+1.1ms. Thus this workload is not principally limited by tokenizer or UI
+rendering. These counters are not GPU timestamp attribution and do not
+separate dequantization from matrix multiplication or attention.
+
+Q4_K_M has 1.24× the linear-weight inventory but takes about 6.7× the
+ONNX single-decode time in this fixed workload. File size/ideal bandwidth
+alone does not explain the gap. [INFERENCE] The new direct packed-block
+shader's instruction/load layout and dequantization work are major
+optimization candidates; this experiment does not measure their separate
+costs. Q2_K being slower than Q4_0 despite fewer bytes is further evidence
+that smallest storage is not the same as fastest kernel execution.
+
+**Decision:** keep ONNX q4f16 as the speed-oriented default. GGUF support
+is functional and reduces download/resident embedding size, but this
+implementation does not yet justify a default switch. Among these GGUF
+runs Q4_0 was fastest; Q4_K_M is the publisher's quality-oriented choice.
+Do not select Q2_K solely for speed or infer that native llama.cpp has
+these same performance characteristics.
+
+The next performance comparison should isolate packed GEMV by format
+and the Q6_K vocabulary head, then evaluate block-wise scale reuse and
+vectorized unpacking against the same independent numerical references.
+Repacking at load time is another tradeoff, but must report expanded
+resident bytes and load time rather than disguising them as native GGUF
+memory savings. No viewport-completion SLO is claimed by these format tests.
+
+Validation completed: both TypeScript configurations, 152 focused
+loader/storage/model-flow/host tests, 49 independent GPU numerical cases,
+20 installed-extension cohorts and 20 fixed-token kernel runs.
+
+## Q4_K_M packed-kernel optimization and engine boundary
+
+This follow-up targets `plamo-3-translate-0.8b-Q4_K_M.gguf`, whose
+linear matrices use Q4_K and Q6_K. The original source and installed
+Chrome build were preserved in `/tmp/autotranslate-q4km-baseline/`
+before editing; benchmark reports retain source/installed-file hashes.
+
+### Measured bottleneck and changes
+
+Baseline GPU timestamp profiling at width 8 attributed approximately
+92% of pure decode GPU time to linear matrix dispatches. Gate/up took
+119.7ms, down 54.6ms and the vocabulary head 58.6ms out of 296.9ms
+over seven measured decode steps. In prefill, matrices took approximately
+91% of the measured GPU time. These intrusive timestamp runs identify
+work categories, not production latency; small dispatches are quantized
+to coarse timestamp increments. Width-1 decode shares a compute pass,
+so its profile cannot isolate individual matrices.
+
+`src/lib/kernelgguf.ts` now decodes four adjacent Q4_K/Q6_K values
+together. Each vector shares packed word loads and its scale/minimum;
+GEMV reuses the resulting weight vector across active sequences.
+Q6_K's 210-byte block stride is handled with explicit half-word-aligned
+loads, rather than expanding or requantizing the weights. GEMM loads
+adjacent columns and transposes into bounded scalar workgroup storage
+before its existing 4×4 register microtiles consume them. FP16 staging
+remains optional; accumulation remains FP32.
+
+`src/lib/kernels.ts` no longer creates ONNX GEMV/GEMM/packing pipelines
+or submits an empty ONNX repacking pass for a fully GGUF model.
+Only the formats present in the model compile their matrix pipelines.
+Packed resident-weight bytes are unchanged: this speedup does not hide
+a larger FP16 weight copy or lower precision.
+
+The diagnostic adapter wrapper in `test/engine-spike/run-kernels.mjs`
+now forwards device limits when enabling timestamp queries. Without
+that forwarding, the profiling-only wrapper incorrectly requested the
+baseline 128MiB binding limit and rejected the Q6_K output matrix.
+
+### Paired equal-token measurements
+
+M5, Chrome 143.0.7499.4, ordinary WebGPU; identical 128-token prompts,
+32 output tokens/sequence, widths 1/8, three repeats, 64-position prefill
+budget. Baseline/candidate order reversed on alternate repeats. Rates
+are total phase tokens divided by total phase wall time. No profiling
+timestamps were enabled in these throughput measurements.
+
+| Phase / concurrency | Before tok/s | After tok/s | Throughput multiplier |
+| --- | ---: | ---: | ---: |
+| Prefill / 1 | 381.4 | 548.2 | 1.44 |
+| Prefill / 8 | 424.2 | 688.7 | 1.62 |
+| Decode / 1 | 17.1 | 46.2 | 2.70 |
+| Decode / 8 | 112.7 | 268.1 | 2.38 |
+
+Eight-request TPS aggregates all sequences. This is a new paired run,
+not a ratio against the preceding section's separate historical runs.
+Artifact: `test-results/browser/q4km-vector-ab/kernels-*.json`.
+
+All six paired comparisons produced identical 32-token sequences.
+Final full-vocabulary logits were also compared for every active row:
+maximum absolute difference 0.0000811, maximum relative L2 difference
+0.00000101. The independent `gguf-py` numerical harness passed all 49
+cases, including both staging modes and tail tiles. GPU/page validation
+errors were empty. Floating-point association changed, so this is not
+a promise of bitwise equality for every future prompt.
+
+### Separation decision
+
+Keep **format-specific loading, weight representation and matrix kernels**,
+but **one PLaMo execution engine**:
+
+```mermaid
+flowchart TD
+    O[ONNX graph and sidecars] --> OP[ONNX loader]
+    G[GGUF tensors and embedded tokenizer] --> GP[GGUF loader]
+    OP --> E[Shared PLaMo scheduler and KV cache]
+    GP --> E
+    E --> A[Shared Attention, RoPE, norms and sampling]
+    E --> OM[ONNX Q4 packing and GEMV/GEMM]
+    E --> GM[GGML format-specific GEMV/GEMM]
+    O -. ONNX-only fallback .-> ORT[ONNX Runtime]
+```
+
+The existing per-matrix `ggmlType` dispatch is the correct boundary:
+Q4_K_M itself mixes quantization formats, so a single model-wide “4-bit”
+kernel is incorrect. GGUF does not need a second cancellation mechanism,
+continuous-batching scheduler, attention implementation or translation
+cache. Forking those would duplicate correctness and performance work
+without removing the measured matrix bottleneck. The shared weight
+contract still resides in `onnxweights.ts` for historical reasons; GGUF
+is not converted to ONNX or executed through ONNX Runtime.
+
+A separate executor would be warranted by a different model architecture
+or runtime API, not by the container extension alone. Explicit matrix
+specialization remains necessary even with a shared engine.
+
+### Installed extension completion and remaining gap
+
+Both preserved baseline and candidate were installed in headed Chrome
+and exercised through the actual options GGUF file import. Each build
+ran an ONNX control followed by Q4_K_M, an eight-request warmup, and
+three measured single/eight-request rounds on the same Japanese→Korean
+sources. This is warm request-to-final-translation completion, not
+scroll-stop-to-final-DOM-paint. Eight-way engine capacity does not change
+the application's two-generation production concurrency setting.
+
+| Model / build | Single completion mean ms | Eight-request completion mean ms |
+| --- | ---: | ---: |
+| ONNX q4f16 / before | 748 | 1822 |
+| ONNX q4f16 / after | 724 | 1718 |
+| GGUF Q4_K_M / before | 5145 | 6993 |
+| GGUF Q4_K_M / after | 1604 | 3064 |
+
+Q4_K_M completion time fell by 68.8% for one comment and 56.2% for
+eight comments. All 24 measured cohorts passed automatic validation.
+All 54 before/after output pairs, including 27 Q4_K_M pairs, were
+exactly unchanged. The model, tokenizer and prompt were unchanged.
+Reports and UI screenshots:
+`test-results/browser/q4km-installed-{before,after}/`.
+
+The candidate's Q4_K_M single runs ranged from 1345 to 1900ms and its
+eight-request runs from 2335 to 3473ms. The installed-build comparison
+was blocked rather than interleaved; the paired kernel experiment above
+is the stronger control for shader effects. Three rounds do not estimate
+p95 or eliminate device clock/thermal effects.
+
+ONNX remains faster: in the candidate build Q4_K_M took 2.22× its
+single completion time and 1.78× its eight-request completion time.
+The default model is therefore unchanged. Neither “instant completion”
+nor the earlier single-decode/prefill targets are claimed achieved.
+
+The post-change timestamp profile still attributes approximately 80%
+of eight-way decode GPU time and 84% of prefill GPU time to matrices.
+Gate/up, down and vocabulary-head operations remain the priorities;
+there is no evidence here that forking the shared scheduler would
+resolve that remaining gap. The post-change intrusive prefill timestamp
+total was actually higher than in its separate baseline profiling run;
+do not use those standalone profile totals as a speedup estimate.
+Use the interleaved, unprofiled TPS and installed completion runs above.
+Attribution artifacts: `test-results/browser/q4km-profile-{before,after}/`.
+
+Both TypeScript configurations passed. Chrome and Firefox packages
+were rebuilt and passed the packaging gate; live runtime verification
+was Chrome only. No native runtime, experimental WebGPU feature,
+new quantization policy or model-quality tradeoff was introduced.
+
+### Lossless GGUF repacking: parity acceptance and layout evidence
+
+The parity experiment preserves the current direct shaders and Chrome build
+in `/tmp/autotranslate-gguf-parity-baseline/`; it does not reuse the older
+Q4_K_M baseline. Model/kernel hashes, all 57 installed-file hashes, adapter
+features and the 65-matrix inventory are recorded in
+`test-results/browser/gguf-parity-baseline/`.
+Chrome 143.0.7499.4 exposes ordinary WebGPU, shader-f16 and subgroups on
+the Apple metal-3 adapter; no unsafe WebGPU flag is enabled.
+
+Acceptance requires both one/eight-request installed completion medians
+at or below contemporary ONNX q4f16, and prefill/decode TPS at or above
+ONNX for every L128/512 × B1/8 shape. Same-GGUF numerical correctness
+and resident/peak weight bytes at most 1.35× the original are independent
+gates. Historical completion averages are not acceptance thresholds.
+
+| Layout | Original matrix bytes | Resident matrix bytes | Serial-repack peak bytes |
+| --- | ---: | ---: | ---: |
+| f32 coefficients | 477204480 | 611057664 | 618799104 |
+| compact coefficients | 477204480 | 486432768 | 494174208 |
+
+These are calculated live-buffer sizes, not allocator measurements.
+Quant codes remain unchanged; compact coefficients preserve original
+FP16 roots and integer scale/minimum bits, while f32 coefficients store
+their exact products. Neither layout expands whole weights to FP16 or
+requantizes them.
+
+Independent gguf-py 0.19.0 fixtures cover Q4_K/Q6_K with N9/17 and
+K256/512. All 16 GPU repack/readback cases have zero decoded-weight
+absolute error and zero padding; code words and coefficient words match
+the independent reference exactly. The seven existing GGML formats also
+pass all 49 direct CPU/GPU checks. Evidence:
+`test-results/browser/gguf-parity-layout/numerics.json`.
+This verifies the layout only, not end-to-end parity or throughput.
+
+The matrix gate subsequently passed 1,264 repacked GEMV/GEMM cases,
+including all eight GEMV widths, output groups of 8/16, both coefficient
+representations, factorization on/off, and GEMM rows 9/32/33/64/65.
+Maximum scaled error was 0.00000103711 (limit 0.0001); all four f32-wide
+requests were rejected. FP16 staging drift is recorded separately.
+Evidence: `test-results/browser/gguf-parity-numerics/numerics.json`.
+
+Nine real-device lifecycle cases cover forced ineligible/ONNX rejection,
+forced budget rejection, automatic direct selection for the smaller
+budget fixture, insufficient binding limits, allocation failure after
+head repack, and successful f32/compact/direct disposal. All end with
+zero owned live buffers and zero open error scopes. Observed resident
+and peak matrix bytes equal the table above; repacked creation retains
+no source matrix buffers. This observation wraps device operations,
+not GPUBuffer objects. Evidence:
+`test-results/browser/gguf-parity-lifecycle/kernels-2026-11-14T09-08-53.860Z-c973ba60.json`.
+
+Both TypeScript configurations passed. The first integrated L128 B1/8
+32-step comparison passed exact generated-token and full-vocabulary
+logit gates with no GPU/page errors:
+`test-results/browser/gguf-parity-integration/`.
+These checks do not yet establish the ONNX performance acceptance gate.
+
+### Finite repack screening and installed control
+
+All 16 configurations passed L128, B1/8, 32 steps, three alternating
+direct/repacked repetitions (192 timed runs). Each passed generated-token
+and full-vocabulary-logit checks and both memory gates; no phase was
+more than 5% slower than direct. Scores are geometric means of four
+paired prefill/decode TPS ratios, not ratios to ONNX:
+
+| Coefficients / outputs / factor / wide | Geometric TPS ratio to direct |
+| --- | ---: |
+| f32 / 8 / true / true | 1.5965 |
+| f32 / 8 / true / false | 1.6539 |
+| f32 / 8 / false / true | 1.7089 |
+| f32 / 8 / false / false | 1.6291 |
+| f32 / 16 / true / true | 1.6687 |
+| f32 / 16 / true / false | 1.4486 |
+| f32 / 16 / false / true | 1.6445 |
+| f32 / 16 / false / false | 1.5355 |
+| compact / 8 / true / true | 1.7440 |
+| compact / 8 / true / false | 1.6808 |
+| compact / 8 / false / true | 1.8325 |
+| compact / 8 / false / false | 1.9114 |
+| compact / 16 / true / true | 1.7144 |
+| compact / 16 / true / false | 1.7486 |
+| compact / 16 / false / true | 1.6740 |
+| compact / 16 / false / false | 1.8027 |
+
+The final two candidates are compact coefficients, eight outputs,
+factorization off, with wide rows off/on. The score gap exceeds the
+1% tie threshold. The ranking and all raw reports are in
+`test-results/browser/gguf-parity-screen/`. Device timing varied during
+screening; comparisons use adjacent controls with alternating order,
+not the earlier standalone direct baseline.
+
+The updated installed harness was exercised against the preserved build:
+five rounds, ten model transitions/warmups and twenty valid measured
+cohorts, with no errors. Both models reported kernels backend and source
+counts `[22,22,21,17,21,20,20,26]`. Actual GGUF import screenshot was opened.
+The direct GGUF single/eight completion medians were 1928.7/3724.7ms;
+its contemporary ONNX medians were 915.6/2066.4ms. This is the regression
+control, not the final candidate comparison.
+Evidence: `test-results/browser/gguf-parity-installed-baseline/`.
+
+Both finalists completed the full L128/512 × B1/8, 64-step, five-repeat
+same-model comparison: 40 runs and 20 direct/repacked comparisons each,
+zero token mismatches and zero GPU/page errors. Minimum full-vocabulary
+logit cosine was 0.9999999999995884 and maximum relative L2 was
+0.000000726367 for each candidate.
+
+The first heterogeneous runs exposed an overly broad new harness failure
+predicate: it failed on batch/individual scheduling differences as well
+as variant differences. Direct/repacked results matched under each
+schedule. In both direct and repacked execution, request 7 differed
+between batching and individual execution from token index 6, with 41
+differing tokens. The scheduler and arithmetic policy were not changed
+to hide this existing schedule sensitivity. The harness now fails the
+approved same-schedule variant comparison and retains scheduling
+comparisons separately. Initial nonzero-exit artifacts remain in each
+candidate's `heterogeneous/` directory.
+
+Final fixed-token ONNX/GGUF comparisons use five alternating process pairs,
+with phase TPS computed from total phase tokens divided by total phase
+wall time, not an average of individual rates. Both candidates miss the
+all-eight-metrics ONNX throughput gate. Raw samples, means, medians,
+ranges and failure counts are preserved in
+`test-results/browser/gguf-parity-final/evaluation.json`.
+
+### Final parity verdict: ONNX 동급 미달
+
+The selected fixed default is
+`{coefficients:'compact', outputsPerGroup:8, factorSmallBatch:false, wideRows:false}`.
+Both finalists satisfy same-model accuracy and memory limits and improve
+both installed completion medians over the preserved direct build, but
+neither satisfies ONNX parity. Their installed ONNX-relative latency
+geometric means are 1.111427 (wide off) and 1.116749 (wide on). They are
+within the 1% tie band with equal memory/output/factor settings, so the
+specified final tie-break chooses wide off. Overrides remain diagnostic;
+there is no runtime tuner.
+
+Five installed rounds per build, Japanese→Korean, request-to-final-output:
+
+| Build / model | Single median ms | Eight-request median ms | Single range ms | Eight-request range ms |
+| --- | ---: | ---: | --- | --- |
+| Preserved direct / GGUF | 1928.7 | 3724.7 | 1673.9–2779.2 | 3359.5–3853.7 |
+| Selected wide-off / ONNX control | 686.2 | 1448.1 | 529.8–787.9 | 1269.1–1495.6 |
+| Selected wide-off / GGUF | 763.4 | 1607.9 | 636.8–872.4 | 1235.5–1733.6 |
+| Wide-on / ONNX control | 641.0 | 1364.5 | 608.4–658.5 | 1345.8–1366.5 |
+| Wide-on / GGUF | 765.9 | 1424.2 | 749.0–788.2 | 1416.4–1451.7 |
+
+The selected candidate is still 11.25% slower for one request and 11.04%
+slower for eight than its own contemporary ONNX control. Its medians
+are 60.42%/56.83% below the preserved direct build, but those builds were
+measured in separate sessions with different timing conditions; the
+interleaved same-model kernel results are the stronger shader comparison.
+Neither the faster absolute wide-on batch result nor averaging cases
+is allowed to replace the prescribed ONNX-relative selection/gates.
+
+Selected candidate fixed-token throughput, five alternating ONNX/GGUF
+process pairs; eight-way TPS is aggregate:
+
+| Prompt length | Batch | Phase | ONNX TPS | GGUF TPS | GGUF / ONNX | Gate |
+| ---: | ---: | --- | ---: | ---: | ---: | --- |
+| 128 | 1 | prefill | 1114.79 | 1108.42 | 0.99428 | fail |
+| 128 | 1 | decode | 161.98 | 130.73 | 0.80706 | fail |
+| 128 | 8 | prefill | 828.45 | 803.89 | 0.97036 | fail |
+| 128 | 8 | decode | 449.44 | 463.86 | 1.03208 | pass |
+| 512 | 1 | prefill | 771.20 | 719.79 | 0.93334 | fail |
+| 512 | 1 | decode | 128.65 | 103.96 | 0.80811 | fail |
+| 512 | 8 | prefill | 881.66 | 868.54 | 0.98512 | fail |
+| 512 | 8 | decode | 494.54 | 545.61 | 1.10325 | pass |
+
+Six of eight metrics miss the selected candidate's gate; wide on misses
+five of eight. All 80 contemporary throughput runs completed without
+GPU/page errors. The corrected heterogeneous runs also pass both finalists'
+direct/repacked comparisons with every requested outcome present; the four
+schedule comparisons per candidate described above remain visibly unequal.
+Each installed build has 20 valid measured cohorts and ten valid warmups,
+both models use kernels backend, and counts agree. All 85 GGUF output
+pairs per candidate (measured plus warmup) exactly match the preserved
+direct build. All three actual GGUF import screenshots were opened.
+
+Observed selected matrix memory is 486432768 resident / 494174208 peak
+bytes versus 477204480 original: +1.93% / +3.56%, both below 35%.
+No GPU source matrix copy remains. These are sums of observed live buffer
+sizes, not driver allocator measurements. Across twenty cold creates,
+create wall time has mean/median/range 212.27/171.50/153.80–349.70ms;
+repack wall time has 153.62/133.60/118.40–225.80ms. Cold creation and
+repacking are excluded from warm phase TPS.
+
+Separate timestamp attribution still assigns 87.02% of selected prefill
+and 81.16% of selected eight-way decode GPU pass time to matrices.
+Gate/up (12288×1536) and down (1536×6144) dominate prefill; decode also
+pays heavily for the 107520×1536 vocabulary head. Quant/scales read by
+one ONNX matrix pass total 385204224 bytes, versus 486432768 for compact
+GGUF; the Q6_K head is 136765440 versus ONNX's 87736320 bytes.
+[INFERENCE] This larger lossless representation is consistent with
+remaining bandwidth pressure; it is not proof of a hardware lower bound.
+Profile totals are not used as throughput speedup measurements.
+
+The first attribution attempts exhausted Metal timestamp sample buffers:
+the diagnostic wrapper retained one 1024-query set for each of 65 serial
+repacks. Initialization correctly failed through its error scope rather
+than returning success. The profiler now drains initialization timestamps
+at each completed submission and recognizes repacked matrix shaders.
+Both bounded attribution runs pass; original failed diagnostic artifacts
+are retained in `profile/`, successful evidence in `profile-bounded/`.
+
+Final artifact index: `test-results/browser/gguf-parity-verdict.json`.
+It contains both candidates' complete phase statistics, completion
+means/medians/ranges, cold times, memory, failure records and all output
+pairs. Raw installed reports are in
+`test-results/browser/gguf-parity-installed-{baseline,compact-o8-f0-w0,compact-o8-f0-w1}/`;
+raw fixed-token/heterogeneous/profile reports are in
+`test-results/browser/gguf-parity-final/`.
+The selected Chrome build/package was rebuilt, and all recorded runtime
+file hashes match the measured selected installation. Both TypeScript
+configurations passed. No scheduler, KV, attention, page concurrency,
+default download model, quantization policy or runtime dependency changed.
+
+### Upstream llama.cpp WebGPU comparison: whole-runtime cutover rejected
+
+An isolated browser experiment used `@wllama/wllama@3.13.0`
+(`6647c1ea3837b2f0205a300c3bf5ff644aaa06bf`), whose bundled llama.cpp is
+`b12211-7d7f028`, on the same Apple/metal-3 adapter and Chrome
+`143.0.7499.4`, without unsafe WebGPU flags. No production runtime,
+dependency, scheduler, model or numerical policy was changed.
+
+The exact 573126848-byte Q4_K_M file is recognized as `plamo3`.
+Native logs confirm 17/17 layers offloaded to WebGPU; the embedding
+remains on CPU. However, the stock subgroup path does not compile in this
+Chrome: `num_subgroups` is unsupported, and an attempted derivation also
+encounters the unavailable `subgroup_id` language feature and subgroup
+uniformity validation. No validation diagnostic was disabled.
+
+The measured path explicitly selects upstream's existing **workgroup
+reduction** by hiding `subgroups` from the worker adapter's feature set.
+It still executes on WebGPU; shader text and quantized weights are unchanged.
+This is not a measurement of newer Chrome's stock subgroup path or native
+Metal. The pinned MMVQ eligibility code excludes Apple, so its Q8 activation
+quantization fast path is not selected.
+
+Wllama's current C++ CLI bridge assigns `prompt` to `std::string`.
+An integer-token-array request fails, despite upstream llama-server having
+a token-array endpoint. Therefore the comparison uses separate text-derived
+fixtures, not the original arithmetic-token parity workload. Each fixture
+has 128/512 tokens including BOS using the GGUF vocabulary/scores; upstream
+reports the same prompt lengths and zero cached prompt tokens. This is raw
+completion text, not the installed Japanese→Korean chat-template workload.
+
+Two process pairs alternate current→upstream and upstream→current. Each
+shape has an excluded four-output warmup, then 64 outputs per request.
+The table is total cohort wall time, not pure prefill/decode TPS:
+
+| Prompt tokens | Concurrent requests | Current GGUF median ms | Upstream portable median ms | Upstream / current |
+| ---: | ---: | ---: | ---: | ---: |
+| 128 | 1 | 766.90 | 1937.36 | 2.53 |
+| 128 | 8 | 2340.05 | 13963.53 | 5.97 |
+| 512 | 1 | 1396.65 | 3326.58 | 2.38 |
+| 512 | 8 | 6004.80 | 29740.39 | 4.95 |
+
+All timed workloads complete, but **none of 36 generated-token pairs
+match**. This is not an isolated kernel-accuracy test: native input token
+IDs are not exposed by this wrapper, EOG sampling policy differs, and
+runtime arithmetic differs. At L128/B1 the current first output is 1637,
+whereas upstream GPU and a separate CPU diagnostic both start with 8676;
+neither is an EOG token. CPU/GPU then diverge at output index four.
+The difference is not attributable solely to WebGPU, and its root cause
+is not isolated. No full-vocabulary logits or translation-quality gate
+is claimed.
+
+The main comparison retains native diagnostic logging and upstream's
+default unified KV context ceiling of 16384 per sequence. A separate
+L128/B1 check sets `kv_unified=false` (2048 per slot), disables idle-slot
+caching and suppresses native logging. It takes 1737.85ms for 64 outputs
+and retains the divergent GPU prefix. This multi-setting check is not a
+single-factor attribution or a replacement for the full timing matrix.
+CPU-only execution is excluded from every WebGPU performance figure.
+
+Diagnostic buffer reports are GPU model 455.49MiB, CPU model 88.59MiB,
+GPU KV 256MiB, GPU compute 597.51MiB and CPU compute 77.02MiB. These are
+rounded backend buffer sizes, not peak allocator measurements; the
+original complete 35% peak-weight gate has not been established here.
+The initial URL/cache loading path also returned a failed load context;
+fetching the complete Blob and checking `context.success` avoids treating
+that failure as a successful initialization.
+
+Decision: retain the existing runtime. This build provides neither a
+drop-in browser-compatible path nor an output-equivalent performance win
+on the tested environment. Individual upstream kernels remain useful
+references; these whole-runtime results do not rule out a profitable
+kernel-level port. No installed-extension replacement was attempted.
+The earlier **ONNX 동급 미달** verdict remains unchanged.
+
+Evidence is under `test-results/browser/gguf-upstream-webgpu/`:
+`verdict.json`, `comparison.json`, `cpu-gpu-prefix.json`, `prompts.json`,
+the paired raw reports, failure diagnostics, browser screenshots and
+`experiment-sources.tar.gz`. The successful browser screenshot was opened.
+Pinned implementation references:
+[wllama completion bridge](https://github.com/ngxson/wllama/blob/6647c1ea3837b2f0205a300c3bf5ff644aaa06bf/cpp/wllama-context.h),
+[WebGPU dispatch](https://github.com/ggml-org/llama.cpp/blob/7d7f0287530bc8981690f361d8c1627dbae1c99a/ggml/src/ggml-webgpu/ggml-webgpu.cpp),
+[shader selection](https://github.com/ggml-org/llama.cpp/blob/7d7f0287530bc8981690f361d8c1627dbae1c99a/ggml/src/ggml-webgpu/ggml-webgpu-shader-lib.hpp).
+
+### Quantitative attribution of the upstream WebGPU deficit
+
+This investigation measures the pinned wllama/llama.cpp portable
+workgroup-reduction path above, not native llama.cpp or a newer browser's
+subgroup path. Production runtime code is unchanged.
+
+#### Uninstrumented phase gap: 64 generated tokens
+
+The two existing alternating-order pairs give the following B=1 averages.
+The gap is upstream minus the current custom GGUF engine.
+
+| Input tokens | Total wall gap ms | Prefill gap ms | Decode gap ms | Decode share of wall gap |
+| --- | ---: | ---: | ---: | ---: |
+| 128 | 1,170.46 | 294.23 | 875.32 | 74.8% |
+| 512 | 1,929.93 | 846.85 | 1,079.99 | 56.0% |
+
+Upstream wall time outside its native prefill/decode timers is only
+3.00/5.29 ms, respectively. This excludes substantial outer JS/message
+overhead, **not** CPU/WASM scheduling and synchronization inside those
+timers. Per-request native timings overlap at B=8 and cannot be summed into
+cohort phase costs.
+
+Upstream aggregate throughput scales only 1.110x from B=1 to B=8 at input
+128, and 0.895x at input 512: the latter is a 10.5% throughput loss.
+The current engine scales 2.622x and 1.861x, respectively.
+
+#### Separate GPU attribution: input 128, 16 generated tokens
+
+Each shape has one timestamp-instrumented cohort and one uninstrumented
+control, after a four-token warmup. Native logging is suppressed in both;
+unified KV and the previous load settings remain unchanged. Instrumentation
+splits upstream's combined compute pass into one pass per dispatch and
+requests the supported `timestamp-query` feature. Timestamp readback is
+drained after the measured wall interval. This is intrusive attribution,
+not another comparable 64-token throughput benchmark.
+
+| Measurement | B=1 | B=8 |
+| --- | ---: | ---: |
+| Profiled wall ms | 620.88 | 3,664.54 |
+| Control wall ms | 565.68 | 3,914.73 |
+| GPU dispatch time ms | 495.65 | 3,411.41 |
+| GPU dispatch / profiled wall | 79.8% | 93.1% |
+| Dispatch count | 6,040 | 6,410 |
+| Wall minus GPU dispatch ms | 125.23 | 253.13 |
+
+Profile/control token sequences match for all nine requests; profiler errors
+are empty. Profile/control wall differences (+9.8%/-6.4%) combine
+instrumentation effects and run variation; they are not optimization gains.
+
+| GPU operation group | B=1 ms | B=1 GPU share | B=8 ms | B=8 GPU share |
+| --- | ---: | ---: | ---: | ---: |
+| Quantized Q4_K/Q6_K weight matmul | 397.41 | 80.2% | 2,782.92 | 81.6% |
+| Float matmul and softmax | 51.84 | 10.5% | 419.17 | 12.3% |
+| RMS normalization | 24.51 | 4.9% | 125.11 | 3.7% |
+| Other dispatches | 21.89 | 4.4% | 84.21 | 2.5% |
+
+Within quantized weights, FFN gate/up plus down projections consume
+56.3%/59.1% of **all** GPU dispatch time at B=1/B=8; the output head consumes
+8.2%/7.2%. Roles are attributed from the model's matrix dimensions, with
+full pipeline/shape aggregates retained.
+
+Dispatch count grows only 1.061x at B=8, but GPU time grows 6.883x;
+quantized matmul accounts for 81.8% of that GPU-time increase. The pinned
+[dispatch selector](https://github.com/ggml-org/llama.cpp/blob/7d7f0287530bc8981690f361d8c1627dbae1c99a/ggml/src/ggml-webgpu/ggml-webgpu.cpp#L1684)
+uses matrix-vector kernels only through four rows; wider inputs select
+matrix-matrix kernels. Profiles confirm workgroup GEMV for width-one
+decode and `mul_mat_reg_tile_*` for width-eight decode. The Q6_K output
+head (`m=107520,k=1536`) averages 2.540 ms per width-one call and
+15.200 ms per width-eight call (16 and 15 calls). Eight outputs require
+5.99x the per-call time, providing only about 1.34x head throughput.
+This demonstrates weak amortization, not proof that a threshold change
+alone would help; an alternative kernel has not been benchmarked.
+
+#### Host waits are not additive CPU costs
+
+`queue.onSubmittedWorkDone` reports 532.98/3,488.13 ms of waiting across
+367/1,077 calls at B=1/B=8. Those waits include GPU execution and must
+**not** be added to timestamp durations. Likewise, readback mapping waits
+(9.93/56.98 ms) include pending GPU work.
+
+The residual 125.23/253.13 ms is a mixture of CPU work, buffer copies, GPU
+gaps, synchronization and profiler overhead, not exclusive CPU/WASM time.
+Gaps within the first-to-last GPU dispatch span alone are
+102.04/194.05 ms. B=8 records 92,381 buffer-copy commands totaling
+80.61 MiB versus 1,822 commands/8.26 MiB at B=1; the cost of those copies
+is not separately timestamped. Their source and optimization value remain
+unisolated. Measured JS `writeBuffer` call time is only 2.30/2.66 ms and
+queue-submit call time 1.00/0.82 ms; neither includes all host work.
+
+**Priority [INFERENCE]:** first investigate Q4_K FFN kernels and the
+width-5–8 GEMV/GEMM boundary, including the Q6_K output head; then float
+matmul/softmax. Wrapper micro-optimization cannot explain the dominant
+measured GPU time. Copy/synchronization improvements may matter, but
+their exclusive contribution is not established here. No speedup is
+claimed and no dispatch threshold was changed.
+
+Limitations: one profiled/control pair per shape, input 128 only for GPU
+attribution, intrusive pass splitting, and a subgroup-disabled compatibility
+path on Chrome 143/Apple GPU. The previously observed upstream/current
+numerical mismatch remains unresolved; matching profile/control tokens
+does not establish cross-engine correctness.
+
+Evidence: `test-results/browser/gguf-upstream-bottleneck/` contains
+`existing-phase-gaps.json`, raw `profile/upstream.json` and
+`control/upstream.json`, `gpu-attribution.json`, grouped `analysis.json`,
+browser captures, and archived instrumentation in
+`experiment-sources.tar.gz`.
+
+### Rebuilt upstream optimization baseline: numerical stop gate
+
+The approved isolated optimization experiment is recorded in
+`test-results/browser/gguf-upstream-fix-g1fpWe/decision.json`.
+The unchanged wllama `6647c1ea3837b2f0205a300c3bf5ff644aaa06bf` /
+llama.cpp `7d7f0287530bc8981690f361d8c1627dbae1c99a` baseline was rebuilt
+with Emscripten 4.0.20, Dawn `v20260317.182325`, WebGPU/JSPI, and
+`WLLAMA_TEST_BACKEND=ON`, including generated worker, ESM, and WASM.
+Chrome 143.0.7499.4 used the Apple/Metal-3 portable workgroup path;
+native logs confirmed 17/17 GPU-offloaded layers.
+
+**Outcome: baseline numerical gate failed; candidate adoption stopped.**
+No `v256`, `v128`, `r32x8`, `r64x8`, or `r64x32` source patch was made.
+No combined candidate, screening, final performance gate, or winner
+attribution was run. This is not evidence that the untested candidates
+regress or improve performance. Production runtime and the ONNX parity
+plan remain unchanged.
+
+Captured original GPU pipelines executed eight independently decoded
+GGUF fixtures over N=1..9,32,33,64,65, with exact-width GEMV pipelines
+where applicable. GEMM replay also exercised small/tail dimensions;
+it does not imply those dimensions select GEMM in the model host.
+The required normalized per-output tolerance remained `1e-4`.
+
+| Captured path | Cases | Failed | Maximum normalized error |
+| --- | ---: | ---: | ---: |
+| Q4_K GEMV | 16 | 0 | 5.36365e-7 |
+| Q6_K GEMV | 16 | 0 | 1.11348e-7 |
+| Q4_K GEMM, 32×32 / 64 threads | 52 | 52 | 1.77285e-3 |
+| Q6_K GEMM, 32×32 / 64 threads | 52 | 52 | 5.75710e-4 |
+
+All outputs were finite and all trailing guard words remained intact.
+Capture omissions, shader/validation errors, page/worker errors, and
+device-loss errors were zero. The 19 model cohorts captured 10,807
+dispatches; repeated baseline quantized shape/stride keys had no
+geometry/WGSL-hash conflicts. Candidate cache behavior is untested.
+
+The approved GEMM oracle rounds independently decoded weights and inputs
+through `Float16Array` once, then uses a JS double dot product.
+The pinned `mul_mat_decls.tmpl:458-495,564-597` also performs
+**intermediate f16 dequantization arithmetic** before shared staging.
+**[INFERENCE]** That distinction plausibly explains the oracle mismatch;
+it is not an isolated causal proof or a newly introduced kernel defect.
+The oracle and tolerance were not changed to make the baseline pass.
+
+The separate, unmodified CPU-reference backend test passed 185 actual
+WebGPU MUL_MAT cases, with 36 unsupported cases retained, including
+captured N5..9 boundaries and noncontiguous/broadcast uniform layouts.
+Its `test_mul_mat` NMSE threshold `5e-4` is not the independent
+per-output criterion above, so this pass does not override the stop gate.
+A baseline-versus-itself L128/B1/output4, two-round AB/BA smoke verified
+the paired runner and exact token matching; it is not performance evidence.
+
+Evidence includes raw numerical/backend reports, original WGSL and
+descriptor/hash captures, browser screenshots, full ESM/WASM hashes,
+`baseline-esm.tar.gz`, independent `reference.json`, build logs, and
+`experiment-sources.tar.gz`. Native INFO is captured without console
+forwarding to retain offload evidence; this logging adjustment is explicit
+in each report. WebGPU create/destroy byte accounting and native memory
+logs are retained, but no resident/allocator peak, candidate memory
+comparison, or 35% whole-peak gate is claimed.
+
+### Current custom GGUF single-decode optimization experiment
+
+Evidence: `test-results/browser/gguf-single-decode-vtpS5R/decision.json`.
+This targets the production custom WebGPU kernels, not the upstream wllama
+baseline above. **No candidate was adopted; the measured bottleneck remains.**
+Production runtime, weight precision, and batch 2–8 behavior are unchanged.
+
+Chrome 143.0.7499.4 on Apple/Metal-3 ran without unsafe WebGPU flags.
+Combined-pass baseline timestamps put GPU execution at 88–89% of GGUF
+single-decode wall time. Separate per-dispatch instrumentation attributed
+78.1–78.3% of GPU time to quantized matrix kernels. JS encoding was only
+1.4–2.1% of wall time in these split-pass GGUF runs; queue waits are not
+exclusive CPU work.
+
+The following GPU measurements sum 15 decode steps. Splitting compute passes
+and timestamp quantization perturb execution: these identify expensive
+operators, not production end-to-end latency or precise hardware limits.
+
+| Input length | ONNX matrix GPU ms | GGUF matrix GPU ms | ONNX head GPU ms | GGUF Q6_K head GPU ms |
+| --- | ---: | ---: | ---: | ---: |
+| 128 | 69.34 | 83.30 | 12.85 | 25.03 |
+| 512 | 58.65 | 87.03 | 11.40 | 21.50 |
+
+The Q6_K vocabulary head is 1.89–1.95× slower in this attribution run.
+Resident matrix buffers total 486,432,768 bytes for GGUF versus 385,204,224
+for ONNX; the head alone is 136,765,440 versus 87,736,320 bytes.
+The larger representation matters, but these observations do not isolate
+memory bandwidth from dequantization, occupancy, or reduction costs.
+
+Five isolated candidates changed only single-row GEMV or its dispatch.
+Unprofiled screens used B1, input lengths 128/512, prefill tiles of 64,
+64 output tokens (63 timed decode steps), and alternating variant order.
+The first two candidates had three repeats; the others had five.
+Each percentage compares that candidate's median decode wall time against
+its own run's baseline. Negative is faster. Between-run variation is large;
+these are descriptive screens, not statistical significance claims.
+
+| Candidate | L128 latency change | L512 latency change |
+| --- | ---: | ---: |
+| One scalar output per reduction thread | +8.52% | −3.27% |
+| 32 K lanes plus scalar reduction | +1.56% | −13.93% |
+| Q6-only scale factorization | +6.57% | −2.17% |
+| Q6-only 16 outputs/workgroup | +1.42% | +9.86% |
+| Two-stage 4×4 reduction | +0.53% | +18.83% |
+
+No candidate improved both lengths consistently. The 32-lane candidate's
+separate split-pass attribution also failed to reproduce a consistent gain.
+Adopting a context-dependent switch from these noisy screens would overfit
+the experiment; no such switch was added.
+
+All screened candidates matched every generated token. Final full-vocabulary
+logit comparisons had maximum relative L2 error 1.325e-6; browser validation,
+page, and cleanup errors were zero. The 32-lane candidate additionally passed
+the independent gguf-py fixture suite: 49 direct cases, 16 repack cases, and
+1,264 repacked matmul cases, with output guards intact and maximum normalized
+error 1.038e-6 against the unchanged 1e-4 tolerance. This independent suite was
+not repeated for every rejected candidate. No installed-extension translation
+speedup, general batch performance improvement, or bottleneck removal is claimed.
+
+Raw runs, source hashes, the numerical report, and archived experimental
+sources are retained beside `decision.json`; no candidate code is installed.
+
+### Fixed-model near-instant page translation plan
+
+The current extension-only speed plan is
+[PLaMo 0.8B near-instant page translation](near-instant-translation-plan.md).
+It fixes the input models to GGUF Q4_K_M and the existing ONNX q4f16,
+distinguishes existing optimizations from new candidates, and covers loading,
+exact reuse, admission, finite-page completion, presentation, and GPU execution.
+Its latency targets are proposed goals, not observed improvements. Production
+runtime is unchanged by that planning work.
+
+### Whole-page completion: fixed q4f16 / Q4_K_M
+
+The user goal is now **complete eligible page translation within five
+seconds**, not a viewport preview. Evidence directory:
+`test-results/browser/page5-S35gTt/`. The unchanged pre-edit Chrome build is
+compared with a frozen candidate; both use the same complete fixtures.
+
+Environment: Apple M5, 24 GiB, headed Chrome for Testing 143.0.7499.4,
+ordinary WebGPU (`UNSAFE_WEBGPU=0`), one resident model worker. The benchmark
+uses real extension import/options/tab controls and actual model inference.
+No native helper or inference service was added. Local HTTP servers serve
+only test pages/model installation assets; translation remains in-extension.
+GGUF is Q4_K_M only; ONNX is the existing q4f16 graph. Model, tokenizer and
+template hashes are retained in `model-hashes.sha256`.
+
+| Fixed page | Units | Source characters | Source tokens |
+| --- | ---: | ---: | ---: |
+| Japanese short comments | 8 | 492 | 169 |
+| Japanese article | 4 | 1030 | 377 |
+| English mixed prose | 4 | 2322 | 342 |
+
+All pages contain below-fold source and remain at scrollY=0. Timing begins
+at the enable control's click and ends after every target has a final
+canonical translation plus two animation-frame opportunities. Screenshots
+are taken after timing. Protected text must remain unchanged; OFF must
+restore every original string and original Text-node identity. This is not
+compositor telemetry or a semantic-quality oracle. Source/full output,
+failures, host call intervals, active-generation admission and file hashes
+are retained. No truncated input/output is counted as a speed improvement.
+
+Warm comparisons use a distinct warmup sentence and fresh page-local
+translation caches. The baseline selects its previous maximum of two slots;
+the candidate selects eight. This measures the product configuration and
+scheduling change together, not a faster single-decode kernel. Cold runs
+explicitly unload before the measured click, from already installed files;
+they do not include downloading or an OS-cache-cold first installation.
+
+Implementation: exhaustive eligible-page drain, extension-wide bounded
+generation admission with per-tab FIFO/round-robin fairness, independent-unit
+commits, exact in-flight request sharing, bounded tokenization memoization,
+overlapped tokenizer/worker initialization, and removal of identical
+deterministic retries. Existing saved widths 1/2 remain unchanged; users with
+those settings must select 8 to use the measured configuration.
+
+An initial fast candidate is **rejected**, not adoption evidence:
+`candidate-screen/` changed the English technical paragraph's “hide a slow
+or unreliable reading experience” to “prevent” it. `paired/` was cancelled.
+`candidate-preserved/` restored all baseline output strings but still
+serialized 480-character continuation waves: English took 5.60/6.14 seconds
+for ONNX/GGUF in that single screen. The final candidate removes duplicate
+DOM character/sentence planning and keeps the existing exact 64-source-token
+host plan. No weight, activation/KV precision, output cap, shader, or worker
+compute implementation changed.
+
+In `candidate-token-plan/`, only the long English comment differs from the
+baseline. Manual comparison retains the minute/twelve-second figures,
+restart/initial-load distinction and final question; the rejected technical
+meaning inversion is absent. Baseline model errors remain, including
+“previous video” mistranslation and GGUF's rendering of “obsolete”.
+Nonempty Korean is insufficient evidence of accuracy, and this review does
+not certify arbitrary-page translation quality.
+
+#### Warm paired result
+
+Five alternating A/B pairs, separate browser profiles, GPU jobs serialized.
+All 30 candidate page runs and 30 baseline runs completed and restored
+correctly, with no recorded host/page errors. The candidate was faster in
+**5/5 pairs for every case**, reducing completion medians by 45.7–61.6%.
+No p95 or statistical-significance claim is made from five observations.
+
+| Model | Page | Baseline median ms | Candidate median ms | Candidate range ms | ≤5s runs |
+| --- | --- | ---: | ---: | ---: | ---: |
+| ONNX q4f16 | Short comments | 5639.5 | 2624.2 | 1935.7–3774.7 | 5/5 |
+| ONNX q4f16 | Article | 9197.4 | 4996.5 | 4023.5–6613.8 | 3/5 |
+| ONNX q4f16 | English prose | 10489.9 | 5221.0 | 3931.7–5387.9 | 2/5 |
+| GGUF Q4_K_M | Short comments | 7247.6 | 2779.5 | 1982.1–2905.1 | 5/5 |
+| GGUF Q4_K_M | Article | 11204.9 | 5739.9 | 4287.5–6438.8 | 2/5 |
+| GGUF Q4_K_M | English prose | 12322.4 | 5136.4 | 3856.1–5539.6 | 2/5 |
+
+**The five-second goal is not met consistently.** Nineteen of 30 warm
+candidate runs met it; none of the paired baseline runs did. Later candidate
+runs were slower, and those misses remain in the result. Thermal throttling,
+system load or a particular GPU bottleneck was not isolated in this experiment;
+none is asserted as the cause of the variation.
+
+The tradeoff is later first streaming text despite earlier complete pages:
+
+| Model | Page | Baseline first-preview median ms | Candidate first-preview median ms |
+| --- | --- | ---: | ---: |
+| ONNX q4f16 | Short comments | 288.1 | 540.6 |
+| ONNX q4f16 | Article | 364.4 | 822.3 |
+| ONNX q4f16 | English prose | 280.5 | 554.5 |
+| GGUF Q4_K_M | Short comments | 255.3 | 505.5 |
+| GGUF Q4_K_M | Article | 322.5 | 722.2 |
+| GGUF Q4_K_M | English prose | 281.5 | 503.7 |
+
+The new default prioritizes the user's full-page goal, not the earlier
+first-preview target. Serial/two-slot settings remain available. Actual host
+generation admission reached eight in every candidate run; source coverage
+is unchanged. English generation calls fell from nine to eight because
+duplicate segmentation was removed; Japanese calls remained eight.
+Across all five pairs, final text differs only in the same long English
+comment reviewed above. `lib/kernels.js` and `hostworker.js` have identical
+baseline/candidate hashes. Remaining uncached generation still costs several
+seconds even with all eight requests admitted; the old 78% matrix observation
+has not been remeasured or eliminated by this work.
+
+`paired-final/comparison.json` retains every run; `analysis.json` contains
+the paired calculations and full differing translations. The first cold
+attempt in `candidate-cold/` is invalid as cold evidence: the diagnostic
+sent the host-only unload message through the UI route and the observed
+state remained `ready`. The corrected runner uses `LOCAL_RELEASE` and
+requires `state=unloaded` and zero resident bytes before timing.
+
+#### Verified nonresident-model result
+
+`candidate-cold-fixed/` contains three rounds per case. Before every timed
+click, the model reports `unloaded` and zero resident bytes. Loading occurs
+after the click: host load time is 501–677ms, first generation admission is
+529–705ms, and each page records eight fresh generations. All 18 pages
+completed within five seconds and restored correctly, without recorded
+host/page errors.
+
+| Model | Page | Median ms | Range ms | ≤5s runs |
+| --- | --- | ---: | ---: | ---: |
+| ONNX q4f16 | Short comments | 2473.4 | 1964.3–2498.0 | 3/3 |
+| ONNX q4f16 | Article | 4332.2 | 3664.9–4564.9 | 3/3 |
+| ONNX q4f16 | English prose | 3922.4 | 3598.4–4032.2 | 3/3 |
+| GGUF Q4_K_M | Short comments | 2414.5 | 2181.5–2515.2 | 3/3 |
+| GGUF Q4_K_M | Article | 4273.5 | 4113.5–4915.1 | 3/3 |
+| GGUF Q4_K_M | English prose | 4007.0 | 3898.9–4580.8 | 3/3 |
+
+These later observations were faster than several warm paired runs despite
+including initialization. They are **not paired with those warm runs**, so
+they do not establish that cold loading is faster. Browser/OS caches remain
+warm, and the recorded run-to-run variation prevents a universal five-second
+claim. The earlier warm misses must not be discarded in favor of this batch.
+
+The corrected cold runs produced 557/1046/1013 decode tokens for ONNX and
+558/1043/1003 for GGUF across short/article/English pages respectively,
+unchanged across their three repetitions. The original input and output
+limits remain intact. Whole-page latency still scales with uncached source
+and generated output; these three bounded fixtures do not certify arbitrary
+websites, infinite feeds, all hardware, or downloading a missing model.
+
+Decision: retain the verified scheduling/host/token-plan changes and report
+**partial goal attainment**, not a guaranteed five-second product. Focused
+verification passed 305 distinct Node and 59 distinct Chromium scenarios
+across initial/corrected runs, plus extension/tooling type checking and Chrome
+packaging. Raw timing/translation artifacts, including rejected/invalid runs,
+remain available; `frozen-builds-and-sources.tar.gz` preserves the compared
+builds, source snapshots and disposable experiment drivers.
+
+### Current GGUF page path: detailed repeated-computation measurement
+
+Evidence: `test-results/browser/gguf-profile-YuoErb/{rounds,analysis.json,report.json}`.
+Apple M5, Chrome for Testing 143.0.7499.4, visible installed extension,
+unsafe WebGPU disabled, PLaMo-3 Translate 0.8B Q4_K_M only. The existing
+eight-slot scheduler and fixed three complete-page fixtures are unchanged.
+The model is resident before timing; importing/downloading is not included.
+No production kernel, precision, prompt, output limit or EOS change was made.
+
+Three serialized rounds alternate four diagnostic modes: minimal job capture
+without step/GPU profiling (`control`), step/embedding/upload counters (`step`),
+pass-preserving timestamps (`pass`), and per-dispatch timestamps (`dispatch`).
+All 36 measured pages completed and restored their original Text nodes.
+Every mode/round produced exactly the same prompt/output token arrays and
+final page strings for its fixture; no recorded GPU, host or page errors.
+The control article screenshot was inspected. Setup failures and a successful
+dispatch smoke run remain separate from these 36 observations.
+
+#### Page timing and instrumentation limits
+
+| Page | Control median ms (range) | Step median ms | Pass median ms | Dispatch median ms |
+| --- | ---: | ---: | ---: | ---: |
+| Short comments | 1772.7 (1597.3–1929.5) | 1905.7 | 2438.8 | 2198.8 |
+| Article | 3455.7 (3455.3–4665.5) | 3922.0 | 4131.8 | 4382.6 |
+| English prose | 3465.3 (3331.4–3880.8) | 3748.5 | 3948.9 | 4415.0 |
+
+All nine controls met five seconds in this batch, but this is a diagnostic
+experiment, **not a new optimization or a reversal of the earlier warm
+five-second misses**. Pass-mode article/English runs reached 6888.7/6038.5ms;
+those misses are retained. Article medians with step/pass/dispatch profiling
+are 13.5%/19.6%/26.8% above control. These are observed differences including
+run-to-run variation, not isolated causal profiler overhead or significance.
+
+GPU timestamps are quantized to 65.536 microseconds. Small operations can
+report zero. Timestamped pass durations are not an exclusive partition of
+wall time: in the representative dispatch article decode, their sum is
+2745.7ms while first-to-last GPU timestamp spans sum to 2698.4ms. The raw
+`betweenPassMs` difference is negative (-47.3ms), so it must **not** be
+interpreted as GPU idle time or clamped into a claimed scheduling metric.
+Percentages below use the sum of measured dispatch durations as denominator;
+they are approximate attribution, not precise hardware utilization.
+
+#### Article phase and host breakdown
+
+Each mode's representative is its median-completion run, not a synthetic
+sum of unrelated medians. In the control representative, admission starts
+25.8ms after click, first host request through final response spans 3421.0ms,
+and final paint follows 8.9ms later. Thus the host inference interval still
+accounts for about 99% of the 3455.7ms page completion.
+
+The step-only representative is round 1, with 3922.0ms complete-page time:
+
+| Phase | Model steps | Input tokens fed | Output picks | Cumulative step wall ms |
+| --- | ---: | ---: | ---: | ---: |
+| Pure prefill | 4 | 256 | 1 | 341.4 |
+| Mixed prefill/decode | 9 | 249 | 28 | 454.4 |
+| Pure decode | 183 | 0 | 1043 | 3026.7 |
+
+Step wall totals 3822.5ms; pure decode is 79.2% of that total. CPU command
+encoding totals 30.5ms, including 6.6ms observed embedding-row decoding.
+The latter is about 0.17% of total step wall, not the primary bottleneck.
+The completion/readback counters total 3789.0/3.0ms. Completion includes
+GPU execution, queue and browser notification delay: the 3.0ms is only the
+readback tail after completion observation, **not total GPU-to-CPU transfer
+latency**. These wall counters must not be added to GPU durations.
+
+#### Decode GPU operator attribution
+
+Representative dispatch article run: round 1, 183 pure-decode steps.
+Pass-preserving round 3 separately reports 2687.6ms summed decode pass
+durations and 2638.9ms GPU spans; its combined B1 passes cannot be assigned
+to individual operators. The broad FFN/head ranking is consistent.
+
+| Operator | Cumulative measured GPU ms | Share of decode dispatch-duration sum |
+| --- | ---: | ---: |
+| FFN gate/up, Q4_K | 756.9 | 27.6% |
+| FFN down, mixed Q4_K/Q6_K | 422.2 | 15.4% |
+| Vocabulary output head, Q6_K | 451.6 | 16.4% |
+| QKV projection | 216.9 | 7.9% |
+| Attention output projection | 179.0 | 6.5% |
+| Attention | 176.4 | 6.4% |
+| Normalization / RoPE / SiLU | 529.9 | 19.3% |
+| Argmax | 12.7 | 0.5% |
+
+All matrix kernels combined account for 73.8%, with 71.7–75.5% across the
+three article dispatch runs. FFN gate/up plus down accounts for 40.7–43.2%;
+the output head for 16.4–17.9%. Across all three fixtures, matrix attribution
+ranges 71.0–77.9%. This replaces applying the old B1 “78%” directly to the
+current page workload. It does **not** identify unpacking alone as that cost:
+weight reads, bit reconstruction and multiply-accumulate are fused inside
+these kernels. No independent DRAM-bandwidth-versus-ALU attribution was made.
+
+#### What is actually repeated
+
+- Article: eight distinct model jobs, 505 total prompt tokens fed exactly
+  once by the step accounting, 1072 total output picks including the 29
+  produced during prefill/mixed steps. Pure-decode-only count is 1043;
+  it is not the whole generated-output count.
+- Each pure-decode step executes 16 layers × four matrix kernels plus one
+  vocabulary head: 65 dispatches per step, **11,895 matrix dispatches** over
+  183 steps. The head runs 183 times in pure decode and 193 times over the
+  entire page. All phases together execute 196 model steps and 32,279
+  dispatches. This is repeated forward computation for changing token
+  activations, not repeated generation of an identical whole prompt.
+- Step-only page counters record 2757 buffer writes totaling 9,809,696 bytes,
+  zero writes of at least 1MiB and zero new GPU-buffer bytes. There is no
+  observed per-token model-weight upload or buffer-allocation loop.
+  Weight repacking occurs at initialization, outside this resident-page
+  interval; no repack shader appears in the page dispatch trace.
+- The current `repackedGemv` reconstructs a weight into registers and reuses
+  it across the active batch rows (`src/lib/kernelgguf.ts:233-246`). It does
+  not separately reconstruct that weight for each of eight sequences within
+  that dispatch. The next autoregressive step still reads/reconstructs
+  weights again; the newly changed hidden activations require new products.
+- The eight prompts share nine leading token IDs. Identical-prompt jobs
+  are absent. Shared-prefix prefill is a possible separate optimization,
+  but its isolated saved milliseconds were not measured and it cannot be
+  credited with eliminating the dominant pure-decode interval.
+
+#### Batch occupancy and priorities
+
+Article pure decode has a mean of 5.70 active rows, not eight. Width eight
+lasts only 13/183 steps; width seven lasts 87; widths five/four/three last
+29/25/25. Only three steps have one or two rows. The 53 steps with fewer
+than five rows consume 770.6ms of wall time in the representative dispatch
+run (731.8–1057.6ms across repetitions). This is measured low-occupancy cost,
+**not fully removable overhead**: no unstarted ninth request exists in this
+fixture, and equalizing output lengths or ideal packing was not tested.
+
+Priorities supported by these measurements:
+
+1. Optimize the repeated FFN gate/up and down matrix paths, then the Q6_K
+   vocabulary head. Preserve the existing Q4_K_M tensor formats and outputs.
+2. Measure fusion/pass-launch reductions for normalization/RoPE/SiLU without
+   mistaking short quantized timestamp values for precise per-kernel costs.
+3. Treat length-aware admission/packing as a separate controlled experiment;
+   a configured width of eight alone does not eliminate tail underfill.
+4. CPU embedding decode, repeated uploads, repeated full-prompt prefill and
+   argmax are not supported as the dominant bottleneck by this trace.
+
+Only diagnostics and existing documentation were changed for this
+investigation; no new production optimization is claimed. The evidence
+archive preserves the isolated extension, drivers and aggregation scripts.
+
+### Q4_K_M optimization candidates and immediate rendering
+
+Evidence: `test-results/browser/gguf-opt-uQVBRj/`, on the same Apple M5
+24GiB / Chrome for Testing 143.0.7499.4 setup. All GPU/browser experiments
+ran serially, using the existing Q4_K_M model, prompts, output limits and
+EOS rules. Candidate kernels were compiled into isolated extension copies.
+**No candidate kernel change was adopted into production.** A lower time
+in one synthetic case is insufficient when page results do not improve or
+generated tokens change.
+
+#### Kernel candidates, in the measured priority order
+
+1. **FFN gate/up and down:** change repacked GEMV from 16 to 32 lanes.
+   Independent GGUF reference coverage passed 1264 repacked matrix cases
+   (maximum scaled error `1.037106575e-6`, threshold `1e-4`). Across prompt
+   lengths 128/512, widths 1/8 and three paired repeats, all generated tokens
+   matched. Candidate/baseline median decode ratios were 1.009, 0.979,
+   0.984 and 0.988 respectively: inconsistent and too small to establish a
+   page-level benefit. A separate 16-output-per-workgroup FFN candidate
+   gave ratios 0.992/0.988/0.983/0.978 at widths 1/3/5/8; not adopted.
+2. **Q6_K vocabulary head:** 32 lanes did not consistently help.
+   Sixteen outputs per workgroup gave ratios 1.028/0.991/1.043/0.936 at
+   widths 1/3/5/8, hurting several widths. A refined candidate restricted
+   that change to width eight and retained exact tokens in the aligned
+   logits check and exact final page strings. Its three page screening
+   times did not improve on baseline, so it was not adopted.
+3. **Normalization/RoPE fusion:** combine independent Q and K
+   normalization/RoPE workgroups into one dispatch per layer, preserving
+   arithmetic and reduction trees. This removes 16 dispatches per model
+   step (and 16 passes when active width exceeds one), not the model
+   computations themselves. All 48 aligned comparisons across prompt
+   lengths 128/512, widths 1/2/4/8 and three paired repeats produced
+   bit-identical checked logits and tokens. Decode ratios ranged
+   0.943–1.053, with no consistent improvement at width eight or in the
+   actual-page screen. Not adopted. No separate SiLU-fusion speedup is
+   claimed.
+4. **Length-aware prefill:** distribute the existing prefill budget
+   proportionally to remaining prompt lengths, without changing token
+   limits. One mixed-workload observation fell from 7088.1 to 6211.8ms,
+   but one job differed by 17 tokens, starting at output index six.
+   Rejected for output mismatch. Existing baseline batched versus
+   individual scheduling also changes that job's tokens; preserving
+   baseline batched results remains the acceptance criterion.
+
+The initial independent fixture lacked `repackSamples`; the complete
+existing reference fixture was then used. The existing logits checker
+cannot check a final full uniform batch when unequal prefill completion
+occurs at width three: the baseline itself failed that assertion. Those
+failed reports are retained. Non-power-of-two geometry runs check exact
+generated tokens, not unobserved logits equality.
+
+Actual installed-extension screening used Aurora and measured completion
+only after all final text was fully opaque, finite animations had ended,
+and two animation frames had elapsed. All nine pages completed, matched
+final strings, and restored original Text identities. These are single
+screening observations, not statistical evidence of a regression:
+
+| Page | Baseline ms | Width-eight head candidate ms | Q/K fusion candidate ms |
+| --- | ---: | ---: | ---: |
+| Short | 1996.6 | 2113.7 | 2047.8 |
+| Article | 4113.9 | 4288.6 | 4206.2 |
+| English | 3973.1 | 4039.9 | 4036.9 |
+
+#### Aurora versus immediate rendering
+
+Production now supports `translationRendering: 'aurora' | 'immediate'`,
+defaulting to Aurora, through the localized settings UI. Saving immediate
+mode updates active translations without restarting inference. Preview
+updates are synchronous and final canonical text is shown without the
+preview timer, animation-frame handoff, gradient or fade. Original Text
+identity, restoration, cancellation, accessibility and fragment reading
+order remain unchanged.
+
+Aurora schedules preview updates after 40ms plus an animation frame, fades
+new text over 160ms and hands final previews to canonical text after 160ms.
+Its 3.4-second decorative cycle does not block completion. Partial-result
+decoration has a separate 180ms grace period.
+
+Five alternating renderer-only browser rounds supplied deterministic text
+to eight real paragraph renderers; **these are not model inference times**:
+
+| Median rendering delay | Aurora ms | Immediate ms |
+| --- | ---: | ---: |
+| Preview submission to preview DOM update | 55.4 | 0.1 |
+| Final submission to fully opaque text plus two frames | 183.7 | 16.7 |
+
+Thus animation adds a measurable roughly 167ms final display tail in this
+controlled experiment, not seconds of model computation. A later fragment
+can produce model progress before an earlier fragment becomes displayable;
+immediate mode deliberately does not bypass that reading-order wait.
+`render-latency/report.json` and streaming screenshots retain the evidence.
+
+#### Installed-extension paired page results
+
+Five serial paired rounds alternated Aurora/immediate order, using the
+same compiled extension and unchanged kernels, eight generation slots,
+resident Q4_K_M weights and a fresh page-result cache. All 30 pages
+completed, restored source Text identities, and matched exact final
+strings. No runtime errors occurred. These page reports do not capture
+token arrays; the isolated kernel comparisons above do.
+
+| Page | Aurora visible median ms | Immediate visible median ms | Aurora under 5s | Immediate under 5s | Median paired saving ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Short | 2411.3 | 2139.0 | 5/5 | 5/5 | 172.2 |
+| Article | 5004.4 | 4029.7 | 2/5 | 5/5 | 633.3 |
+| English | 4546.5 | 3979.4 | 4/5 | 5/5 | 802.0 |
+
+Immediate was faster in all 15 pairs; all its visible completions were
+below five seconds, with a maximum of 4598.1ms. Aurora had four visible
+five-second misses, retained in the denominator. Its canonical-DOM-only
+metric would have counted only two misses: measuring the final fade
+changes the answer.
+
+The directly observed canonical-to-visible tail was 158.2/163.7/158.7ms
+for Aurora versus a median of zero for immediate. Last host completion
+to visible completion fell from 172.4–179.1ms to 10.2–14.8ms. First
+progress-to-preview medians fell from 47.5 to 3.4ms on the short page and
+52.8 to 2.1ms on the English page. The article retained a 240.1ms median
+wait, versus 349.7ms with Aurora, because ordered fragments cannot all
+display as soon as any fragment produces progress.
+
+Total paired savings exceed the isolated final display-tail reduction.
+Host execution intervals also varied substantially between these runs;
+this experiment does not separate animation/resource contention from
+browser/GPU timing variability. Do not attribute the entire page-time
+difference to shader acceleration or claim an established inference
+speedup. The product change removes proven UI delay, not autoregressive
+matrix work.
+
+`animation-paired/comparison.json` retains medians/ranges and all final
+string comparisons; `experiment.json` retains paired differences,
+hardware/model/fixture provenance and limits. Settings and translated
+page screenshots were visually inspected. The settings screenshot is
+taken before GGUF import; the timed reports identify and hash the GGUF
+model actually used.
+
+This finite, warm, three-page experiment does **not** establish a universal
+five-second guarantee, cold-start performance, or a p95. Earlier warm
+five-second misses remain valid evidence. The production recommendation
+for lowest display latency is Settings → immediate rendering → Save;
+Aurora remains the default. Candidate sources, drivers and copied builds
+are archived; disposable working files were removed.
+
+### Japanese-only three-second bottleneck measurement
+
+The acceptance target is now **3000ms**, with English excluded. Reused
+the unchanged Japanese short/article fixtures, translated to Korean with
+resident PLaMo 3 Translate 0.8B GGUF Q4_K_M, eight slots and immediate
+rendering. Evidence: `test-results/browser/gguf-ja-profile-QlzzmQ/`.
+The model hash remains
+`70891ec70dc7ab4205745a38307867c2881b99239f20327927633abfe4bc9ec6`;
+the original fixture hash is unchanged and the selected Japanese subset
+has its own hash in `report.json`.
+
+On Apple M5 / Chrome for Testing 143.0.7499.4, three rounds alternated
+plain/step/pass/dispatch order, with GPU browser processes serialized.
+Plain mode has no worker profiling hooks; it retains page DOM and host
+boundary observation. Pass mode preserves compute-pass grouping.
+Dispatch mode splits passes for attribution and is not acceptance latency.
+All 24 pages completed and restored original Text identities. All final
+strings matched; all 18 instrumented prompt/output token comparisons
+matched. Plain mode deliberately does not capture worker token arrays.
+The completed Japanese article screenshot was visually inspected.
+
+#### Acceptance and variability
+
+Enable click to complete, fully visible text including below-fold source,
+with two animation-frame opportunities; no scrolling:
+
+| Japanese page | Plain median ms | Plain range ms | Within 3000ms |
+| --- | ---: | ---: | ---: |
+| Short | 2430.3 | 1522.8–2502.2 | 3/3 |
+| Article | 4700.4 | 3148.0–4795.9 | 0/3 |
+
+The article needs 1700.4ms (36.2%) less time relative to this median.
+The fastest observed run also misses. Three samples do not establish
+p95 or a universal bound. The same output and model-step counts have
+substantial timing variation: first-to-third dispatch-profiled article
+GPU spans rise from 3384.7 to 4164.5ms. Therefore variability is not solely
+a final DOM paint issue. Thermal state, frequency, power and external GPU
+contention were not independently measured; no specific cause is proven.
+Profiling modes sometimes have lower medians than plain despite extra
+instrumentation. These differences are not negative profiling overhead or
+an optimization: browser runs occurred at different times.
+
+#### Model phases and non-model overhead
+
+The median-completion step-only article run (round three, 4116.6ms) has:
+
+| Component | Wall ms | Model steps |
+| --- | ---: | ---: |
+| Prefill only | 253.3 | 4 |
+| Mixed prompt ingestion and decoding | 347.9 | 9 |
+| Pure autoregressive decode | 3380.5 | 183 |
+| Outside measured model steps | 134.9 | — |
+
+Pure decode is 84.9% of measured model-step wall time in that run;
+the three-run range is 79.9–84.9%. It accounts for 82.1% of the whole
+representative page interval. Total step wall is 3981.7ms, including
+58.4ms encoding, 3917.8ms queue/GPU completion wait and 5.5ms residual
+readback. The completion wait overlaps GPU work and browser scheduling;
+it must not be labeled CPU overhead or added to GPU timestamps.
+
+CPU embedding-row reconstruction totals 12.6ms, already inside model-step
+encoding, not an additional phase. Host work outside measured steps is
+77.8ms; request collection/admission before the first host generation is
+47.3ms, and final display after the host is 9.8ms in this same run.
+In plain runs, last-host-to-visible median is 11.9ms (9.9–15.5ms).
+Removing remaining display latency cannot recover the missing seconds.
+The article's first-progress-to-preview median remains 260.7ms because
+fragment reading order can withhold a later fragment; this is not an
+Aurora fade in immediate mode.
+
+#### Repeated GPU work and batch utilization
+
+Representative dispatch-profiled article decode (round two):
+
+| Operator | GPU dispatch-duration sum ms | Share |
+| --- | ---: | ---: |
+| FFN gate/up | 853.2 | 27.9% |
+| FFN down | 452.0 | 14.8% |
+| Q6_K vocabulary head | 516.3 | 16.9% |
+| QKV projection | 238.4 | 7.8% |
+| Attention output projection | 188.0 | 6.2% |
+| Normalization / RoPE / SiLU | 588.2 | 19.2% |
+| Attention | 192.2 | 6.3% |
+| Argmax | 28.0 | 0.9% |
+
+Matrix kernels total 73.9% (73.6–74.0% across repetitions); FFN alone
+is 42.7% in the representative run. These kernels fuse packed-weight
+reads/reconstruction and multiply-accumulate; the trace does not isolate
+dequantization from memory traffic or arithmetic.
+
+The article still has eight unique jobs, 505 prompt tokens ingested once,
+1072 output picks in total, and 1043 output picks in pure decode.
+Each of 183 decode steps executes 16 layers × four matrices plus one
+vocabulary head: **11,895 matrix dispatches**, not duplicated whole-prompt
+prefill. All phases together contain 196 model steps and 32,279 dispatches.
+Step-only buffer counters show 2757 writes / 9,809,696 bytes, no writes
+of at least 1MiB and zero newly allocated GPU-buffer bytes during the
+page interval. There is no observed per-token model upload or repacking.
+
+Average pure-decode width is 5.70, not eight. Width seven occupies
+87/183 steps, eight only 13/183. In the representative step-only run,
+width seven costs 1873.5ms; the 53 steps below width five cost 753.8ms.
+This is required work at low occupancy, not 753.8ms of freely removable
+idle time: all eight jobs have already been admitted and no ninth
+independent request exists to fill the tail. Output lengths range
+23–184 tokens, with unchanged EOS behavior.
+
+The short page needs 83 decode steps and 5395 matrix dispatches, with
+average width 6.72. Its lower repeated work and better occupancy distinguish
+it from the failing article; language filtering alone does not remove
+the article's decode bottleneck.
+
+Priorities remain FFN and Q6_K head throughput, particularly widths seven
+and three-to-five rather than an eight-only specialization, then
+normalization/RoPE/SiLU launch cost. Previously rejected candidates remain
+rejected; this measurement introduces no new kernel optimization.
+Prefill-only, CPU embedding, argmax and rendering changes alone are not
+supported as sufficient solutions to the three-second article target.
+
+Positive GPU pass durations are quantized in 65.536-microsecond increments.
+117851 zero-duration pass readings do not imply free kernels; 1065
+negative span-minus-pass-sum readings are retained, not interpreted as idle
+time. Use aggregate attribution and the pass-preserving control, not
+individual tiny timestamp readings, to choose optimization targets.
+Raw reports, phase/width aggregates, paired output comparisons and the
+isolated builds/drivers are archived. Disposable working files were
+removed; production sources and extension builds were not changed.
+
+### Japanese Q4_K_M optimization candidate gates
+
+Evidence root: `test-results/browser/gguf-ja-opt-zfaux8/`. Candidates use
+isolated source snapshots and the original model bytes. The acceptance
+contract remains Japanese→Korean, eight slots, immediate rendering,
+resident model, fresh page-result cache and complete below-fold coverage.
+Model precision, prompts, tokenization, output limits and EOS are unchanged.
+GPU/browser experiments run serially.
+
+#### FFN batch sharing: rejected
+
+F2/F4 retain eight outputs and sixteen reduction lanes per workgroup.
+Only the first batch sub-tile reconstructs a K256 weight block into 8KiB
+of workgroup storage; other sub-tiles consume it. Maximum total workgroup
+storage is 12KiB. Accumulation and reduction order are unchanged.
+
+Independent fixtures passed 900 cases and 16 repack checks, including
+FFN-sized shapes made by repeating independent fixture rows. These are
+not actual-model weights. Real-model L128/512, B1–8 and 64 output tokens
+passed 48 gate/up runs with identical tokens and zero measured final-logit
+difference. F4 down-only separately passed 32 real-model accuracy runs.
+
+The subsequent screen used L128/512, B1/3/4/5/7/8, 32 output tokens and
+three alternating-order repetitions. Ratios below compare per-condition
+median **decode wall time**, not GPU timestamps or page completion:
+
+| Candidate | B7 L128 ratio | B7 L512 ratio | B3–8 decode condition ratios |
+| --- | ---: | ---: | ---: |
+| F2 gate/up | 1.967 | 1.826 | 1.403–2.007 |
+| F4 gate/up | 1.725 | 1.632 | 1.160–1.955 |
+| F4 down only | 1.419 | 1.334 | 1.212–1.442 |
+
+All ten changed-width conditions regress for each candidate. F4 was the
+less costly gate/up sharing scheme and was therefore tested independently
+on down; its down screen lost all 30 changed-width decode pairs.
+Neither FFN role is adopted. H-share is not run because its prerequisite,
+an accepted FFN sharing scheme, is absent. No page-speedup claim follows
+from these synthetic-input screens. Shared-memory/barrier overhead is a
+possible explanation, not an independently measured cause.
+
+#### Q6 vocabulary head byte codes: not adopted
+
+H-byte stores the original 0–63 codes in bytes, without requantization.
+Independent checks passed 90 GEMV cases and ten exact code/coefficient
+layout comparisons, including a repeated-fixture N107520/K1536 head.
+Real-model accuracy passed 32 runs with unchanged generated tokens.
+
+Nine lifecycle cases covered normal compact/f32/direct layouts, forced
+and automatic budget handling, unsupported formats, binding rejection and
+an injected allocation failure. All disposed with zero live owned buffers
+and balanced error scopes. The compact candidate observed 527,720,448
+resident matrix bytes and 535,461,888 peak matrix bytes; all 65 temporary
+source uploads were released. Head codes and coefficients occupy
+165,150,720 and 12,902,400 bytes respectively. This increases resident
+matrix storage by 41,287,680 bytes (39.375MiB). These are owned-buffer
+measurements, not whole-browser memory.
+
+The 72-run paired screen had mixed results rather than a reliable gain.
+B7 decode median ratios were 1.069 at L128 and 1.035 at L512;
+B1 was also slower at both lengths. B4/B5 improvements did not establish
+an overall decode advantage. Keep the original packed head rather than
+paying the memory increase for inconsistent throughput. H-byte was not
+promoted to the page gate, and no whole-page benefit is claimed.
+
+#### NORM_CHAIN lane-local reuse: rejected for output divergence
+
+The candidate retained each lane's twelve residual sums instead of
+reloading `combined`. The first diagnostic mistakenly required exact
+floating-point equality, stricter than the approved 1e-4 scaled-error
+contract, and stopped at a 1.42e-14 difference. That failed report is
+retained as `norm-numerics-bitexact-failed/`. With the planned tolerance,
+all 40 isolated normalization cases passed, including near-zero inputs.
+
+This was insufficient for autoregressive correctness. Real-model L128/B1
+diverged at output token nine (baseline 106327, candidate 35254).
+Final-step logits had cosine 0.312555 and relative L2 1.376125, failing the
+unchanged model gate. Screening stopped immediately; no timing benefit
+is accepted and no product change is made. The isolated tolerance does
+not permit changing generated tokens.
+
+#### Shared RoPE rotation table
+
+R-table computes local/global sin/cos once per pure decode step into an
+8192-byte GPU buffer. Q/K retain their original RMS and rotation arithmetic;
+prefill and mixed steps retain the original path. Frequency uploads are
+shared at initialization, giving a net owned-buffer increase of 4608 bytes.
+
+All 80 isolated cases were bit-identical, including both frequency groups,
+widths 1–8, maximum/heterogeneous/invalid positions, reused KV slots and
+near-zero inputs. All 32 real-model accuracy runs matched tokens and final
+logits exactly. The 72-run screen was mixed: L128 B3/4/5/7/8 decode median
+ratios were 0.997/0.981/0.978/0.893/0.968, while L512 B7 regressed to 1.319.
+This short-input signal promoted R-table to the actual Japanese page gate;
+screen results alone are not an accepted speedup.
+
+The first actual-page gate completed 32/32 pages with matching final
+strings and successful source restoration. Article paired medians were
+3448.0ms baseline versus 3188.8ms candidate (five/five pair wins), and
+short-page medians were 1721.7ms versus 1688.1ms. Nevertheless, this is
+**inconclusive**, not a validated 7.5% improvement: baseline bracket
+medians drifted by +65.8% for article and +71.1% for short-page, exceeding
+the 10% limit. Candidate article met three seconds in only one/five runs.
+AC power stayed attached at 80%; `pmset` recorded no warning levels but
+provided no GPU clocks/temperature evidence explaining the drift.
+
+The one allowed fresh-session retry completed seven pages, then stopped
+on a baseline article's nonzero scroll position (552.5 instead of zero).
+Translation reported completion, but the no-scroll whole-page contract
+failed; the attempt is not counted as a valid page result. The failure and
+raw report are preserved in `rope-pages-2/`. No third attempt is made.
+R-table remains unadopted. The candidate article screenshot from the first
+gate was inspected: all four Korean text blocks were visible, including
+below-fold blocks, and the excluded marker remained untranslated.
+The 4608-byte net table/frequency buffer change above is calculated from
+allocation sizes, not a measured whole-model peak.
+
+#### Gate/up SiLU epilogue
+
+S-epilogue maps four gate and four corresponding up outputs to one
+workgroup, preserves their sixteen-lane accumulation/reduction, then
+writes SiLU×up directly to `act.s`. Pure decode removes the separate SiLU
+dispatch and `act.gu` round trip; prefill/mixed steps keep the original
+path and buffer. No FFN sharing candidate was adopted, so this uses the
+original GEMV geometry rather than a combined sharing experiment.
+
+All 256 isolated cases passed the 1e-4 contract against unfused output and
+the independent oracle, including zero/near-zero and larger signed inputs.
+All 32 real-model L128/512, B1–8, output64 runs preserved generated tokens.
+The 72-run screen's B7 decode ratios were 0.914 at L128 and 0.816 at L512.
+B1 regressed, and other widths had mixed results; only the actual page gate
+can establish whether the dispatch reduction is worth adopting.
+
+The first page gate completed 32/32 pages with identical final strings and
+successful restoration. Article medians were 3597.0ms baseline versus
+3523.9ms candidate: only 2.0% lower and three/five pair wins, below the
+required 5% and four/five. No candidate article run met three seconds
+(range 3222.3–4147.7ms). Short-page medians were 1873.7ms versus 1847.6ms,
+but its baseline brackets drifted by −13.7%, also invalidating acceptance.
+The one allowed retry completed three pages, then failed the same baseline
+article no-scroll assertion at scrollY 552.5. Its raw failure is retained
+in `silu-pages-2/`; no third attempt is made. S-epilogue is not adopted.
+The completed candidate article screenshot was inspected.
+
+#### Outcome
+
+No kernel candidate passed the adoption gates; production kernels and
+extension builds remain unchanged. Consequently, no cumulative candidate
+exists for the final ten-pair gate, and **the three-second goal is not
+achieved**. Do not present either drifting page comparison as a validated
+optimization or compare it with an older session to claim a speedup.
+
+Retained changes are the per-job logits diagnostic repair and these
+performance/testing records. Evidence contains 1366 passing independent
+numerical cases, 26 repack checks, 585 completed full-model runs plus the
+failed normalization run, and 74 completed page runs plus two invalid
+no-scroll runs. All failures remain in the archive. `outcome.json` records
+candidate decisions; `kernel-summary.json` aggregates raw model reports.
+No operator-attribution or final integration run is claimed for a rejected
+candidate. Remaining work is still repeated model computation; this
+experiment did not establish a safe throughput improvement.
+
+### Quantized GEMV register lifetime and narrow pass grouping screen
+
+Evidence: `test-results/browser/gguf-gpu-focus-aw4MHw/`. This targets the
+current custom WebGPU engine, not upstream wllama. Both candidates are
+rejected; production kernel sources and extension builds are unchanged.
+
+`register` changes only repacked GEMV widths 3–8: reconstruct four adjacent
+K weights, then load and consume one activation row at a time. It preserves
+each accumulator's FMA order, final reduction, packed representation and
+workgroup geometry. Lower source-level activation lifetime is a hypothesis
+about register pressure, not measured physical register allocation.
+
+`qk-pass` groups only the independent Q normalization/RoPE and K/V
+preparation dispatches for GGUF pure-decode widths 2–8. It leaves all shader
+math, prefill/mixed execution and admission unchanged. This is not the
+previously rejected blanket pass coalescing scheme.
+
+The first register implementation shadowed the packed `low0`/`low1`
+variables with decoded locals. An independent Q6 fixture caught the error;
+`numerics.log` retains the failure. After renaming those locals, the unchanged
+oracle passed 49 direct cases, 16 repack checks and 1264 repacked matrix
+cases. Maximum scaled matrix error was 1.03711e-6 against the 1e-4 limit.
+Output guard checks passed and GPU errors were empty.
+
+The headed, ordinary-WebGPU screen used the original Q4_K_M file,
+L128/512, B1/3/5/7/8, 32 generated tokens, prefill64 and three alternating
+variant-order repetitions. All 90 real-model runs completed; all 90
+pairwise token comparisons matched. Diagnostic final-logit replays had
+zero measured difference; validation, page and cleanup errors were empty.
+
+Ratios below are candidate/baseline per-condition median **decode wall
+time**, not GPU timestamps or complete-page latency:
+
+| Candidate | L128 B7 | L512 B7 | L128 B8 | L512 B8 | B3/5/7/8 geometric mean |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Register lifetime | 1.061 | 1.060 | 1.072 | 1.051 | 1.033 |
+| Q/K preparation pass | 0.980 | 0.925 | 1.033 | 1.096 | 1.002 |
+
+Neither passes the predeclared promotion requirement of at least 5% lower
+B7 decode medians at both lengths, changed-width geometric mean below one
+and no B1 median regression above 3%. Both candidates leave B1 execution
+unchanged; its observed variation, including +3.7% for qk-pass/L512, is not
+evidence of altered single-row kernel cost. No context-dependent switch
+was selected from favorable cells.
+
+No candidate reached all-width output64 validation, installed-page
+acceptance or winner attribution. This experiment establishes neither a
+matrix-cost reduction nor improved hardware occupancy, page speedup or the
+three-second goal. Browser measurements do not expose physical register
+counts or occupancy; queue wait is not additional exclusive CPU cost.
+`experiment.json`, `screen-analysis.json`, `outcome.json` and
+`experiment-sources.tar.gz` preserve gates, raw-result links and reproduction
+inputs. No unrelated test suite was run.
+
+## ONNX q4f16 K-block scheduling screen
+
+Evidence: `test-results/browser/onnx-opt-D79eDb/`. Both isolated candidates
+target the current custom ONNX GEMV's low-nibble-first Q4, K128 blocks and
+per-output/block scales. Model bytes, packed storage, allocation, FMA order,
+scale factoring at widths one/two and final lane reduction are unchanged.
+Neither candidate is adopted.
+
+- `prefetch` stages the next block's packed words/scales before computing
+  the current block. This is source-level load scheduling, not measured
+  hardware prefetch or occupancy.
+- `k2` emits two consecutive K128 block bodies per outer loop, with an
+  odd-block guard. It retains the dynamic component loop, rather than
+  repeating the previously rejected eight-nibble unroll.
+
+Each passed the existing independent packed-GEMV oracle: 12 cases and
+991,778 output values, zero absolute error and intact canaries. Coverage
+includes widths 1–8, one/odd/even blocks, dense K1536/K6144, incomplete
+output tiles and two-dimensional dispatch tails.
+
+Headed Chrome 143 without unsafe flags ran the original q4f16 model at
+L128/512 × B1/3/5/7/8 × output32 × three alternating-order repetitions.
+All 90 model runs and 90 pairwise token comparisons passed; final-logit
+diagnostic replay measured zero difference. GPU, page and cleanup errors
+were empty. The following are ratios of candidate/baseline per-condition
+median decode wall times, not page latency or GPU timestamps:
+
+| Candidate | All-condition geometric mean | L128 B7 | L512 B7 |
+| --- | ---: | ---: | ---: |
+| Next-block load scheduling | 1.010 | 1.037 | 1.076 |
+| Two-block outer loop | 0.996 | 1.208 | 1.024 |
+
+Promotion required geometric mean ≤0.95 and no condition above 1.03,
+in addition to correctness. Both fail. K2's L128/B7 loses all three pairs;
+its favorable long-context results do not justify a post-hoc context
+switch. Baseline variability remains material: L512/B8 decode samples
+were 366.8/505.1/454.5ms. Small aggregate differences are not established
+speedups, and no physical register/occupancy explanation was measured.
+
+No candidate reached all-width output64 or Japanese installed-page gates.
+Production kernels and builds remain unchanged; no new page-speedup or
+GGUF-relative gain is claimed. `experiment.json` records the predeclared
+gate; `screen-analysis.json`, `outcome.json`, raw reports and
+`experiment-sources.tar.gz` preserve decisions and reproduction inputs.

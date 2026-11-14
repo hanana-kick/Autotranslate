@@ -13,6 +13,8 @@
 //   CHUNK_BENCH=1 ...                     # fixed-concurrency source-budget experiment
 //   CHUNK_BENCH=1 CHUNK_COMPARE=1 ...     # same source: whole vs short serial/parallel requests
 //   PAGE_CHUNK_BENCH=1 ...                # Japanese content-to-host rollout, real model
+//   SCROLL_COMPLETION_BENCH=1 ...         # last scroll event to all visible Japanese units complete
+//   SCROLL_LABEL=baseline SCROLL_ROUNDS=3 # paired frozen-build completion measurements
 //   POOL_BENCH=1 ...                      # fixed whole-source pool, no glossary/context
 //   CONCURRENCY_BENCH=1 ...               # independent engine-capacity experiment, not a UI setting
 //   EXTENSION_DIR=<built directory> ...   # compare a frozen build without replacing build/chrome
@@ -213,12 +215,41 @@ if (install.kind !== 'ok') {
   await modelServer?.close();
   throw new Error(`install failed: ${install.text}`);
 }
-await options.locator('#parallelTranslation').setChecked(process.env.TRANSLATION_CONCURRENCY === '2');
+const requestedConcurrency = Number(process.env.TRANSLATION_CONCURRENCY || 1);
+if (![1, 2, 4, 8].includes(requestedConcurrency)) throw new Error('TRANSLATION_CONCURRENCY must be 1, 2, 4 or 8');
+const concurrencyControl = options.locator('#parallelTranslation');
+if (await concurrencyControl.evaluate(element => element.tagName === 'SELECT')) {
+  await concurrencyControl.selectOption(String(requestedConcurrency));
+} else {
+  // Frozen baseline builds expose the old one/two checkbox.
+  if (requestedConcurrency > 2) throw new Error('Frozen checkbox build supports only concurrency 1/2');
+  await concurrencyControl.setChecked(requestedConcurrency === 2);
+}
 await options.locator('#save').click();
 await options.waitForFunction((width) => AT.settings.load().then(settings =>
-  settings.translationConcurrency === width), process.env.TRANSLATION_CONCURRENCY === '2' ? 2 : 1);
+  settings.translationConcurrency === width), requestedConcurrency);
 summary.translationConcurrency = (await options.evaluate(() => AT.settings.load())).translationConcurrency;
 await options.screenshot({ path: join(OUT, 'sites-options.png') });
+
+if (process.env.FULL_PAGE_BENCH === '1') {
+  try {
+    const { runFullPageBenchmark } = await import('./full-page-benchmark.mjs');
+    await runFullPageBenchmark({ context, options, worker, output: OUT, extension });
+  } finally {
+    try { await context.close(); } finally { await modelServer?.close(); }
+  }
+  process.exit(0);
+}
+
+if (process.env.SCROLL_COMPLETION_BENCH === '1') {
+  try {
+    const { runScrollCompletionBenchmark } = await import('./scroll-completion-benchmark.mjs');
+    await runScrollCompletionBenchmark({ context, options, worker, output: OUT, extension });
+  } finally {
+    try { await context.close(); } finally { await modelServer?.close(); }
+  }
+  process.exit(0);
+}
 
 if (process.env.PAGE_CHUNK_BENCH === '1') {
   try {

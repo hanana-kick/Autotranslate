@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { load } from './helpers.ts';
 
-const AT = load('lib/constants.js', 'lib/local.js', 'lib/plamo3.js', 'lib/modelstore.js');
+const AT = load('lib/constants.js', 'lib/local.js', 'lib/modelstore.js');
 const { modelstore, local } = AT;
 const STORE = local.STORE;
 
@@ -81,7 +81,7 @@ function fakes() {
       ages.set(id, clock.now);
       return size;
     },
-    read: async (id: string) => (stored.has(id) ? { size: stored.get(id)!.byteLength } : null),
+    read: async (id: string) => (stored.has(id) ? new Blob([Uint8Array.from(stored.get(id)!)]) : null),
     writePart: async (id: string, name: string, stream: ReadableStream<Uint8Array>) => {
       const reader = stream.getReader();
       let size = 0;
@@ -165,13 +165,13 @@ test('an empty store lists nothing', async () => {
 });
 
 test('a list is normalised even when the store holds junk', async () => {
-  active.meta.set('good', { id: 'good', name: 'g.task', size: 5_000_000, sourceUrl: '', createdAt: 5 });
+  active.meta.set('good', { id: 'good', name: 'g.onnx', size: 5_000_000, sourceUrl: '', createdAt: 5 });
   active.meta.set('broken', { id: 'broken', size: 1 });
   assert.deepEqual((await modelstore.list()).map((model: { id: string }) => model.id), ['good']);
 });
 
 test('removing a model deletes its bytes as well as its record', async () => {
-  const result = await modelstore.ingest({ name: 'kept.task', sourceUrl: 'https://a.test/kept.task', stream: streamOf(...big()) });
+  const result = await modelstore.ingest({ name: 'kept.onnx', sourceUrl: 'https://a.test/kept.onnx', stream: streamOf(...big()) });
   assert.equal(result.ok, true);
   const id = result.record.id;
   assert.equal(active.stored.has(id), true);
@@ -183,7 +183,7 @@ test('removing a model deletes its bytes as well as its record', async () => {
 });
 
 test('read hands back the stored file only for a known model', async () => {
-  const result = await modelstore.ingest({ name: 'file.task', sourceUrl: 'https://a.test/file.task', stream: streamOf(...big()) });
+  const result = await modelstore.ingest({ name: 'file.onnx', sourceUrl: 'https://a.test/file.onnx', stream: streamOf(...big()) });
   const blob = await modelstore.read(result.record.id);
   assert.equal(blob.size, local.MIN_MODEL_BYTES + 1024);
 });
@@ -192,19 +192,19 @@ test('read hands back the stored file only for a known model', async () => {
 
 test('a model is registered only after the whole stream is written', async () => {
   const result = await modelstore.ingest({
-    name: 'my model.task',
-    sourceUrl: 'https://a.test/my%20model.task',
+    name: 'my model.onnx',
+    sourceUrl: 'https://a.test/my%20model.onnx',
     stream: streamOf(bytes(2_000_000), bytes(1_000_000))
   });
   assert.equal(result.ok, true);
   assert.equal(result.bytes, 3_000_000);
   assert.equal(result.record.size, 3_000_000, 'the real byte count wins over any claimed size');
-  assert.equal(result.record.name, 'my model.task');
+  assert.equal(result.record.name, 'my model.onnx');
   assert.deepEqual(await modelstore.list(), [result.record]);
 });
 
 test('a file too small to be a model is deleted, not registered', async () => {
-  const result = await modelstore.ingest({ name: 'tiny.task', sourceUrl: 'https://a.test/tiny.task', stream: streamOf(bytes(10)) });
+  const result = await modelstore.ingest({ name: 'tiny.onnx', sourceUrl: 'https://a.test/tiny.onnx', stream: streamOf(bytes(10)) });
   assert.equal(result.ok, false);
   assert.equal(result.error, 'too-small');
   assert.equal(active.stored.size, 0);
@@ -221,7 +221,7 @@ test('a failed write leaves nothing behind', async () => {
       }
     }
   });
-  const result = await modelstore.ingest({ name: 'half.task', sourceUrl: 'https://a.test/half.task', stream: streamOf(...big()) });
+  const result = await modelstore.ingest({ name: 'half.onnx', sourceUrl: 'https://a.test/half.onnx', stream: streamOf(...big()) });
   assert.equal(result.ok, false);
   assert.equal(result.error, 'disk full');
   assert.equal(active.deleted.length, 1, 'the partial file must be removed');
@@ -239,25 +239,25 @@ test('an aborted transfer reports a cancellation', async () => {
       }
     }
   });
-  const result = await modelstore.ingest({ name: 'gone.task', sourceUrl: 'https://a.test/gone.task', stream: streamOf(...big()) });
+  const result = await modelstore.ingest({ name: 'gone.onnx', sourceUrl: 'https://a.test/gone.onnx', stream: streamOf(...big()) });
   assert.equal(result.error, 'cancelled');
 });
 
 test('a transfer with no source is refused before any file is made', async () => {
-  assert.equal((await modelstore.ingest({ name: 'x.task', sourceUrl: 'https://a.test/x.task', stream: null })).error, 'no-stream');
-  assert.equal((await modelstore.ingest({ name: '  ', sourceUrl: 'https://a.test/x.task', stream: streamOf(...big()) })).error, 'no-name');
+  assert.equal((await modelstore.ingest({ name: 'x.onnx', sourceUrl: 'https://a.test/x.onnx', stream: null })).error, 'no-stream');
+  assert.equal((await modelstore.ingest({ name: '  ', sourceUrl: 'https://a.test/x.onnx', stream: streamOf(...big()) })).error, 'no-name');
   assert.equal(active.stored.size, 0);
 });
 
 test('a non-https source is stored as no source at all', async () => {
-  const result = await modelstore.ingest({ name: 'local.task', sourceUrl: 'file:///tmp/x', stream: streamOf(...big()) });
+  const result = await modelstore.ingest({ name: 'local.onnx', sourceUrl: 'file:///tmp/x', stream: streamOf(...big()) });
   assert.equal(result.record.sourceUrl, '');
 });
 
 test('re-downloading the same file name replaces the older copy', async () => {
-  const first = await modelstore.ingest({ name: 'same.task', sourceUrl: 'https://a.test/same.task', stream: streamOf(...big()) });
+  const first = await modelstore.ingest({ name: 'same.onnx', sourceUrl: 'https://a.test/same.onnx', stream: streamOf(...big()) });
   active.clock.now += 1000;
-  const second = await modelstore.ingest({ name: 'same.task', sourceUrl: 'https://b.test/same.task', stream: streamOf(...big()) });
+  const second = await modelstore.ingest({ name: 'same.onnx', sourceUrl: 'https://b.test/same.onnx', stream: streamOf(...big()) });
   assert.notEqual(first.record.id, second.record.id);
   const staged = await modelstore.list();
   assert.equal(staged.length, 2, 'file validation is not inference verification');
@@ -268,13 +268,13 @@ test('re-downloading the same file name replaces the older copy', async () => {
 });
 
 test('a failed re-download leaves the working model alone', async () => {
-  const kept = await modelstore.ingest({ name: 'keep.task', sourceUrl: 'https://a.test/keep.task', stream: streamOf(...big()) });
+  const kept = await modelstore.ingest({ name: 'keep.onnx', sourceUrl: 'https://a.test/keep.onnx', stream: streamOf(...big()) });
   active.clock.now += 60_000;
   active.use({
     fetchImpl: async () =>
       response(200, bodyOf(bytes(Math.floor(local.MIN_MODEL_BYTES / 2))), { 'content-length': String(local.MIN_MODEL_BYTES) })
   });
-  const again = await modelstore.download({ url: 'https://a.test/keep.task' });
+  const again = await modelstore.download({ url: 'https://a.test/keep.onnx' });
   assert.equal(again.error, 'truncated');
   assert.deepEqual((await modelstore.list()).map((model: { id: string }) => model.id), [kept.record.id]);
   assert.equal(active.stored.has(kept.record.id), true, 'a half file must not replace working bytes');
@@ -285,7 +285,7 @@ test('a failed re-download leaves the working model alone', async () => {
 test('a download is rejected before the network for a bad url', async () => {
   const calls: string[] = [];
   active.use({ fetchImpl: async (url: string) => (calls.push(url), response(200, bodyOf(), length)) });
-  const result = await modelstore.download({ url: 'http://a.test/model.task' });
+  const result = await modelstore.download({ url: 'http://a.test/model.onnx' });
   assert.equal(result.ok, false);
   assert.equal(result.error, 'bad-url');
   assert.deepEqual(calls, []);
@@ -303,14 +303,31 @@ test('a download asks for bytes and carries no credential', async () => {
     }
   });
   const result = await modelstore.download({
-    url: 'https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/main/plamo-3-translate-0.8b-Q4_K_M.gguf'
+    url: 'https://huggingface.co/TeamFlaxia/plamo-3-translate-0.8b-onnx/resolve/main/onnx/model_q4f16.onnx'
   });
   assert.equal(result.ok, true, String(result.error));
   assert.equal(
     seen[0]!.url,
-    'https://huggingface.co/pfnet/plamo-3-translate-0.8b-GGUF/resolve/main/plamo-3-translate-0.8b-Q4_K_M.gguf'
+    'https://huggingface.co/TeamFlaxia/plamo-3-translate-0.8b-onnx/resolve/main/onnx/model_q4f16.onnx'
   );
   assert.deepEqual(seen[0]!.init.headers, { Accept: 'application/octet-stream' });
+});
+
+test('unsupported GGUF imports are rejected without deleting stored legacy bytes', async () => {
+  const legacy = { id: 'legacy-model', name: 'legacy.gguf', size: local.MIN_MODEL_BYTES, sourceUrl: '', createdAt: 1 };
+  active.meta.set(legacy.id, legacy);
+  aged(legacy.id, 0);
+  aged(`${legacy.id}/${legacy.id}`, 0);
+  const result = await modelstore.ingest({
+    name: 'broken.gguf', sourceUrl: 'file://local', stream: streamOf(...big())
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error, 'not-onnx');
+  assert.equal((await modelstore.download({ url: 'https://a.test/model.gguf' })).error, 'not-onnx');
+  assert.deepEqual(await modelstore.list(), [legacy]);
+  assert.deepEqual((await modelstore.sweep()).removed, []);
+  assert.equal(active.stored.size, 2);
+  assert.deepEqual(active.deleted, []);
 });
 
 test('an http failure keeps the status code in the error', async () => {
@@ -318,7 +335,7 @@ test('an http failure keeps the status code in the error', async () => {
   // as "this repository is gated": the download failed, with the code to show.
   for (const status of [401, 403, 503]) {
     active.use({ fetchImpl: async () => response(status, null) });
-    const result = await modelstore.download({ url: 'https://a.test/model.task' });
+    const result = await modelstore.download({ url: 'https://a.test/model.onnx' });
     assert.equal(result.error, `http-${status}`, `status ${status}`);
     assert.equal(active.stored.size, 0, 'a refused download stores nothing');
   }
@@ -330,7 +347,7 @@ test('a network failure reports why', async () => {
       throw new Error('offline');
     }
   });
-  assert.equal((await modelstore.download({ url: 'https://a.test/model.task' })).error, 'offline');
+  assert.equal((await modelstore.download({ url: 'https://a.test/model.onnx' })).error, 'offline');
 });
 
 test('an aborted download reports a cancellation', async () => {
@@ -341,22 +358,22 @@ test('an aborted download reports a cancellation', async () => {
       throw abort;
     }
   });
-  assert.equal((await modelstore.download({ url: 'https://a.test/model.task' })).error, 'cancelled');
+  assert.equal((await modelstore.download({ url: 'https://a.test/model.onnx' })).error, 'cancelled');
 });
 
 test('a response without a body cannot be stored', async () => {
   active.use({ fetchImpl: async () => response(200, null, length) });
-  assert.equal((await modelstore.download({ url: 'https://a.test/model.task' })).error, 'no-body');
+  assert.equal((await modelstore.download({ url: 'https://a.test/model.onnx' })).error, 'no-body');
 });
 
 test('a declared size outside the plausible range is refused up front', async () => {
   active.use({ fetchImpl: async () => response(200, bodyOf(bytes(10)), { 'content-length': '10' }) });
-  assert.equal((await modelstore.download({ url: 'https://a.test/model.task' })).error, 'bad-size');
+  assert.equal((await modelstore.download({ url: 'https://a.test/model.onnx' })).error, 'bad-size');
 });
 
 test('a file that is not the advertised model is refused', async () => {
   active.use({ fetchImpl: async () => response(200, bodyOf(...big()), length) });
-  const result = await modelstore.download({ url: 'https://a.test/model.task', expectedSize: local.MIN_MODEL_BYTES * 4 });
+  const result = await modelstore.download({ url: 'https://a.test/model.onnx', expectedSize: local.MIN_MODEL_BYTES * 4 });
   assert.equal(result.error, 'size-mismatch');
 });
 
@@ -364,7 +381,7 @@ test('a truncated transfer is deleted and reported', async () => {
   active.use({
     fetchImpl: async () => response(200, bodyOf(bytes(local.MIN_MODEL_BYTES)), { 'content-length': String(local.MIN_MODEL_BYTES * 2) })
   });
-  const result = await modelstore.download({ url: 'https://a.test/model.task' });
+  const result = await modelstore.download({ url: 'https://a.test/model.onnx' });
   assert.equal(result.error, 'truncated');
   assert.equal(active.stored.size, 0, 'a half model must not stay on disk');
   assert.deepEqual(await modelstore.list(), []);
@@ -377,23 +394,23 @@ test('a download reports progress and stores the finished file', async () => {
     now: 0
   });
   const result = await modelstore.download({
-    url: 'https://a.test/final.task',
+    url: 'https://a.test/final.onnx',
     onProgress: (received: number, total: number | null) => seen.push([received, total])
   });
   assert.equal(result.ok, true);
-  assert.equal(result.record.name, 'final.task', 'the file name comes from the url');
+  assert.equal(result.record.name, 'final.onnx', 'the file name comes from the url');
   assert.ok(seen.length > 0, 'the UI must see progress');
   assert.deepEqual(seen[seen.length - 1], [local.MIN_MODEL_BYTES + 1024, local.MIN_MODEL_BYTES + 1024]);
   const list = await modelstore.list();
   assert.equal(list.length, 1);
-  assert.equal(list[0].sourceUrl, 'https://a.test/final.task');
+  assert.equal(list[0].sourceUrl, 'https://a.test/final.onnx');
 });
 
 test('progress is throttled so a fast pipe is not rendered per chunk', async () => {
   const chunks = Array.from({ length: 200 }, () => bytes(Math.floor(local.MIN_MODEL_BYTES / 100)));
   active.use({ fetchImpl: async () => response(200, bodyOf(...chunks), { 'content-length': String(200 * Math.floor(local.MIN_MODEL_BYTES / 100)) }), now: 0 });
   let reports = 0;
-  await modelstore.download({ url: 'https://a.test/many.task', onProgress: () => (reports += 1) });
+  await modelstore.download({ url: 'https://a.test/many.onnx', onProgress: () => (reports += 1) });
   assert.ok(reports > 0 && reports < chunks.length, `got ${reports} reports for ${chunks.length} chunks`);
 });
 
@@ -451,9 +468,9 @@ test('picked files are stored under their own names, not their folder', async ()
 // --- capacity ---------------------------------------------------------------
 
 test('usage adds up the models and the quota', async () => {
-  await modelstore.ingest({ name: 'one.task', sourceUrl: 'https://a.test/one.task', stream: streamOf(bytes(2_000_000)) });
+  await modelstore.ingest({ name: 'one.onnx', sourceUrl: 'https://a.test/one.onnx', stream: streamOf(bytes(2_000_000)) });
   active.clock.now += 1;
-  await modelstore.ingest({ name: 'two.task', sourceUrl: 'https://a.test/two.task', stream: streamOf(bytes(3_000_000)) });
+  await modelstore.ingest({ name: 'two.onnx', sourceUrl: 'https://a.test/two.onnx', stream: streamOf(bytes(3_000_000)) });
   active.estimate.usage = 6_000_000;
   active.estimate.quota = 10_000_000;
   const usage = await modelstore.usage();
@@ -484,33 +501,33 @@ function aged(name: string, at: number): void {
 
 test('bytes no record claims are dropped and a claimed file is kept', async () => {
   const result = await modelstore.ingest({
-    name: 'kept.gguf',
-    sourceUrl: 'https://a.test/kept.gguf',
+    name: 'kept.onnx',
+    sourceUrl: 'https://a.test/kept.onnx',
     stream: streamOf(...big())
   });
   const id = result.record.id;
   active.ages.set(id, 0);
-  aged('ghost.gguf', 0);
+  aged('ghost.onnx', 0);
 
-  assert.deepEqual((await modelstore.sweep()).removed, ['ghost.gguf']);
+  assert.deepEqual((await modelstore.sweep()).removed, ['ghost.onnx']);
   assert.equal(active.stored.has(id), true, 'a model the list still shows keeps its bytes');
-  assert.equal(active.stored.has('ghost.gguf'), false);
-  assert.deepEqual(active.deleted, ['ghost.gguf']);
+  assert.equal(active.stored.has('ghost.onnx'), false);
+  assert.deepEqual(active.deleted, ['ghost.onnx']);
 });
 
 test('a file with no record yet is a download in progress, not debris', async () => {
   // The record appears only when a transfer ends, so a young file must survive
   // a sweep even one started by another page of the extension.
-  aged('arriving.gguf', active.clock.now);
+  aged('arriving.onnx', active.clock.now);
   assert.deepEqual((await modelstore.sweep()).removed, []);
-  assert.equal(active.stored.has('arriving.gguf'), true);
+  assert.equal(active.stored.has('arriving.onnx'), true);
 });
 
 test('a stale swap file is swept and a live one is left alone', async () => {
-  aged('half.gguf.tmp', 0);
-  aged('writing.gguf.tmp', active.clock.now);
-  assert.deepEqual((await modelstore.sweep()).removed, ['half.gguf.tmp']);
-  assert.equal(active.stored.has('writing.gguf.tmp'), true);
+  aged('half.onnx.tmp', 0);
+  aged('writing.onnx.tmp', active.clock.now);
+  assert.deepEqual((await modelstore.sweep()).removed, ['half.onnx.tmp']);
+  assert.equal(active.stored.has('writing.onnx.tmp'), true);
 });
 
 // --- multi-file (ONNX) ingest -------------------------------------------------

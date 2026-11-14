@@ -1,6 +1,7 @@
 // Inline presentation only: source ownership and translated text stay in AT.dom.
 namespace AT.translationtext {
   export type Presentation = {
+    setMode(mode: AT.settings.TranslationRendering): void;
     begin(node: Text): void;
     preview(node: Text, text: string): void;
     clearPreview(node: Text): void;
@@ -82,6 +83,12 @@ namespace AT.translationtext {
       box-decoration-break: clone;
     }
     @keyframes at-stream-reveal { from { opacity: .35; } to { opacity: 1; } }
+    :host([data-rendering="immediate"]) .surface,
+    :host([data-rendering="immediate"]) .preview > span {
+      animation: none !important;
+      background: none !important;
+      box-shadow: none !important;
+    }
     @media (prefers-reduced-motion: reduce), (forced-colors: active) {
       .surface, .preview > span {
         animation: none !important;
@@ -122,7 +129,7 @@ namespace AT.translationtext {
     next: Node | null;
   };
 
-  export function create(root: AT.dom.DocumentRoot): Presentation | undefined {
+  export function create(root: AT.dom.DocumentRoot, mode: AT.settings.TranslationRendering = 'aurora'): Presentation | undefined {
     const doc = root as Document;
     const view = doc.defaultView;
     if (doc.nodeType !== 9 || !view?.HTMLElement) return undefined;
@@ -198,6 +205,18 @@ namespace AT.translationtext {
       }
       const text = preview.pending;
       if (text === preview.rendered) return;
+      if (mode === 'immediate') {
+        // Keep the same preview and canonical Text ownership, without diffing
+        // or delaying a decoded update for the animated reveal.
+        for (const span of preview.spans) span.element.remove();
+        preview.spans.length = 0;
+        preview.stable.data = text;
+        preview.tail.data = '';
+        preview.rendered = text;
+        if (!preview.element.parentNode) entry.host.shadowRoot!.querySelector('.surface')!.appendChild(preview.element);
+        entry.host.setAttribute('data-streaming', 'true');
+        return;
+      }
       const previous = preview.rendered || entry.previous;
       // Diff the painted flow, not just decoded output: the untouched source
       // suffix stays opaque in its own Text, never as a paragraph-sized overlay.
@@ -338,6 +357,32 @@ namespace AT.translationtext {
     }
 
     const presentation: Presentation = {
+      setMode(next) {
+        if (mode === next) return;
+        mode = next;
+        for (const entry of entries.values()) {
+          entry.host.setAttribute('data-rendering', mode);
+          if (mode !== 'immediate') continue;
+          if (entry.settleTimer !== undefined) {
+            view!.clearTimeout(entry.settleTimer);
+            entry.settleTimer = undefined;
+            entry.host.setAttribute('data-state', 'partial');
+            entry.host.removeAttribute('aria-busy');
+          }
+          const preview = entry.preview;
+          if (!preview) continue;
+          if (preview.pending === entry.node.data) {
+            clear(entry);
+            continue;
+          }
+          if (preview.timer !== undefined) view!.clearTimeout(preview.timer);
+          if (preview.frame !== undefined) view!.cancelAnimationFrame(preview.frame);
+          preview.timer = undefined;
+          preview.frame = undefined;
+          preview.rendered = '';
+          render(entry, preview);
+        }
+      },
       measureSource(node, read) {
         const entry = owned(node);
         if (!entry?.preview || entry.host.hasAttribute('data-measuring')) return read();
@@ -365,6 +410,7 @@ namespace AT.translationtext {
         }
         const host = doc.createElement(TAG);
         if (!registry) attachSurface(host);
+        host.setAttribute('data-rendering', mode);
         host.setAttribute('data-state', 'translating');
         host.setAttribute('aria-busy', 'true');
         entries.set(node, { node, host, previous: node.data });
@@ -387,6 +433,10 @@ namespace AT.translationtext {
         preview.pending = text;
         if (entry.finishTimer !== undefined) view!.clearTimeout(entry.finishTimer);
         entry.finishTimer = undefined;
+        if (mode === 'immediate') {
+          render(entry, preview);
+          return;
+        }
         if (preview.timer !== undefined || preview.frame !== undefined) return;
         const scheduled = preview;
         scheduled.timer = view!.setTimeout(() => {
@@ -404,7 +454,8 @@ namespace AT.translationtext {
       applied(node, complete) {
         const entry = owned(node);
         if (!entry) return;
-        const instant = view!.matchMedia('(prefers-reduced-motion: reduce), (forced-colors: active)').matches;
+        const instant = mode === 'immediate' ||
+          view!.matchMedia('(prefers-reduced-motion: reduce), (forced-colors: active)').matches;
         if (instant) clear(entry);
         const preview = instant ? undefined :
           entry.preview ?? (node.data !== entry.previous ? startPreview(entry, node.data) : undefined);
@@ -442,7 +493,7 @@ namespace AT.translationtext {
           unwrap(entry);
           return;
         }
-        if (status === 'partial' && !interrupted) {
+        if (status === 'partial' && !interrupted && mode !== 'immediate') {
           // Bridge adjacent quanta without blinking. A genuinely parked unit
           // loses its paint after this bounded grace, retaining only its phase.
           entry.settleTimer = view!.setTimeout(() => {

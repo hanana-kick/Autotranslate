@@ -1,4 +1,4 @@
-// PLaMo 3 Translate kernels: Q4 weights, f32 activations, one submission per
+// PLaMo 3 Translate kernels: packed ONNX Q4 weights, f32 activations, one submission per
 // step including token readback. Pipelines and weight bindings are built once.
 //
 // Small batches use width-specialized GEMV. Prefill uses a separate tiled GEMM;
@@ -27,6 +27,8 @@ namespace AT.kernels {
     createBindGroup: (descriptor: { layout: unknown; entries: { binding: number; resource: { buffer: GpuBuffer } }[] }) => unknown;
     createCommandEncoder: () => GpuEncoder;
     limits: { maxStorageBufferBindingSize: number };
+    pushErrorScope: (filter: 'validation' | 'out-of-memory' | 'internal') => void;
+    popErrorScope: () => Promise<{ message: string } | null>;
   };
   type GpuPipeline = { getBindGroupLayout: (index: number) => unknown };
   type GpuPass = {
@@ -56,6 +58,7 @@ namespace AT.kernels {
 
   export type GpuAdapter = {
     features: { has: (feature: string) => boolean };
+    limits?: { maxStorageBufferBindingSize: number };
     info?: {
       subgroupMinSize?: number;
       subgroupMaxSize?: number;
@@ -64,7 +67,7 @@ namespace AT.kernels {
         componentType: string; resultComponentType: string;
       }[];
     };
-    requestDevice: (options?: { requiredFeatures: string[] }) => Promise<GpuDevice>;
+    requestDevice: (options?: { requiredFeatures: string[]; requiredLimits?: { maxStorageBufferBindingSize: number } }) => Promise<GpuDevice>;
   };
 
   /** Request only advertised capabilities. No browser flags or platform guesses. */
@@ -80,7 +83,14 @@ namespace AT.kernels {
         config.M === 8 && config.N === 8 && config.K === 8 &&
         config.componentType === 'f32' && config.resultComponentType === 'f32');
     if (matrix) features.push('chromium-experimental-subgroup-matrix');
-    return { device: await adapter.requestDevice({ requiredFeatures: features }), matrixSubgroupSize: matrix ? size : 0 };
+    // Negotiate the advertised storage binding limit, without browser flags.
+    const bindingLimit = adapter.limits?.maxStorageBufferBindingSize;
+    const requiredLimits = bindingLimit !== undefined
+      ? { maxStorageBufferBindingSize: Math.min(bindingLimit, 256 * 1024 * 1024) } : undefined;
+    return {
+      device: await adapter.requestDevice({ requiredFeatures: features, ...(requiredLimits ? { requiredLimits } : {}) }),
+      matrixSubgroupSize: matrix ? size : 0
+    };
   }
 
   export type MatmulMode = 'auto' | 'portable' | 'f16' | 'matrix';
@@ -544,6 +554,14 @@ namespace AT.kernels {
     const coalesceMs = Math.max(0, Math.floor(options.coalesceMs ?? 0));
     const { hidden, heads, headDim, intermediate, qkvWidth, vocab, layers } = geometry;
     const qWidth = heads * headDim;
+    const matrices = [model.head, ...model.layers.flatMap(layer =>
+      [layer.qkv, layer.o, layer.gateUp, layer.down])];
+    const alignedBytes = (bytes: number): number => Math.max(16, Math.ceil(bytes / 4) * 4);
+    for (const matrix of matrices) {
+      if (alignedBytes(matrix.q4.byteLength) > device.limits.maxStorageBufferBindingSize) {
+        throw new Error(`kernels: packed matrix needs ${matrix.q4.byteLength} bytes; device binding limit is ${device.limits.maxStorageBufferBindingSize}`);
+      }
+    }
     const matrixSize = options.matrixSubgroupSize ?? 0;
     const hasMatrix = device.features?.has('chromium-experimental-subgroup-matrix') &&
       device.features.has('subgroups') && (matrixSize === 32 || matrixSize === 64);
@@ -563,24 +581,47 @@ namespace AT.kernels {
       prefillPositions: capacity, mixedPositions: mixedCapacity
     };
 
-    const held: GpuBuffer[] = [];
+    const held = new Set<GpuBuffer>();
+    const own = (buffer: GpuBuffer): GpuBuffer => {
+      held.add(buffer);
+      return buffer;
+    };
+    const release = (buffer: GpuBuffer): void => {
+      if (!held.delete(buffer)) return;
+      buffer.destroy?.();
+    };
     const alloc = (bytes: number, extra = 0): GpuBuffer => {
       const buffer = device.createBuffer({
-        size: Math.max(16, Math.ceil(bytes / 4) * 4),
+        size: alignedBytes(bytes),
         usage: USAGE.STORAGE | USAGE.COPY_DST | USAGE.COPY_SRC | extra
       });
-      held.push(buffer);
-      return buffer;
+      return own(buffer);
     };
     const uniform = (): GpuBuffer => {
       // 32 bytes: the norm and rope structures grew when they learned to gather.
       const buffer = device.createBuffer({ size: 32, usage: USAGE.UNIFORM | USAGE.COPY_DST });
-      held.push(buffer);
-      return buffer;
+      return own(buffer);
     };
     const put = (buffer: GpuBuffer, data: ArrayBufferView): void => device.queue.writeBuffer(buffer, 0, data);
     const pipeline = (code: string, layout: string | unknown = 'auto'): GpuPipeline =>
       device.createComputePipeline({ layout, compute: { module: device.createShaderModule({ code }), entryPoint: 'main' } });
+    let scopes = 0;
+    const closeScopes = async (): Promise<void> => {
+      let failure: unknown;
+      while (scopes) {
+        scopes--;
+        try {
+          const error = await device.popErrorScope();
+          if (error) failure ??= new Error(error.message);
+        } catch (error) { failure ??= error; }
+      }
+      if (failure) throw failure;
+    };
+    try {
+    for (const filter of ['validation', 'out-of-memory', 'internal'] as const) {
+      device.pushErrorScope(filter);
+      scopes++;
+    }
     const compute = 4;
     const rms = pipeline(RMSNORM);
     const normChain = pipeline(NORM_CHAIN);
@@ -665,7 +706,7 @@ namespace AT.kernels {
       headIn: alloc(rows * hidden * 4)
     };
     const staging = device.createBuffer({ size: rows * 4, usage: USAGE.MAP_READ | USAGE.COPY_DST }) as Mappable;
-    held.push(staging);
+    own(staging);
     const embedded = new Float32Array(capacity * hidden);
     // Exact binary16 conversion once, instead of an exponent operation per element/token.
     const embeddingFloats = Float32Array.from({ length: 65536 }, (_unused, bits) => AT.onnxweights.f16(bits));
@@ -732,7 +773,14 @@ namespace AT.kernels {
 
     const upload = (bytes: Uint8Array): GpuBuffer => {
       const buffer = alloc(bytes.byteLength);
-      device.queue.writeBuffer(buffer, 0, bytes);
+      const aligned = bytes.byteLength - bytes.byteLength % 4;
+      if (aligned === bytes.byteLength) device.queue.writeBuffer(buffer, 0, bytes);
+      else {
+        if (aligned) device.queue.writeBuffer(buffer, 0, bytes.subarray(0, aligned));
+        const tail = new Uint8Array(4);
+        tail.set(bytes.subarray(aligned));
+        device.queue.writeBuffer(buffer, aligned, tail);
+      }
       return buffer;
     };
     const uploadFloats = (values: Float32Array): GpuBuffer => {
@@ -745,7 +793,7 @@ namespace AT.kernels {
     const packEncoder = device.createCommandEncoder();
     const packTransient: GpuBuffer[] = [];
     const uploadMatrix = (
-      matrix: { q4: Uint8Array; scales: Float32Array }, n: number, k: number,
+      matrix: AT.onnxweights.QMatrix, n: number, k: number,
       retainOriginal: boolean
     ): { q4: GpuBuffer; packed: GpuBuffer; scales: GpuBuffer } => {
       const q4 = upload(matrix.q4);
@@ -776,7 +824,9 @@ namespace AT.kernels {
     const mergeAttentionBind = mergeAttention && attentionScratch
       ? bindGroup(mergeAttention, [attentionScratch, act.attn, meta.attn]) : null;
 
-    const layerState: { bind: Record<string, unknown> }[] = [];
+    const layerState: {
+      bind: Record<string, unknown>;
+    }[] = [];
     let precedingPostMlp: GpuBuffer | undefined;
     for (let index = 0; index < layers; index += 1) {
       const layer = model.layers[index]!;
@@ -825,7 +875,8 @@ namespace AT.kernels {
     }
     device.queue.submit([packEncoder.finish()]);
     await device.queue.onSubmittedWorkDone();
-    for (const buffer of packTransient) buffer.destroy?.();
+    for (const buffer of packTransient) release(buffer);
+    await closeScopes();
 
     // One-row work shares a compute pass; dispatches remain synchronization scopes.
     // Batched steps retain separate passes because blanket coalescing regressed them.
@@ -943,7 +994,8 @@ namespace AT.kernels {
           }
           if (active === 1) sharedPass = encoder.beginComputePass();
         }
-        emit(encoder, gemv[headRows - 1]!, directHead ? directHeadBind : headBind, gemvGroups(vocab));
+        emit(encoder, gemv[headRows - 1]!,
+          directHead ? directHeadBind : headBind, gemvGroups(vocab));
         emit(encoder, argmaxPartial, argmaxPartialBind, [argmaxParts, headRows]);
         emit(encoder, argmax, argmaxBind, headRows);
       }
@@ -1171,8 +1223,15 @@ namespace AT.kernels {
       stats: () => ({ ...stats }),
       execution: () => ({ ...execution }),
       dispose() {
-        for (const buffer of held) buffer.destroy?.();
+        for (const buffer of held) release(buffer);
       }
     };
+    } catch (error) {
+      for (const buffer of held) {
+        try { release(buffer); } catch { /* Preserve the initialization failure. */ }
+      }
+      try { await closeScopes(); } catch { /* Preserve the initialization failure. */ }
+      throw error;
+    }
   }
 }

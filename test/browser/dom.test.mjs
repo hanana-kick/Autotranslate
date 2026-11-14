@@ -520,7 +520,7 @@ check('trusted expansion gets a bounded turn without promoting unrelated mutatio
       </aside>`;
   });
   await contentHarness(page);
-  await page.evaluate(() => { window.task = handlers[AT.C.MSG.CONTENT_TRANSLATE]({ settings }); });
+  await page.evaluate(() => { settings.translationConcurrency = 1; window.task = handlers[AT.C.MSG.CONTENT_TRANSLATE]({ settings }); });
   await page.waitForFunction(() => requests.length === 1);
   await page.locator('summary').click();
   await page.locator('#counter').evaluate(element => { element.textContent = 'New unrelated counter'; });
@@ -544,7 +544,7 @@ check('scrolling retains the active aurora and source until its quantum commits'
     root.innerHTML = '<p id="active">Current visible source</p><div style="height:1600px"></div><p id="next">Newly visible source</p>';
   });
   await contentHarness(page);
-  await page.evaluate(() => { window.task = handlers[AT.C.MSG.CONTENT_TRANSLATE]({ settings }); });
+  await page.evaluate(() => { settings.translationConcurrency = 1; window.task = handlers[AT.C.MSG.CONTENT_TRANSLATE]({ settings }); });
   await page.waitForFunction(() => requests.length === 1 && document.querySelector('#active at-translation-text'));
   const before = await page.locator('#active').innerHTML();
   await page.locator('#next').scrollIntoViewIfNeeded();
@@ -613,7 +613,7 @@ check('unrelated successful mutations cannot clear unresolved segment failures',
     const later = root.querySelector('#later'); later.innerHTML = '<p>New valid content</p>';
     const second = await pipeline.refresh(later);
     rejectBad = false;
-    const retry = await pipeline.refresh(root.querySelector('#bad'));
+    const retry = await pipeline.translate();
     return { first, second, retry };
   });
   assert.equal(result.first.failed, 1);
@@ -1119,4 +1119,45 @@ check('scoped restore immediately parks active partial text outside its subtree'
     text: '첫 문장. Second source phrase.' });
   assert.equal(result.unchanged, true);
   assert.equal(result.restored, true);
+});
+
+check('whole-document continuations finish offscreen source while hidden clipped and protected source stays untouched', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = `
+      <p data-source style="position:absolute;top:-2000px">Earlier document paragraph</p>
+      <p data-source>Visible document paragraph</p>
+      <p data-source style="margin-top:3000px">Later document paragraph</p>
+      <footer data-source>Document footer information</footer>
+      <p data-protected style="display:none">Hidden source paragraph</p>
+      <div style="height:20px;overflow:hidden"><p data-protected style="margin-top:100px">Clipped source paragraph</p></div>
+      <p data-protected contenteditable="true">Editable source paragraph</p>
+      <p data-protected translate="no">Protected source paragraph</p>`;
+    const original = root.innerHTML;
+    const eligible = [...root.querySelectorAll('[data-source]')];
+    const sources = eligible.map(element => element.textContent);
+    const protectedNodes = [...root.querySelectorAll('[data-protected]')];
+    const protectedSources = protectedNodes.map(element => element.textContent);
+    const asked = [];
+    const pipeline = AT.pipeline.create({
+      doc: document, settings: () => ({ maxNodes: 1, translationConcurrency: 4 }),
+      translate: async ({ texts }) => { asked.push(...texts); return texts.map(text => text.toUpperCase()); }
+    });
+    let pass = await pipeline.translate(), passes = 1;
+    while (pass.hasMore && passes < 20) { pass = await pipeline.resume(); passes++; }
+    const translated = eligible.every((element, index) => element.textContent === sources[index].toUpperCase());
+    const protectedUnchanged = protectedNodes.every((element, index) => element.textContent === protectedSources[index]);
+    const restored = pipeline.restore().restored;
+    return { translated, protectedUnchanged, asked, sources, passes, hasMore: pass.hasMore, restored,
+      exactRestore: root.innerHTML === original, scrollY };
+  });
+  assert.equal(result.translated, true);
+  assert.equal(result.protectedUnchanged, true);
+  assert.equal(result.asked[0], 'Visible document paragraph');
+  assert.deepEqual(new Set(result.asked), new Set(result.sources));
+  assert.equal(result.passes, result.sources.length);
+  assert.equal(result.hasMore, false);
+  assert.equal(result.scrollY, 0);
+  assert.equal(result.restored, result.sources.length);
+  assert.equal(result.exactRestore, true);
 });

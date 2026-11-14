@@ -173,6 +173,9 @@ if (typeof self.importScripts === 'function') {
   const automaticChecks = new Map<number, number>();
   const targetRevisions = new Map<number, number>();
   const batchControllers = new Map<number, Set<AbortController>>();
+  // Keep admission alive while cancelled generations settle; replacing it would
+  // let a new tab or settings revision bypass the shared GPU generation limit.
+  let batchScheduler: AT.engines.AdjustableFragmentScheduler | undefined;
 
   function cancelTabBatches(tabId: number): void {
     const controllers = batchControllers.get(tabId);
@@ -529,6 +532,10 @@ if (typeof self.importScripts === 'function') {
       if (message.translationKey && message.translationKey !== AT.settings.contentSnapshot(settings).translationKey) {
         throw AT.local.cancelled();
       }
+      if (!batchScheduler) batchScheduler = AT.engines.createFragmentScheduler(settings.translationConcurrency);
+      else batchScheduler.setConcurrency(settings.translationConcurrency);
+      const scheduler = batchScheduler;
+      const requestedWidth = AT.settings.isTranslationConcurrency(message.fragmentConcurrency) ? message.fragmentConcurrency : 1;
       const request: AT.engines.TranslateRequest = {
         signal: controller.signal,
         ...(onProgress ? { onProgress: (index: number, text: string) => {
@@ -542,7 +549,8 @@ if (typeof self.importScripts === 'function') {
         localModelId: settings.localModelId,
         localMaxTokens: settings.localMaxTokens,
         sourceChunkTokens: AT.local.SOURCE_CHUNK_TOKENS,
-        fragmentConcurrency: settings.translationConcurrency === 2 && message.fragmentConcurrency === 2 ? 2 : 1
+        fragmentConcurrency: Math.min(settings.translationConcurrency, requestedWidth) as AT.settings.TranslationConcurrency,
+        fragmentScheduler: { run: (job, signal) => scheduler.run(job, signal, tabId) }
       };
       // Host loading is shared; cancellation stops this request, not that load.
       await AT.local.withSignal(ensureHost(), controller.signal);
@@ -868,6 +876,7 @@ if (typeof self.importScripts === 'function') {
     const before = AT.settings.contentSnapshot(previous);
     if (current.translationKey === before.translationKey &&
         settings.translationConcurrency === previous.translationConcurrency &&
+        settings.translationRendering === previous.translationRendering &&
         settings.maxNodes === previous.maxNodes && JSON.stringify(settings.siteRules) === JSON.stringify(previous.siteRules) &&
         JSON.stringify(settings.alwaysTranslateLanguages) === JSON.stringify(previous.alwaysTranslateLanguages) &&
         settings.enabled === previous.enabled &&

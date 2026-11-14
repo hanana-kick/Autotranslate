@@ -172,8 +172,8 @@ const click = (node: Stub): Promise<void> => fire(node, 'click');
 
 /** The record the page names in `welcome_modelReady` and saves as `localModelId`. */
 const MODEL = {
-  id: 'plamo-3-translate-0.8b-q4_k_m-a1b2c3',
-  name: 'plamo-3-translate-0.8b-Q4_K_M.gguf',
+  id: 'plamo-3-translate-0.8b-q4f16-a1b2c3',
+  name: 'model_q4f16.onnx',
   size: 2048
 };
 
@@ -444,19 +444,23 @@ test('cancel aborts the signal the transfer was given', async () => {
   assert.equal(field('progress').hidden, true);
 });
 
-test('picking a model file imports exactly the chosen file and arms start', async () => {
+test('picking a model imports the graph and tokenizer selection and arms start', async () => {
   const env = await boot();
   const { field, calls } = env;
-  const file: StubFile = { name: 'plamo-3-translate-0.8b-local.gguf', size: 4096 };
+  const files: StubFile[] = [
+    { name: 'model_q4f16.onnx', size: 4096 },
+    { name: 'tokenizer.json', size: 1024 },
+    { name: 'tokenizer_config.json', size: 1024 }
+  ];
 
   await click(field('pick'));
   assert.equal(field('modelFile').clicks, 1);
 
-  field('modelFile').files = [file];
+  field('modelFile').files = files;
   await fire(field('modelFile'), 'change');
 
   assert.equal(calls.files.length, 1);
-  assert.deepEqual(calls.files[0], [file]);
+  assert.deepEqual(calls.files[0], files);
   assert.equal(field('modelFile').value, '');
   assert.equal(field('installed').textContent, msg('welcome_modelReady', [MODEL.name, '2.0 KiB']));
   assert.equal(field('start').disabled, false);

@@ -1,5 +1,30 @@
 # Validation contract
 
+The current extension ships ONNX only: q4f16 custom WebGPU kernels with the
+existing ONNX Runtime fallback. Historical GGUF comparisons below are retained
+as evidence; their removed scripts/options are not current test commands.
+Model originals and recorded experiment artifacts are not removed by builds.
+
+## ONNX-only cutover verification
+
+- `npm run build` and `npm run verify`: Chrome/Firefox 0.1.11 packages passed,
+  54 files each. Build compilation clears stale emitted modules before packaging.
+- Targeted Node contracts: 245 passed, zero failures/skips across local,
+  modelstore, modelflow, options, welcome, onnxhost, onnxweights, background and
+  review-regressions tests. Unsupported stored models remain removable without
+  automatic deletion of their bytes.
+- Real q4f16 kernel smoke: context 128, widths 1/3/8, four output steps,
+  logits captured, no WebGPU validation/page errors. Evidence:
+  `test-results/browser/onnx-only-kernel/`.
+- Actual built Chrome extension, ordinary Apple WebGPU, Japanese → Korean,
+  eight slots, default Aurora display, warm model and fresh page cache:
+  short-page 980.3 ms (8/8 units), article-page 2005.4 ms (4/4 units).
+  Both completed below-fold content without scrolling and restored exact source.
+  One run each is a smoke check, not a speedup claim or general three-second
+  guarantee. Firefox inference was not exercised.
+  Evidence and screenshots:
+  `test-results/browser/onnx-only-extension/full-page-onnx-only.json`.
+
 ## Deterministic type, module and package checks
 
 Use Node 24 or newer:
@@ -621,8 +646,615 @@ evidence, not a statistical speedup or translation-quality benchmark.
 
 The application separates a bounded 480-character DOM work quantum from a
 64-source-token model fragment. It prefers sentence boundaries, then words
-and graphemes for oversized sentences. Two visible reading units each own
-one slot; a lone visible unit can use both slots internally. Idle prefetch
+and graphemes for oversized sentences. Visible reading units now share a
+per-tab FIFO queue with at most two active generations, rather than reserving
+one slot each until a whole DOM quantum finishes. Idle prefetch
 remains serial. Out-of-order fragments stay hidden until a contiguous
 source-order preview exists. Planning failure never falls back to estimated
 character/token arithmetic on this interactive path.
+
+### Scroll-stop to completed viewport translation
+
+The primary latency is **completion of every eligible target visible at rest,
+minus the timestamp of the last actual scroll event**. First token/preview
+latency is not the acceptance metric. A quiet-period or `scrollend`
+confirmation identifies the final viewport but must not move the start
+timestamp forward or subtract its waiting time.
+
+Freeze the measured cohort by source identity and visible geometry at rest.
+Completion requires final committed translated text for every member, not
+an aurora, partial prefix, dispatched request, or average of completed items.
+Failed or unfinished targets stay in the denominator and fail the scenario.
+New page mutations require a separately identified cohort; they must not
+silently shrink or expand the original measurement.
+
+Use Japanese-to-Korean fixtures, identical source and viewport geometry,
+the same two-slot setting and a warmed real model for baseline/candidate.
+Fresh-page runs must record work that started during scrolling and reject
+precompleted targets. Scroll-away/back cache observations are reported
+separately: a viewport already complete on return legitimately has zero
+remaining translation latency. Cross-context request evidence uses aligned
+epoch timestamps, not unrelated worker/page `performance.now()` origins.
+
+Report per-run and per-target completion, incomplete counts, actual active
+generation requests and full outputs. Three rounds support a median and
+range, not a reliable tail percentile. Do not capture screenshots inside the
+timed interval or mix cold model loading into warm scroll latency.
+
+```sh
+SCROLL_COMPLETION_BENCH=1 SCROLL_LABEL=baseline SCROLL_ROUNDS=3 \
+  TRANSLATION_CONCURRENCY=2 UNSAFE_WEBGPU=0 \
+  EXTENSION_DIR=/tmp/autotranslate-scroll-baseline/extension \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/scroll-completion-baseline \
+  node test/sites-live/run-sites.mjs
+
+SCROLL_COMPLETION_BENCH=1 SCROLL_LABEL=candidate SCROLL_ROUNDS=3 \
+  TRANSLATION_CONCURRENCY=2 UNSAFE_WEBGPU=0 \
+  EXTENSION_DIR=build/chrome \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/scroll-completion-shared \
+  node test/sites-live/run-sites.mjs
+```
+
+Preserve the baseline build before rebuilding the candidate. The harness
+saves installed-file hashes, the fixture hash, source/output text, complete
+cohort geometry, actual scroll event timestamps and request intervals in
+`scroll-completion-{label}.json`. It runs a short-comment/long-paragraph
+cohort and a four-unit cohort in a fixed 1440×1600 viewport. Completed
+scroll-away/back revisits and an in-flight cancellation/restore replay are
+separate checks, not fresh completion samples.
+
+### ONNX / GGUF comparison
+
+Build the Chrome extension first. The installed comparison downloads the
+local ONNX baseline, imports each GGUF through the real options file input,
+warms eight Japanese→Korean requests, then measures single and eight-request
+completion twice per format. It retains full outputs, source token-count
+parity, backend identity, file hashes and options screenshots:
+
+```sh
+GGUF_COMPARE=1 GGUF_ROUNDS=2 UNSAFE_WEBGPU=0 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  GGUF_DIR=weight/plamo-3-translate-0.8b-GGUF \
+  QA_DIR=test-results/browser/gguf-installed \
+  node test/sites-live/run-sites.mjs
+```
+
+`GGUF_QUANTS=Q4_K_M,Q4_0,Q3_K_M,Q2_K` selects the comparison files.
+Models run in that fixed order after ONNX; case order alternates by round.
+This is warm inference request completion, **not scroll-stop to final paint**.
+Eight requests exercise engine capacity, not production page concurrency.
+
+For equal-token workloads independent of generated translation length:
+
+```sh
+MODEL_FILE=weight/plamo-3-translate-0.8b-GGUF/plamo-3-translate-0.8b-Q4_K_M.gguf \
+  CURRENT_ONLY=1 LENGTHS=128 BATCHES=1,8 STEPS=32 REPEATS=2 \
+  PREFILL_POSITIONS=64 HEADLESS=0 UNSAFE_WEBGPU=0 \
+  QA_DIR=test-results/browser/gguf-kernels-Q4_K_M \
+  node test/engine-spike/run-kernels.mjs
+```
+
+Run each model serially with identical settings; concurrent GPU benchmarks
+invalidate this comparison. Fixed-token prompts are synthetic, so this
+test measures kernel throughput, not translation quality. It disables
+EOS stopping and records host-observed queue completion, not GPU timestamps.
+
+Independent packed-weight reference generation (separate Python environment
+with `gguf==0.19.0` and NumPy installed):
+
+```sh
+python test/engine-spike/gguf-reference.py \
+  weight/plamo-3-translate-0.8b-GGUF > /tmp/gguf-gold.json
+GGUF_REFERENCE=/tmp/gguf-gold.json \
+  QA_DIR=test-results/browser/gguf-numerics \
+  node test/engine-spike/check-gguf.mjs
+```
+
+This samples real packed blocks from all seven formats in the provided
+files and checks CPU decoding plus GPU GEMV/GEMM against `gguf-py`, not
+against a second copy of the project's decoder. FP16 operand staging has
+an explicitly rounded reference and separately reported full-precision
+drift. Numerical equivalence of matrix operations does not establish
+translation quality equivalence after quantization.
+
+The Q4_K/Q6_K repack checks additionally cover N9/17 × K256/512,
+exact quant codes and coefficients, poisoned padding, GEMV rows 1..8,
+and GEMM rows 9/32/33/64/65. Both coefficient layouts, output-group
+sizes and small-batch factorization settings are exercised; wide GEMM
+requires shader-f16. Scaled error remains limited to 1e-4 and decoded
+repacked-weight absolute error to 1e-6.
+
+```sh
+MODEL_FILE=weight/plamo-3-translate-0.8b-GGUF/plamo-3-translate-0.8b-Q4_K_M.gguf \
+  CHECK_REPACK_LIFECYCLE=1 CURRENT_ONLY=1 HEADLESS=0 UNSAFE_WEBGPU=0 \
+  QA_DIR=test-results/browser/gguf-parity-lifecycle \
+  node test/engine-spike/run-kernels.mjs
+```
+
+Lifecycle mode skips timed inference. Every case uses a fresh real GPU
+device and observes allocation/destruction without replacing buffer objects.
+It checks preflight rejection, automatic direct selection, a failure after
+head repack, exact matrix-byte accounting, disposal and error-scope closure.
+
+Diagnostic variant options accept `ggufPacking: "auto"|"direct"|"repacked"`
+and `ggufRepack` with exactly `coefficients: "f32"|"compact"`,
+`outputsPerGroup: 8|16`, `factorSmallBatch: boolean`, `wideRows: boolean`.
+Same-model variant token comparison failures make the benchmark process fail.
+Batch/individual scheduling comparisons remain separately reported; the GGUF
+parity gate compares direct/repacked results under the same schedule.
+Different quantization models must run in separate processes.
+
+Installed comparisons retain both imported models and alternate model order
+per round. Every transition records prepare time and an excluded eight-request
+warmup. Source counts, kernels backend, all requested completions, per-request
+outputs and completion mean/median/min/max are retained; failures are not
+dropped from the report.
+
+For Q4_K_M kernel changes, preserve **both** `kernels.ts` and
+`kernelgguf.ts` before editing. A baseline engine alone would otherwise
+silently use the candidate's shaders:
+
+```sh
+MODEL_FILE=weight/plamo-3-translate-0.8b-GGUF/plamo-3-translate-0.8b-Q4_K_M.gguf \
+  BASELINE_KERNEL=/tmp/autotranslate-q4km-baseline/kernels.ts \
+  VARIANT_SHADERS='{"baseline":{"kernelgguf":"/tmp/autotranslate-q4km-baseline/kernelgguf.ts"}}' \
+  LENGTHS=128 BATCHES=1,8 STEPS=32 REPEATS=3 PREFILL_POSITIONS=64 \
+  CHECK_LOGITS=1 HEADLESS=0 UNSAFE_WEBGPU=0 \
+  QA_DIR=test-results/browser/q4km-vector-ab \
+  node test/engine-spike/run-kernels.mjs
+```
+
+This reverses variant order on alternate repeats and checks final
+full-vocabulary logits outside the timed interval. Run the installed
+comparison separately with `GGUF_QUANTS=Q4_K_M GGUF_ROUNDS=3` and
+`EXTENSION_DIR` pointing to the preserved baseline build, then the
+candidate build, with distinct `QA_DIR` directories. Keep the ONNX
+control in both runs. Compare final translations as well as latency.
+`PROFILE_DISPATCH=1` is a separate attribution run, never a throughput
+result; its adapter wrapper must preserve limits as well as features.
+
+### Isolated upstream WebGPU experiment
+
+The wllama/llama.cpp comparison is a diagnostic artifact, not an added
+production backend or a substitute for the ONNX parity gate. Its evidence
+and source archive live in `test-results/browser/gguf-upstream-webgpu/`.
+See `translation-performance.md` for the rejected-cutover verdict and
+browser, sampling, context and timing limitations.
+
+Reproduce on the recorded workstation (`/Users/hana/sources/Autotranslate`;
+the archived harness contains these absolute paths). No runtime dependency
+is installed into the project:
+
+```sh
+ROOT=/Users/hana/sources/Autotranslate
+EXPERIMENT=/tmp/autotranslate-upstream-webgpu
+mkdir -p "$EXPERIMENT"
+(cd "$EXPERIMENT" && npm pack @wllama/wllama@3.13.0 --silent &&
+  tar -xzf wllama-wllama-3.13.0.tgz)
+tar -xzf "$ROOT/test-results/browser/gguf-upstream-webgpu/experiment-sources.tar.gz" \
+  -C "$EXPERIMENT"
+export UPSTREAM_QA_ROOT="$(mktemp -d /tmp/autotranslate-upstream-results.XXXXXX)"
+cd "$ROOT"
+node "$EXPERIMENT/compare.mjs"
+node "$EXPERIMENT/analyze.mjs"
+```
+
+Use a fresh result directory so previous evidence is not overwritten or
+mixed with new current-engine artifacts. The archive uses the preserved
+`prompts.json`, current project kernels, and pinned wllama assets; hashes
+of the measured assets/fixtures are in `verdict.json`. The optional prompt
+generator requires isolated `gguf==0.19.0` and `tokenizers==0.22.1`.
+
+The driver serializes all GPU work, alternates engine order over two
+rounds, uses L128/512 × B1/8 and 64 outputs, and checks upstream prompt,
+output and cache counts. `SUBGROUP_COMPAT=1` explicitly selects upstream's
+existing workgroup-reduction GPU path; it does not patch shaders or use CPU
+inference. Without it, the pinned build's subgroup shaders fail on Chrome
+143. The archived current harness differs only in imports and text-derived
+prompt fixtures; the production benchmark and runtime are unchanged.
+
+For separate diagnostics, `run.mjs` accepts `LOAD_OPTIONS` (JSON),
+`QUIET_NATIVE=1`, `LENGTHS`, `BATCHES`, `STEPS`, `BENCH=1` and `QA_DIR`.
+`n_gpu_layers:0` was used only for a numerical CPU reference, never for a
+WebGPU speed result. A resolved load promise is insufficient: require
+`getLoadedContextInfo().success`. Generated-token differences are retained
+as failures of runtime equivalence, not silently accepted or interpreted
+as proof of which implementation is correct.
+
+### Upstream per-dispatch bottleneck attribution
+
+The separate `test-results/browser/gguf-upstream-bottleneck/` artifact set
+uses the same pinned package, browser, GGUF and prompt fixtures as above.
+Its `experiment-sources.tar.gz` contains `run.mjs`, `gpu-profiler.mjs` and
+`summarize.mjs`. Extract into `/tmp/autotranslate-upstream-profile/` and
+extract the wllama 3.13.0 npm archive there as `package/`. Retain the
+original `gguf-upstream-webgpu/prompts.json`. From the repository root,
+with the same `PLAYWRIGHT_MODULE` and `CHROMIUM_EXECUTABLE` environment:
+
+```sh
+SUBGROUP_COMPAT=1 BENCH=1 LENGTHS=128 BATCHES=1,8 STEPS=16 \
+  QUIET_NATIVE=1 PROFILE_GPU=1 \
+  QA_DIR=test-results/browser/gguf-upstream-bottleneck/profile \
+  node /tmp/autotranslate-upstream-profile/run.mjs
+SUBGROUP_COMPAT=1 BENCH=1 LENGTHS=128 BATCHES=1,8 STEPS=16 \
+  QUIET_NATIVE=1 PROFILE_GPU=0 \
+  QA_DIR=test-results/browser/gguf-upstream-bottleneck/control \
+  node /tmp/autotranslate-upstream-profile/run.mjs
+node /tmp/autotranslate-upstream-profile/summarize.mjs
+```
+
+The last command summarizes the retained `gpu-attribution.json`; it does
+not regenerate that aggregate from a newly captured raw profile.
+Raw reports retain per-dispatch timestamps, pipeline labels, matrix
+dimensions, workgroups and host counters for independent aggregation.
+Require empty profiler errors and exact profile/control token equality.
+The observed runs satisfy both.
+
+Per-dispatch timestamps split combined compute passes and therefore perturb
+execution. Use this experiment for attribution, not as an interchangeable
+replacement for the previous uninstrumented 64-output benchmark. Queue and
+mapping wait durations overlap GPU execution; do not count them as exclusive
+CPU time or add them to GPU time. Wall-minus-dispatch time also includes
+copies, GPU gaps and instrumentation. No production files or permanent
+benchmark dependencies are changed by the experiment.
+
+### Rebuilt upstream baseline numerical gate
+
+`test-results/browser/gguf-upstream-fix-g1fpWe/decision.json` records the
+approved experiment's baseline-failure stop condition. The pinned
+Emscripten 4.0.20 / Dawn build with `WLLAMA_TEST_BACKEND=ON` succeeded.
+On actual Chrome 143 / Apple GPU, independent fixture replay failed
+104/136 cases (all register-tile cases); all 32 GEMV cases passed.
+Tolerance stayed `abs(actual-expected)/(1+abs(expected)) <= 1e-4`.
+All values were finite, output guards intact, and GPU/capture errors zero.
+No candidate patches or performance screening followed that failure.
+
+The diagnostic archive contains `driver/run.mjs`, `compare.mjs`,
+`gpu-profiler.mjs`, `check-matmul.mjs`, `summarize.mjs`, the build script,
+and isolated environment settings. `baseline-esm.tar.gz` preserves the
+matching worker/ESM/WASM build; `baseline-esm.sha256` lists its files.
+`reference.json` preserves the eight gguf-py 0.19.0 fixtures.
+Original failed runs remain intact, including the initial harness favicon
+404; an explicit data favicon fixed that resource request without hiding
+console errors. Canonical `/private/tmp` SDK/cache paths fixed the macOS
+`/tmp` symlink-related system-library build failure without changing pins.
+
+With the retained experiment checkout, rerun diagnostics into a **new**
+directory; existing QA directories are rejected:
+
+```sh
+. /tmp/autotranslate-upstream-fix.g1fpWe/environment.sh
+WLLAMA_ROOT="$EXPERIMENT/baseline" VARIANT=baseline \
+  CHECK_MATMUL=1 QA_DIR="$RESULTS/numerics-$(date +%s)" \
+  node "$EXPERIMENT/driver/run.mjs"
+WLLAMA_ROOT="$EXPERIMENT/baseline" VARIANT=baseline \
+  CHECK_BACKEND=1 QA_DIR="$RESULTS/backend-$(date +%s)" \
+  node "$EXPERIMENT/driver/run.mjs"
+```
+
+CHECK modes are mutually exclusive with each other and GPU profiling,
+and do not run performance loops. Package serving is confined to
+`WLLAMA_ROOT`; missing ESM/WASM fails before measurement. Native INFO
+is captured quietly with `suppressNativeLog:false, log_level:2` so
+17/17 offload evidence is retained; the adjustment is recorded.
+
+The backend check passed 185 WebGPU cases with unchanged upstream
+tolerance (36 unsupported), capturing N5..9 and stride/broadcast cases.
+This uses NMSE, not the independent fixture's per-output error gate.
+The two-round same-baseline AB/BA L128/B1/output4 smoke passed exact
+token matching in four independent browser processes. Invalid ROUNDS,
+incompatible CHECK modes, and raw-report overwrite attempts were rejected.
+Both diagnostic result screens were captured and opened for inspection.
+These checks do not establish candidate correctness, speedup, ONNX
+parity, or resolution of the upstream/current-engine token mismatch.
+
+### Current GGUF single-row kernel screening
+
+`test-results/browser/gguf-single-decode-vtpS5R/decision.json` records five
+implemented but rejected single-row candidates. Production code is unchanged.
+The actual headed Chrome runner compared baseline and candidate with
+`LENGTHS=128,512 BATCHES=1 STEPS=64 PREFILL_POSITIONS=64 CHECK_LOGITS=1`,
+using three repeats for scalar/32-lane reduction and five for Q6 factorization,
+Q6 output-group sizing, and two-stage reduction. Variant order alternated.
+All output tokens matched; final 107,520-value logits stayed within the
+existing cosine/relative-L2 gates. GPU validation, page, and cleanup errors
+were zero. Timing variation prevented an across-length improvement decision.
+
+`lanes32-numerics/numerics.json` is the independent gguf-py 0.19.0 check for
+the changed K-lane indexing: 49 direct, 16 repack, and 1,264 repacked matmul
+cases passed. It includes padded outputs, Q4_K/Q6_K, widths 1–8, GEMM row
+boundaries, both coefficient layouts, and existing configuration combinations.
+Maximum normalized error was 1.038e-6, below 1e-4; guard words were intact.
+Other rejected candidates received model token/logit checks, not separate
+independent fixture suites.
+
+`onnx-profile`/`gguf-profile` retain combined-pass timing; `onnx-dispatch`/
+`gguf-dispatch` and `lanes32-attribution` use an isolated profiler that splits
+passes around dispatches. Never use split-pass wall times as adoption gates.
+The timestamp granularity also limits individual short-dispatch attribution.
+`experiment-sources.tar.gz` retains baseline modules, candidate modules,
+isolated runners/profiler, and the decision summarizer. The temporary working
+scripts were removed after archiving. Existing repository runners were not
+modified. These are synthetic fixed-token engine checks, not installed
+extension translation latency measurements.
+
+
+## Whole-page five-second benchmark
+
+`test/sites-live/full-page-benchmark.mjs` uses the installed extension, shipped
+options/import controls, and actual WebGPU inference. Run GPU benchmarks
+serially in headed Chrome without unsafe WebGPU flags:
+
+```sh
+HEADLESS=0 UNSAFE_WEBGPU=0 FULL_PAGE_BENCH=1 \
+  FULL_PAGE_LABEL=candidate FULL_PAGE_ROUNDS=1 \
+  TRANSLATION_CONCURRENCY=8 \
+  MODEL_DIR=weight/plamo-3-translate-0.8b-onnx \
+  QA_DIR=test-results/browser/full-page-candidate \
+  node test/sites-live/run-sites.mjs
+```
+
+Set `PLAYWRIGHT_MODULE` and `CHROMIUM_EXECUTABLE` when using an existing local
+driver/browser. `EXTENSION_DIR` selects a frozen build; the default is
+`build/chrome`. The runner imports only GGUF Q4_K_M and the existing ONNX
+q4f16. `FULL_PAGE_MODELS=onnx,gguf` selects both. Model files are local test
+inputs; the product does not depend on the fixture/model HTTP servers.
+
+The frozen three-page corpus includes below-fold text and never scrolls to
+trigger completion. Timing starts at the enable control's click event and
+ends after all target paragraphs have final canonical translations and two
+animation-frame opportunities. Screenshots are taken afterward. The report
+retains original/final text, exact Text-node restoration, protected-source
+checks, request times, peak generation admission, build/model identifiers,
+fixture hash, errors, and every five-second miss. Korean/nonempty checks do
+not prove semantic fidelity; compare complete outputs separately.
+
+`FULL_PAGE_STATE=cold` unloads the resident model before each timed click.
+This includes model/GPU initialization from installed files, not downloading
+or an OS-cache-cold first installation. Default `warm` uses a distinct
+warmup sentence and fresh page-local translation caches.
+`FULL_PAGE_TIMEOUT_MS` bounds observation, not generation length.
+`FULL_PAGE_ALLOW_INCOMPLETE=1` preserves failed baseline observations without
+failing the runner; never interpret its process exit as correctness.
+
+The options select supports 1/2/4/8 simultaneous generations. New settings
+default to eight; saved serial/two-slot choices are preserved. Production
+now drains all eligible finite-page sources, including offscreen support,
+while hidden/editable/protected/clipped sources remain excluded or deferred.
+The explicit viewport-only pipeline API remains covered separately.
+
+Verification for `page5-S35gTt`: extension/tooling type checking passed;
+305 distinct focused Node cases passed across the initial and corrected runs
+(`settings`, `options`, `background`, `engines`, `content`, `pipeline`, `dom`,
+`onnxhost`). Chrome packaging passed. Chromium DOM/installed-extension
+regressions passed 59 distinct scenarios across initial and corrected runs.
+The three browser corrections select serial execution explicitly for serial
+ordering scenarios and use explicit translation restart to retry parked
+failures; unrelated mutation refresh must not silently clear those failures.
+The options unit correction avoids retaining a previous synthetic global
+context after reopening the page.
+
+Actual-model adoption evidence is `paired-final/`, not those deterministic
+browser fixtures. Five alternating build pairs cover both fixed models and
+all three complete pages. An initially fast candidate was rejected for a
+changed technical meaning; the retained token-plan candidate was compared
+using complete output strings. Settings and final-page screenshots were
+inspected. See the [full measurements](translation-performance.md#whole-page-completion-fixed-q4f16--q4_k_m)
+for every five-second miss and first-preview tradeoffs.
+
+### GGUF page bottleneck diagnostics
+
+`test-results/browser/gguf-profile-YuoErb/` retains a separate Q4_K_M
+investigation of the current eight-slot page path. Diagnostics run only in
+copied extension builds; production kernels, prompt planning, token limits,
+EOS handling and shader arithmetic are unchanged.
+
+Four modes distinguish measurement effects:
+
+- `control`: capture job prompt/output IDs, without `onStep` or GPU queries.
+- `step`: existing step wall/encode/completion/readback timing, plus CPU
+  embedding-row decode and buffer-write counters.
+- `pass`: step diagnostics and GPU timestamps preserving compute-pass grouping.
+- `dispatch`: split each dispatch into a timestamped pass for operator
+  attribution. This changes GPU command grouping and is not production latency.
+
+Three serial browser rounds alternate mode order across the same complete
+short/article/English pages. GPU jobs never overlap. Compare exact prompt and
+output token arrays as well as final page strings; retain differences rather
+than assuming instrumentation is semantically invisible. Warmup/reset and
+trace collection occur outside the click-to-final-paint interval.
+
+`computeMs` includes queue/browser completion delay; it is not GPU execution
+time. Do not add it to GPU timestamps. GPU timestamps observed on this browser
+are quantized in 65.536 microsecond increments: a zero-duration small dispatch
+does not mean free work. Aggregate operators across a page, and compare the
+pass-preserving mode before attributing split-pass overhead to the model.
+Prefill active rows count input positions, whereas pure-decode active rows
+count simultaneous sequences. Eight admitted requests do not imply eight
+active decode rows throughout a page.
+
+The diagnostic worker initially failed because a nested GPUDevice proxy
+forwarded a native setter with the wrong receiver. Failed setup reports are
+retained; the isolated proxy fix forwards setters to the native device.
+Only successful complete-page measurements qualify as timing evidence.
+
+Completed evidence: all 36 controlled page runs finished, restored, and
+matched exact prompt/output token arrays and final strings across modes.
+The nine controls met five seconds in this batch; two pass-profiled pages
+did not. This does not supersede the earlier warm misses. GPU pass-duration
+sums sometimes exceed timestamp spans; the retained negative
+`betweenPassMs` values must not be interpreted as idle time.
+`analysis.json` and `report.json` contain phase, operator, decode-width and
+repeat-count aggregates. `experiment.json` records provenance and limits;
+`diagnostics-and-drivers.tar.gz` preserves the isolated build and scripts.
+Disposable working copies were removed. Production sources/builds were
+not modified for this investigation, and no unrelated suite was rerun.
+
+### Immediate rendering and isolated Q4_K_M candidates
+
+Evidence: `test-results/browser/gguf-opt-uQVBRj/`. The retained product
+change is the localized `translationRendering` setting and its live
+content-renderer propagation; production model kernels remain unchanged.
+
+Validation covers Aurora as the default, persistence and invalid-value
+normalization, the options control, background propagation, and applying
+immediate mode while inference is gated without starting another session.
+Immediate previews must update synchronously; final canonical text must
+not wait for a fade or preview handoff. Switching modes, partial and
+nonstreaming output, restoration, original Text identity, links,
+accessibility, cancellation and mutation handling remain covered.
+
+- `npm run typecheck` and `npx tsc -p tsconfig.json` passed.
+- Focused settings/options/background/content tests: 131 distinct tests
+  passed across the initial run and the corrected targeted rerun. One new
+  live-update assertion initially ran before the runtime message handler's
+  documented microtask; the test now drains that microtask while keeping
+  inference unresolved. No production behavior was changed for that fix.
+- The real-browser streaming/DOM suite passed 63/63 tests.
+- `npm run build:chrome` passed and produced the Chrome extension package.
+- Five alternating renderer-only rounds used supplied text, not inference,
+  and verified immediate synchronous rendering and exact restoration.
+  Streaming screenshots were captured and the immediate surface inspected.
+
+Isolated GPU checks preserve failed runs as well as successful ones:
+1264 independent-reference repacked matrix cases; paired FFN, output-head
+and Q/K-fusion checks; heterogeneous scheduling comparisons. A missing
+reference-fixture field and an existing logits check that requires a full
+uniform final batch are documented rather than counted as numerical passes.
+The length-aware candidate's token mismatch is a failed acceptance check,
+not a performance improvement eligible for release.
+
+The installed-extension page driver uses the actual rendering settings
+control and Save action. It records both canonical DOM completion and
+fully opaque final text after finite animations and two animation frames.
+The latter is the visible five-second metric. All eligible below-fold
+source is included without scrolling; protected content, exact final
+strings and original Text restoration are checked. First model progress
+and first visible preview are separate timestamps because fragment
+reading order can delay display independently of animation.
+
+The final paired experiment completed 30/30 pages across five alternating
+rounds, with exact final-string parity and restoration throughout. Visible
+five-second acceptance was 15/15 for immediate and 11/15 for Aurora; all
+four Aurora misses remain recorded. The immediate settings control and
+full translated article screenshots were inspected. These results apply
+to the fixed warm fixtures only, not arbitrary page lengths or cold load.
+`experiment.json`, `animation-paired/comparison.json`, validation logs,
+candidate sources/drivers and copied extension builds retain provenance.
+
+### Japanese-only three-second bottleneck measurement
+
+The current target is **three seconds to complete and visibly display the
+entire fixed Japanese page**, including eligible below-fold content.
+English is excluded from this measurement. The existing Japanese short
+and article fixtures are unchanged; the target language remains Korean.
+Use resident GGUF Q4_K_M, eight generation slots and immediate rendering.
+Do not reduce source coverage, generation limits or precision to meet the
+target. Cold-start time is outside this warm acceptance metric.
+
+`test-results/browser/gguf-ja-profile-QlzzmQ/` records three independently
+launched browser repetitions of each mode, running GPU work serially:
+
+- `plain`: current extension copy without worker profiling hooks; page
+  DOM/host timestamps still observe the enable-to-visible interval.
+- `step`: model-step encode/completion/readback timing, prompt/output
+  tokens, CPU embedding decode and buffer-write/allocation counters.
+- `pass`: GPU timestamps preserving existing compute-pass grouping.
+- `dispatch`: one timestamped pass per dispatch for operator attribution;
+  its wall time is diagnostic, not production acceptance.
+
+Each mode runs only `short-page,article-page`; the driver asserts Japanese
+fixtures, immediate rendering, the kernel backend and a 3000ms goal.
+Record every attempt and every three-second miss. Compare final strings
+across all modes and prompt/output token arrays across instrumented modes;
+plain runs deliberately have no worker token-capture hooks. GPU timestamp
+quantization and profiling overhead must accompany operator percentages.
+No production kernel or translation behavior changes are part of this
+measurement.
+
+Completed: 24/24 pages restored and matched final strings; all 18
+instrumented prompt/output comparisons matched. Plain short-page
+acceptance was 3/3 under three seconds, article 0/3. The Japanese article
+screenshot was inspected. `analysis.json` and `report.json` preserve
+phase/operation/occupancy details, timer-resolution limits and run-to-run
+variability; `diagnostics-and-drivers.tar.gz` preserves exact measurement
+inputs. No build or unrelated test suite was needed for this isolated
+investigation.
+
+### Per-job final-logit diagnostics
+
+`test/engine-spike/run-kernels.mjs` with `CHECK_LOGITS=1` now compares the
+final logical output step of each job, identified by job ID and step.
+It no longer assumes that the last model step contains every batch row:
+prefill can finish on different steps at widths three, five and seven.
+Missing or duplicate captures fail the diagnostic.
+
+Captures run in a separate untimed replay, whose generated tokens must
+equal the timed run. Reported throughput and step samples exclude that
+replay. Cosine ≥0.99999 and relative L2 ≤0.005 remain unchanged.
+`gguf-ja-opt-zfaux8/logits-collector/` verified identical source snapshots
+at L128/512, B3/5/7 and 64 output tokens: 12 runs, six comparisons,
+identical tokens and zero measured logit difference. Timing differences
+between these identical implementations are not optimization gains.
+
+### Japanese Q4_K_M candidate acceptance results
+
+`gguf-ja-opt-zfaux8/` implements the ordered FFN→head→normalization→RoPE→
+SiLU experiment without changing production kernels. Accuracy precedes
+performance: independent scaled error ≤1e-4, exact generated-token parity,
+then the unchanged final-logit thresholds. The normalization candidate
+demonstrates why isolated numerical agreement alone is insufficient:
+its real-model output diverged and its screen was stopped.
+
+Promoted candidates use five AB/BA page pairs plus three baseline runs at
+each end. Acceptance requires article median ≥5% faster, at least four
+pair wins, short-page regression ≤3%, baseline bracket drift ≤10%, and
+identical complete translations/restoration. Each inconclusive candidate
+gets at most one fresh-session retry. No-scroll assertions remain strict;
+the two failed baseline retries at scrollY 552.5 are preserved, not repaired
+by scrolling back or omitted from the record.
+
+Neither RoPE nor SiLU passed this gate. No production optimization or
+final ten-pair acceptance is claimed. See `outcome.json`,
+`kernel-summary.json`, the per-candidate raw reports and
+`diagnostics-and-candidates.tar.gz` for decisions and reproducible inputs.
+Only the diagnostic collector repair is retained; its B3/5/7 same-source
+proof above exercises the changed path. No unrelated test suite was run.
+
+### Quantized GEMV lifetime / narrow pass screen
+
+`test-results/browser/gguf-gpu-focus-aw4MHw/` records two isolated candidates
+against the frozen custom-engine baseline (`current` in raw reports).
+Independent gguf-py fixtures caught an initial shader-local shadowing error;
+the failure is retained. The corrected shader passed 49 direct cases,
+16 repack checks and 1264 repacked matmul cases with unchanged 1e-4 tolerance
+and output guards.
+
+The actual headed browser ran L128/512 × B1/3/5/7/8 × output32 × three
+alternating repetitions for all three variants: 90 timed runs, with
+final-logit diagnostic replay outside timing. All generated-token
+comparisons and final logits matched; GPU/page/cleanup errors were empty.
+Neither candidate met its predeclared performance promotion gate.
+Consequently, no all-width64 or installed-page acceptance was run and no
+production kernel/build changed. `experiment-sources.tar.gz` contains the
+candidate sources, independent fixture, isolated checker, analysis and
+reproduction commands; `outcome.json` records limitations and rejection.
+
+### ONNX q4f16 K-block scheduling candidates
+
+`test-results/browser/onnx-opt-D79eDb/` contains isolated next-block
+word/scale lookahead and two-block outer-loop candidates. Each ran the
+existing packed-GEMV numerical fixture set in headed Chrome: 12 cases,
+991,778 compared outputs, zero absolute error and unchanged canaries.
+No tolerance or fixture was weakened.
+
+The fixed-work model screen covered L128/512, B1/3/5/7/8, output32 and
+three alternating repetitions: 90 model runs, 90 pairwise token comparisons,
+identical final logits and no GPU/page/cleanup errors. Neither candidate
+passed its predeclared 5% geometric-mean gain / 3% maximum-regression gate.
+Therefore no all-width64 or installed-page promotion test was run.
+Production sources/builds are unchanged. The archive retains both source
+candidates, frozen baseline, isolated numerical runner, analysis and
+reproduction commands; model/source hashes are in `inputs.sha256`.

@@ -52,8 +52,16 @@
   "options_enabled": { "message": "Translate this tab" },
   "options_languages": { "message": "Languages" },
   "options_targetLang": { "message": "Translate to" },
-  "options_parallelTranslation": { "message": "Translate up to two short fragments or visible reading units at once" },
-  "options_parallelTranslationHint": { "message": "On by default. May improve throughput, but the first result may take longer. Turn off to translate one at a time. Background prefetch always runs one at a time." },
+  "options_parallelTranslation": { "message": "Simultaneous translation fragments" },
+  "options_parallelTranslationHint": { "message": "Default: 8. All translating tabs share this limit in one model runner. Choose 1 for serial translation; higher limits may improve full-page throughput but delay the first result." },
+  "options_parallelTranslation1": { "message": "1 (one at a time)" },
+  "options_parallelTranslation2": { "message": "2" },
+  "options_parallelTranslation4": { "message": "4" },
+  "options_parallelTranslation8": { "message": "8 (default)" },
+  "options_translationRendering": { "message": "Translation appearance" },
+  "options_translationRenderingHint": { "message": "Immediate mode shows available translation without animations or reveal delays. This does not change model generation. Aurora respects reduced-motion preferences." },
+  "options_translationRenderingAurora": { "message": "Aurora (default)" },
+  "options_translationRenderingImmediate": { "message": "Immediate (no animation)" },
   "options_alwaysLanguages": { "message": "Always translate these source languages" },
   "options_alwaysLanguagesHint": { "message": "The source language is detected automatically. A matching URL or a checked language starts translation in the active tab. Your target language is skipped, even if checked. Turning a tab off overrides automatic translation until that tab closes." },
   "options_rules": { "message": "Always translate these URLs" },
@@ -90,7 +98,7 @@
     "message": "Import from disk"
   },
   "options_pickFileHint": {
-    "message": "Select the .onnx graph together with the files beside it in the same folder: tokenizer.json, tokenizer_config.json and config.json at least."
+    "message": "Select a PLaMo 3 Translate 0.8B .onnx graph together with tokenizer.json, tokenizer_config.json and config.json."
   },
   "options_prepare": {
     "message": "Load now"

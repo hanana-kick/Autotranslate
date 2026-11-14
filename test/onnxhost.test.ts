@@ -61,7 +61,34 @@ test('expandByteFallback turns an out-of-vocab char into its UTF-8 byte tokens',
   assert.equal(fakeTokenizer.decode(ids), '안녕하세요', 'the expansion round-trips to the original text');
 });
 
-test('modelKind classifies onnx files and files the runtime must judge', () => {
+test('byte expansion memo is exact, bounded and cleared by tokenizer replacement', () => {
+  let calls = 0;
+  const tracked = Object.assign((text: string, options?: { add_special_tokens?: boolean }) => {
+    calls += 1;
+    return fakeTokenizer(text, options);
+  }, { decode: fakeTokenizer.decode, apply_chat_template: fakeTokenizer.apply_chat_template });
+  onnxhost.configure({ tokenizer: tracked });
+  const source = '안녕하세요';
+  const expanded = onnxhost.expandByteFallback(source);
+  const firstCalls = calls;
+  assert.equal(onnxhost.expandByteFallback(source), expanded);
+  assert.equal(calls, firstCalls, 'identical source expansion needs no tokenization');
+  for (let index = 0; index < 257; index += 1) onnxhost.expandByteFallback('안'.repeat(index + 1));
+  onnxhost.expandByteFallback(source);
+  assert.ok(calls > firstCalls + 257, 'old source text is evicted from the bounded memo');
+  const large = '안'.repeat(8193);
+  onnxhost.expandByteFallback(large);
+  const largeCalls = calls;
+  assert.equal(onnxhost.expandByteFallback(large), large);
+  assert.equal(calls, largeCalls + 1, 'large input is processed intact, not retained');
+  onnxhost.configure({ tokenizer: Object.assign(
+    (text: string) => ({ input_ids: { data: Array.from(text, (character) => character.codePointAt(0) ?? 0) } }),
+    { decode: fakeTokenizer.decode, apply_chat_template: fakeTokenizer.apply_chat_template }
+  ) });
+  assert.equal(onnxhost.expandByteFallback(source), source, 'replacement vocab cannot inherit byte expansion');
+});
+
+test('modelKind classifies supported ONNX files and unsupported files', () => {
   assert.equal(
     local.modelKind({ name: 'model_q4f16.onnx', sourceUrl: 'https://huggingface.co/x/y/resolve/main/onnx/model_q4f16.onnx' }),
     'onnx'
@@ -168,6 +195,7 @@ class FakeEngine {
   static inFlight: EngineJob[] = [];
   static dropped: number[] = [];
   static failInit: string | null = null;
+  static holdInit = false;
   static backend: 'kernels' | 'runtime' = 'runtime';
   static rows = 1;
   onmessage: ((event: { data: unknown }) => void) | null = null;
@@ -182,6 +210,7 @@ class FakeEngine {
   postMessage(message: { type?: string; id?: number; inputIds?: number[]; maxNewTokens?: number }): void {
     const failure = FakeEngine.failInit;
     if (message?.type === 'init') {
+      if (FakeEngine.holdInit) return;
       queueMicrotask(() => {
         this.onmessage?.({
           data: failure
@@ -221,6 +250,7 @@ class FakeEngine {
     FakeEngine.inFlight = [];
     FakeEngine.dropped = [];
     FakeEngine.failInit = null;
+    FakeEngine.holdInit = false;
     FakeEngine.backend = 'runtime';
     FakeEngine.rows = 1;
   }
@@ -576,6 +606,80 @@ test('kernel load and token counting need no document generation session', async
   }
 });
 
+test('count and complete-prompt memos preserve exact IDs, special-token options and context', async () => {
+  const calls: { text: string; specials: boolean }[] = [];
+  const tokenizer = Object.assign((text: string, options?: { add_special_tokens?: boolean }) => {
+    const specials = options?.add_special_tokens !== false;
+    calls.push({ text, specials });
+    const ids = codepoints(text).input_ids.data;
+    return { input_ids: { data: specials ? [17, ...ids] : ids } };
+  }, {
+    decode: codepoints.decode,
+    apply_chat_template: (messages: { content: string }[], options?: { target_lang?: string; context?: string }) =>
+      `PROMPT:${options?.target_lang}:${options?.context ?? ''}:${messages[0]?.content ?? ''}`
+  });
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  const source = '안녕 e\u0301 👩‍👩‍👧‍👦';
+  const plain = `PROMPT:ko::${source}`;
+  const countRequest = { type: 'at/local-count', modelId: 'onnx-model', texts: [source, plain], target: 'ko' };
+  try {
+    const counted = await onnxhost.handle(countRequest);
+    assert.deepEqual(counted.counts, [Array.from(source).length, Array.from(plain).length]);
+    const before = calls.length;
+    assert.deepEqual(await onnxhost.handle(countRequest), counted);
+    assert.equal(calls.length, before, 'repeat source counts reuse expansion and no-special counts');
+    for (const context of [undefined, undefined, 'greeting', 'greeting']) {
+      const request = onnxhost.translate({ ...translateRequest(source), ...(context ? { context } : {}) });
+      started.push(request);
+      await until('memoized prompt admitted', () => FakeEngine.inFlight.length === 1);
+      const job = jobFor(source);
+      const prompt = `PROMPT:ko:${context ?? ''}:${source}`;
+      assert.deepEqual(job.inputIds, [17, ...codepoints(prompt).input_ids.data],
+        'the whole prompt, including Unicode and specials, is encoded together');
+      job.worker.answer(job, '번역');
+      await request;
+    }
+    assert.equal(calls.filter((call) => call.text === plain && call.specials).length, 1,
+      'no-special count IDs never substitute for complete prompt IDs');
+    assert.equal(calls.filter((call) => call.text === `PROMPT:ko:greeting:${source}` && call.specials).length, 1);
+    assert.equal((await onnxhost.status()).generations, 4, 'only tokenizer work is reused, never translations');
+  } finally {
+    await finish(started, session);
+  }
+});
+
+test('model replacement invalidates source counts and complete-prompt IDs even with the same tokenizer object', async () => {
+  let width = 1;
+  const tokenizer = Object.assign((text: string) => ({
+    input_ids: { data: codepoints(text).input_ids.data.flatMap((id) => Array.from({ length: width }, () => id)) }
+  }), { decode: codepoints.decode, apply_chat_template: codepoints.apply_chat_template });
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  try {
+    for (const modelId of ['onnx-model', 'replacement-model']) {
+      const counted = await onnxhost.handle({ type: 'at/local-count', modelId, texts: [ASK_ONE], target: 'ko' });
+      assert.deepEqual(counted.counts, [ASK_ONE.length * width]);
+      const request = onnxhost.translate({ ...translateRequest(ASK_ONE), modelId });
+      started.push(request);
+      await until('model-specific prompt', () => FakeEngine.inFlight.length === 1);
+      const job = FakeEngine.inFlight[0]!;
+      assert.deepEqual(job.inputIds, tokenizer(`PROMPT:${ASK_ONE}`).input_ids.data);
+      job.worker.answer(job, '번역');
+      await request;
+      width += 1;
+    }
+    assert.equal(session.calls.tokenizers, 2);
+    assert.equal(FakeEngine.made[0]!.terminated, true);
+  } finally {
+    await finish(started, session);
+  }
+});
+
 test('LOCAL_COUNT plans actual-token bounded raw source fragments with the loaded tokenizer', async () => {
   const weightedTokenizer = Object.assign((text: string, _options?: { add_special_tokens?: boolean }) => ({
     input_ids: {
@@ -730,7 +834,7 @@ test('unload during fallback creation discards the session before a new load', a
   }
 });
 
-test('unload cancels an initial tokenizer load without starting a worker', async () => {
+test('unload during overlapping tokenizer and worker startup retires both before reload', async () => {
   const gate = deferred();
   const session = installSession({ beforeTokenizer: () => gate.promise });
   FakeEngine.reset();
@@ -741,18 +845,65 @@ test('unload cancels an initial tokenizer load without starting a worker', async
     const rejected = assert.rejects(loading, /unloaded/);
     started.push(rejected);
     await until('tokenizer load', () => session.calls.tokenizers === 1);
+    assert.equal(FakeEngine.made.length, 1, 'worker opening overlaps the blocked tokenizer');
+    assert.equal((await onnxhost.status()).state, 'loading', 'worker readiness alone is not host readiness');
     const unloading = onnxhost.unload();
     started.push(unloading);
     gate.resolve();
     await Promise.all([rejected, unloading]);
-    assert.equal(FakeEngine.made.length, 0);
+    assert.equal(FakeEngine.made.length, 1);
+    assert.equal(FakeEngine.made[0]!.terminated, true, 'the overlapping worker cannot survive unload');
     assert.equal(session.calls.pipelines, 0);
     assert.equal((await onnxhost.status()).state, 'unloaded');
     await onnxhost.load('onnx-model', 512, 'ko');
-    assert.equal(FakeEngine.made.length, 1, 'a later load can start normally');
+    assert.equal(FakeEngine.made.length, 2, 'a later load starts a fresh worker');
   } finally {
     gate.resolve();
     await finish(started, session);
+  }
+});
+
+test('tokenizer completion cannot publish readiness before the overlapping GPU worker is ready', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  FakeEngine.holdInit = true;
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  try {
+    let ready = false;
+    const loading = onnxhost.load('onnx-model', 512, 'ko').then(() => { ready = true; });
+    started.push(loading);
+    await until('tokenizer and worker opened', () => session.calls.tokenizers === 1 && FakeEngine.made.length === 1);
+    assert.equal(ready, false);
+    assert.equal((await onnxhost.status()).state, 'loading');
+    FakeEngine.made[0]!.onmessage?.({ data: { type: 'ready', ok: true, backend: 'kernels', rows: 8 } });
+    await loading;
+    assert.equal((await onnxhost.status()).state, 'ready');
+    assert.equal(session.calls.pipelines, 0);
+  } finally {
+    for (const worker of FakeEngine.made) worker.onmessage?.({ data: { type: 'ready', ok: true, backend: 'kernels', rows: 8 } });
+    await finish(started, session);
+  }
+});
+
+test('failed tokenizer opening retires the overlapping worker and permits a fresh load', async () => {
+  let failing = true;
+  const session = installSession({ beforeTokenizer: async () => {
+    if (failing) throw new Error('tokenizer failed');
+  } });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  try {
+    await assert.rejects(onnxhost.load('onnx-model', 512, 'ko'), /tokenizer failed/);
+    assert.equal(FakeEngine.made.length, 1);
+    assert.equal(FakeEngine.made[0]!.terminated, true);
+    failing = false;
+    await onnxhost.load('onnx-model', 512, 'ko');
+    assert.equal(FakeEngine.made.length, 2);
+    assert.equal((await onnxhost.status()).state, 'ready');
+    assert.equal(session.calls.pipelines, 0);
+  } finally {
+    await finish([], session);
   }
 });
 
@@ -891,14 +1042,20 @@ test('worker previews decode cumulative generated ids and hold incomplete Unicod
   } finally { await finish(started, session); }
 });
 
-test('a retry clears its old preview and ignores progress from the old request id', async () => {
-  const session = installSession();
+test('a different-context retry clears its old preview and ignores progress from the old request id', async () => {
+  const tokenizer = Object.assign((text: string) => codepoints(text), {
+    decode: codepoints.decode,
+    apply_chat_template: (messages: { content: string }[], options?: { context?: string }) =>
+      `PROMPT:${options?.context ?? ''}:${messages[0]?.content ?? ''}`
+  });
+  const session = installSession({ tokenizer });
   FakeEngine.reset();
   (globalThis as ATNamespace).Worker = FakeEngine;
   const seen: string[] = [];
   const started: Promise<unknown>[] = [];
   try {
-    const request = onnxhost.translate(translateRequest(ASK_ONE), (_index: number, text: string) => seen.push(text));
+    const request = onnxhost.translate({ ...translateRequest(ASK_ONE), context: 'greeting' },
+      (_index: number, text: string) => seen.push(text));
     started.push(request);
     await until('first attempt', () => FakeEngine.inFlight.length === 1);
     const first = jobFor(ASK_ONE);
@@ -907,12 +1064,38 @@ test('a retry clears its old preview and ignores progress from the old request i
     await until('retry', () => FakeEngine.inFlight.length === 1);
     const second = jobFor(ASK_ONE);
     assert.notEqual(second.id, first.id);
+    assert.notDeepEqual(second.inputIds, first.inputIds, 'only a different rendered prompt retries');
     first.worker.onmessage?.({ data: { type: 'progress', id: first.id, tokens: [...'wrong late'].map((ch) => ch.codePointAt(0)) } });
     assert.deepEqual(seen, ['こんにちは', '']);
     second.worker.answer(second, '번역');
     assert.deepEqual((await request).translations, ['번역']);
   } finally { await finish(started, session); }
 });
+
+for (const mode of ['native', 'fallback'] as const) {
+  test(`${mode}: identical rendered greedy retry is skipped even when a template ignores context`, async () => {
+    const session = installSession({ generatedText: (prompt) => prompt + 'こんにちは' });
+    FakeEngine.reset();
+    if (mode === 'fallback') FakeEngine.failInit = 'use document fallback';
+    (globalThis as ATNamespace).Worker = FakeEngine;
+    const started: Promise<unknown>[] = [];
+    try {
+      const request = onnxhost.translate({ ...translateRequest(ASK_ONE), context: 'ignored by template' });
+      started.push(request);
+      if (mode === 'native') {
+        await until('first greedy attempt', () => FakeEngine.inFlight.length === 1);
+        const job = jobFor(ASK_ONE);
+        job.worker.answer(job, 'こんにちは');
+      }
+      assert.deepEqual((await request).translations, ['']);
+      assert.equal((await onnxhost.status()).generations, 1);
+      assert.equal(FakeEngine.inFlight.length, 0);
+      assert.equal(session.inline.length, mode === 'fallback' ? 1 : 0);
+    } finally {
+      await finish(started, session);
+    }
+  });
+}
 
 test('a worker crash resets its preview before streamed inline fallback, including its final flush', async () => {
   const session = installSession({
@@ -1112,6 +1295,8 @@ test('preaborted host requests do not load and abort during loading never admits
     await until('shared tokenizer loading', () => session.calls.tokenizers === 1);
     controller.abort();
     await cancelled;
+    assert.equal(FakeEngine.made.length, 1);
+    assert.equal(FakeEngine.made[0]!.terminated, false, 'one caller cannot cancel shared worker startup');
     gate.resolve();
     const survivor = onnxhost.translate(translateRequest(ASK_TWO));
     started.push(survivor);

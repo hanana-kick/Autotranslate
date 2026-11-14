@@ -318,6 +318,7 @@ namespace AT.modelstore {
       return { ok: false, record: null, error: 'too-small', bytes: 0 };
     }
     const sourceUrl = typeof request.sourceUrl === 'string' ? request.sourceUrl : '';
+    if (L.modelKind({ name, sourceUrl }) !== 'onnx') return { ok: false, record: null, error: 'not-onnx', bytes: 0 };
     const record = L.normalizeModel({
       id: L.makeModelId(name, `bundled|${sourceUrl}`, deps.now()),
       name,
@@ -346,7 +347,7 @@ namespace AT.modelstore {
     const removed: string[] = [];
     for (const entry of await files().list()) {
       if (now - entry.lastModified < RECENT_WRITE_MS) continue;
-      if (!entry.name.endsWith(TMP_SUFFIX) && known.has(entry.name)) continue;
+      if (!entry.name.endsWith(TMP_SUFFIX) && known.has(entry.name.split('/')[0]!)) continue;
       await files().remove(entry.name);
       removed.push(entry.name);
     }
@@ -405,6 +406,10 @@ namespace AT.modelstore {
     const name = typeof request.name === 'string' ? request.name.trim().slice(0, 120) : '';
     if (!request.stream) return { ok: false, record: null, error: 'no-stream', bytes: 0 };
     if (!name) return { ok: false, record: null, error: 'no-name', bytes: 0 };
+    if (L.modelKind({ name, sourceUrl: url }) !== 'onnx') {
+      await request.stream.cancel('only ONNX models are supported').catch(() => undefined);
+      return { ok: false, record: null, error: 'not-onnx', bytes: 0 };
+    }
 
     const id = L.makeModelId(name, url, deps.now());
     const stream = request.stream;
@@ -498,6 +503,7 @@ namespace AT.modelstore {
     if (typeof doFetch !== 'function') return { ok: false, record: null, error: 'no-fetch', bytes: 0 };
     const name =
       (typeof request.name === 'string' && request.name.trim()) || fileNameFromUrl(graphUrl) || 'model.onnx';
+    if (L.modelKind({ name, sourceUrl: graphUrl }) !== 'onnx') return { ok: false, record: null, error: 'not-onnx', bytes: 0 };
     const id = L.makeModelId(name, graphUrl, deps.now());
     // The parts live at the repo root, two levels above `onnx/model.onnx`.
     const base = graphUrl.slice(0, graphUrl.lastIndexOf('/onnx/') + 1);
@@ -616,6 +622,9 @@ namespace AT.modelstore {
   export async function download(request: DownloadRequest): Promise<IngestResult> {
     const url = L.normalizeDownloadUrl(request.url);
     if (!url) return { ok: false, record: null, error: 'bad-url', bytes: 0 };
+    const fileName =
+      (typeof request.name === 'string' && request.name.trim()) || fileNameFromUrl(url) || 'model.onnx';
+    if (L.modelKind({ name: fileName, sourceUrl: url }) !== 'onnx') return { ok: false, record: null, error: 'not-onnx', bytes: 0 };
     const doFetch: StreamFetch | undefined = deps.fetchImpl ?? globalThis.fetch?.bind(globalThis);
     if (typeof doFetch !== 'function') return { ok: false, record: null, error: 'no-fetch', bytes: 0 };
 
@@ -659,8 +668,6 @@ namespace AT.modelstore {
       }
     );
 
-    const fileName =
-      (typeof request.name === 'string' && request.name.trim()) || fileNameFromUrl(url) || 'model.task';
     return ingest({ name: fileName, sourceUrl: url, stream, expectedBytes: total ?? undefined });
   }
 

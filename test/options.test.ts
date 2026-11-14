@@ -194,7 +194,8 @@ const FIELDS: readonly (readonly [string, string, string?])[] = [
   ['modelStatus', 'p'],
   ['targetLang', 'select'],
   ['alwaysTranslateLanguages', 'div'],
-  ['parallelTranslation', 'input'],
+  ['parallelTranslation', 'select'],
+  ['translationRendering', 'select'],
   ['rulePattern', 'input'],
   ['addRule', 'button', 'options_addRule'],
   ['ruleList', 'ul'],
@@ -282,9 +283,9 @@ function clone<T>(value: T): T {
 // `AT.modelstore` runs its real logic against the two seams `configure()`
 // exposes, so no test opens IndexedDB, OPFS or a socket.
 
-/** The bytes the fake transfer streams: the size PFN's Q4_K_M card declares, so
- *  the progress bars are measured against a real file's length. */
-const MODEL_BYTES = 573_125_952;
+/** The bytes the fake transfer streams: the ONNX q4f16 card's declared size,
+ *  so the progress bars are measured against a real file's length. */
+const MODEL_BYTES = 705_701_446;
 
 type ModelFixtures = {
   /** Raw metadata rows the fake IndexedDB answers `all()` with. */
@@ -294,8 +295,7 @@ type ModelFixtures = {
   /** Total bytes the scripted download serves; the card's size is what the
    *  store will hold it against. */
   bytes?: number;
-  /** Byte counts the scripted download streams back, one entry per chunk after
-   *  the GGUF header. */
+  /** Byte counts the scripted download streams back after the first chunk. */
   chunks?: number[];
   /** The HTTP status the scripted download answers with. */
   status?: number;
@@ -304,10 +304,10 @@ type ModelFixtures = {
 /** A metadata row `AT.local.normalizeModel` accepts. */
 function modelRow(overrides: ATNamespace = {}): ATNamespace {
   return {
-    id: 'plamo-3-translate-0.8b-q4_k_m-a1b2c3',
-    name: 'plamo-3-translate-0.8b-Q4_K_M.gguf',
+    id: 'plamo-3-translate-0.8b-q4f16-a1b2c3',
+    name: 'model_q4f16.onnx',
     size: MODEL_BYTES,
-    sourceUrl: 'https://models.example.test/files/plamo-3-translate-0.8b-Q4_K_M.gguf',
+    sourceUrl: 'https://models.example.test/files/model_q4f16.onnx',
     createdAt: 1700000000000,
     ...overrides
   };
@@ -329,9 +329,8 @@ function fakeModelstore(AT: ATNamespace, fixtures: ModelFixtures, onBytes: (writ
   const held = new Set<string>();
   const ages = new Map<string, number>();
   const estimate = fixtures.estimate ?? { usage: 5 * 1024 ** 3, quota: 20 * 1024 ** 3, persisted: true };
-  // A model file is a GGUF, and its first bytes are a header the ingest reads
-  // and rewrites, so the head is real. Everything after it is only ever
-  // measured, and nobody allocates a gigabyte to watch a progress bar move.
+  // The store only counts the graph bytes here; no inference parses them, so
+  // nobody allocates a gigabyte to watch a progress bar move.
   const parts = new Map<string, number>();
   const head = modelHead();
   const bytes = fixtures.bytes ?? MODEL_BYTES;
@@ -592,7 +591,8 @@ function storedSettings(overrides: ATNamespace = {}): ATNamespace {
     localModelId: '',
     localMaxTokens: 1024,
     maxNodes: 600,
-    translationConcurrency: 2,
+    translationConcurrency: 8,
+    translationRendering: 'aurora',
     showBadge: true,
     siteRules: [],
     alwaysTranslateLanguages: [],
@@ -672,24 +672,23 @@ test('saving real language edits enables autodetection without erasing internal 
   assert.ok(reopened.field('alwaysTranslateLanguages').querySelectorAll('input').every((input) => !input.checked));
 });
 
-test('parallel translation defaults on and a serial opt-out persists across reopening', async () => {
+test('parallel translation defaults to eight and all select choices persist across reopening', async () => {
   const env = await boot();
-  assert.equal(env.field('parallelTranslation').checked, true);
+  assert.equal(env.field('parallelTranslation').value, '8');
+  assert.deepEqual(env.field('parallelTranslation').querySelectorAll('option').map(option => option.value), ['1', '2', '4', '8']);
   await click(env.field('save'));
-  assert.equal(savedSettings(env).translationConcurrency, 2);
-  env.field('parallelTranslation').checked = false;
-  await click(env.field('save'));
-  assert.equal(savedSettings(env).translationConcurrency, 1);
-  const reopened = await boot({ stored: savedSettings(env) });
-  assert.equal(reopened.field('parallelTranslation').checked, false);
-  reopened.field('targetLang').value = 'ja';
-  await click(reopened.field('save'));
-  assert.equal(savedSettings(reopened).translationConcurrency, 1);
-  reopened.field('parallelTranslation').checked = true;
-  await click(reopened.field('save'));
-  assert.equal(savedSettings(reopened).translationConcurrency, 2);
-  const parallel = await boot({ stored: savedSettings(reopened) });
-  assert.equal(parallel.field('parallelTranslation').checked, true);
+  assert.equal(savedSettings(env).translationConcurrency, 8);
+  for (const width of [1, 2, 4, 8]) {
+    const env = await boot();
+    env.field('parallelTranslation').value = String(width);
+    await click(env.field('save'));
+    assert.equal(savedSettings(env).translationConcurrency, width);
+    const reopened = await boot({ stored: savedSettings(env) });
+    assert.equal(reopened.field('parallelTranslation').value, String(width));
+    reopened.field('targetLang').value = 'ja';
+    await click(reopened.field('save'));
+    assert.equal(savedSettings(reopened).translationConcurrency, width);
+  }
 });
 
 test('missing or invalid stored concurrency uses the parallel default', async () => {
@@ -697,9 +696,30 @@ test('missing or invalid stored concurrency uses the parallel default', async ()
   delete missing.translationConcurrency;
   for (const stored of [missing, storedSettings({ translationConcurrency: 0 }), storedSettings({ translationConcurrency: '1' })]) {
     const env = await boot({ stored });
-    assert.equal(env.field('parallelTranslation').checked, true);
+    assert.equal(env.field('parallelTranslation').value, '8');
     await click(env.field('save'));
-    assert.equal(savedSettings(env).translationConcurrency, 2);
+    assert.equal(savedSettings(env).translationConcurrency, 8);
+  }
+});
+
+test('translation appearance persists and missing or invalid modes retain aurora', async () => {
+  for (const mode of ['aurora', 'immediate']) {
+    const env = await boot();
+    assert.equal(env.field('translationRendering').value, 'aurora');
+    assert.deepEqual(env.field('translationRendering').querySelectorAll('option').map(option => option.value),
+      ['aurora', 'immediate']);
+    env.field('translationRendering').value = mode;
+    await click(env.field('save'));
+    assert.equal(savedSettings(env).translationRendering, mode);
+    const reopened = await boot({ stored: savedSettings(env) });
+    assert.equal(reopened.field('translationRendering').value, mode);
+    reopened.field('targetLang').value = 'ja';
+    await click(reopened.field('save'));
+    assert.equal(savedSettings(reopened).translationRendering, mode);
+  }
+  for (const translationRendering of [undefined, null, 'none']) {
+    const env = await boot({ stored: storedSettings({ translationRendering }) });
+    assert.equal(env.field('translationRendering').value, 'aurora');
   }
 });
 
@@ -869,8 +889,8 @@ test('the installed models render in the picker and the list', async () => {
     stored: storedSettings({ localModelId: 'alpha-task' }),
     models: {
       rows: [
-        modelRow({ id: 'alpha-task', name: 'alpha.task' }),
-        modelRow({ id: 'beta-task', name: 'beta.task', createdAt: 1800000000000 })
+        modelRow({ id: 'alpha-task', name: 'alpha.onnx' }),
+        modelRow({ id: 'beta-task', name: 'beta.onnx', createdAt: 1800000000000 })
       ]
     }
   });
@@ -880,8 +900,8 @@ test('the installed models render in the picker and the list', async () => {
     field('localModel').children.map((node) => [node.value, node.textContent]),
     [
       ['', msg('options_localNone')],
-      ['beta-task', 'beta.task (547 MiB)'],
-      ['alpha-task', 'alpha.task (547 MiB)']
+      ['beta-task', 'beta.onnx (673 MiB)'],
+      ['alpha-task', 'alpha.onnx (673 MiB)']
     ],
     'newest first, each labelled with its size'
   );
@@ -892,10 +912,10 @@ test('the installed models render in the picker and the list', async () => {
   );
 
   const items = field('modelList').querySelectorAll('li.rule');
-  assert.deepEqual(items.map((item) => item.querySelectorAll('code')[0]!.textContent), ['beta.task', 'alpha.task']);
+  assert.deepEqual(items.map((item) => item.querySelectorAll('code')[0]!.textContent), ['beta.onnx', 'alpha.onnx']);
   assert.deepEqual(
     items.map((item) => item.querySelectorAll('span.tag')[0]!.textContent),
-    ['547 MiB', '● 547 MiB'],
+    ['673 MiB', '● 673 MiB'],
     'the chosen model carries the bullet'
   );
 });
@@ -903,7 +923,7 @@ test('the installed models render in the picker and the list', async () => {
 test('model status warns when the browser may evict the model', async () => {
   const env = await boot({
     models: {
-      rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' })],
+      rows: [modelRow({ id: 'alpha-task', name: 'alpha.onnx' })],
       estimate: { usage: 5 * 1024 ** 3, quota: 20 * 1024 ** 3, persisted: false }
     }
   });
@@ -917,7 +937,7 @@ test('model status warns when the browser may evict the model', async () => {
 test('the stored model is selected on boot and survives a save nobody touched', async () => {
   const env = await boot({
     stored: storedSettings({ localModelId: 'alpha-task' }),
-    models: { rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' })] }
+    models: { rows: [modelRow({ id: 'alpha-task', name: 'alpha.onnx' })] }
   });
   assert.equal(
     env.field('localModel').value,
@@ -934,13 +954,13 @@ test('deleting the selected model clears the setting and releases the resident c
   const env = await boot({
     stored: storedSettings({ localModelId: 'alpha-task' }),
     models: {
-      rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' }), modelRow({ id: 'beta-task', name: 'beta.task' })]
+      rows: [modelRow({ id: 'alpha-task', name: 'alpha.onnx' }), modelRow({ id: 'beta-task', name: 'beta.onnx' })]
     }
   });
   const { AT, field } = env;
   const booted = env.runtimeMessages.length;
 
-  await click(modelItem(field('modelList'), 'alpha.task').querySelectorAll('button')[0]!);
+  await click(modelItem(field('modelList'), 'alpha.onnx').querySelectorAll('button')[0]!);
   await idle();
 
   assert.deepEqual(env.model.removed, ['alpha-task'], 'the store is asked to delete exactly that id');
@@ -951,11 +971,11 @@ test('deleting the selected model clears the setting and releases the resident c
     'the model the user was translating with is unloaded'
   );
   assert.equal(savedSettings(env).localModelId, '', 'the setting no longer names a deleted model');
-  assert.equal(field('modelStatus').textContent, msg('options_deleted', 'alpha.task'));
+  assert.equal(field('modelStatus').textContent, msg('options_deleted', 'alpha.onnx'));
   assert.equal(field('modelStatus').dataset.kind, 'ok');
   assert.deepEqual(
     field('modelList').querySelectorAll('li.rule').map((item) => item.querySelectorAll('code')[0]!.textContent),
-    ['beta.task'],
+    ['beta.onnx'],
     'the list is repainted from the store'
   );
 });
@@ -964,13 +984,13 @@ test('deleting an unselected model leaves the settings and the host alone', asyn
   const env = await boot({
     stored: storedSettings({ localModelId: 'alpha-task' }),
     models: {
-      rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' }), modelRow({ id: 'beta-task', name: 'beta.task' })]
+      rows: [modelRow({ id: 'alpha-task', name: 'alpha.onnx' }), modelRow({ id: 'beta-task', name: 'beta.onnx' })]
     }
   });
   const { field } = env;
   const booted = env.runtimeMessages.length;
 
-  await click(modelItem(field('modelList'), 'beta.task').querySelectorAll('button')[0]!);
+  await click(modelItem(field('modelList'), 'beta.onnx').querySelectorAll('button')[0]!);
   await idle();
 
   assert.deepEqual(env.model.removed, ['beta-task'], 'the file is still deleted');
@@ -1024,7 +1044,7 @@ test('downloading the ONNX card fetches the graph and its parts, then registers 
     'the graph first, then each part from the same directory'
   );
 
-  // An ONNX graph has no GGUF header, so the first chunk is already body bytes.
+  // Every graph chunk contributes to the progress total.
   assert.deepEqual(
     env.progress.map((tick) => [tick.value, tick.max, tick.hidden]),
     [
@@ -1057,7 +1077,7 @@ test('downloading the ONNX card fetches the graph and its parts, then registers 
 test('selecting an installed model persists it without exposing its token budget', async () => {
   const env = await boot({
     stored: storedSettings({ localMaxTokens: 2048 }),
-    models: { rows: [modelRow({ id: 'alpha-task', name: 'alpha.task' })] }
+    models: { rows: [modelRow({ id: 'alpha-task', name: 'alpha.onnx' })] }
   });
   env.field('localModel').value = 'alpha-task';
   await click(env.field('save'));
