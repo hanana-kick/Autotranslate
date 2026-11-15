@@ -1,8 +1,7 @@
 // The on-device host: load, unload, status, translate and handle, over
 // Transformers.js on onnxruntime-web WebGPU, with the ONNX export of PLaMo 3
-// Translate stored in OPFS. Everything that is not the runtime - the prompt,
-// packing, the script guard, the token budget - is shared through `AT.local`
-// and `AT.plamo3`.
+// Translate stored in OPFS. The host renders the model's tokenizer template,
+// plans exact token budgets and validates completion and structural safety.
 //
 // The vendored runtime arrives as classic scripts that publish three globals
 // (`AT_ORT_COMMON`, `AT_ORT_WEBGPU`, `AT_TRANSFORMERS`); the model's own files
@@ -46,11 +45,12 @@ namespace AT.onnxhost {
   let inlineInFlight = 0;
   let lifecycle = 0;
   let reporter: ((status: AT.local.LocalStatus) => void) | null = null;
-  let lastMaxTokens = L.DEFAULT_MAX_TOKENS;
   /** The language the resident session was loaded for; the pool boots from it. */
   let lastTarget = 'ko';
   /** The dtype the resident graph was opened with; every worker opens the same. */
   let loadedDtype = 'fp16';
+  let modelContextTokens = 0;
+  let eosTokens: number[] = [];
 
   const state: AT.local.LocalStatus = {
     target: L.TARGET_OFFSCREEN,
@@ -89,9 +89,9 @@ namespace AT.onnxhost {
   function promptIds(prompt: string): number[] {
     const cached = encodedPrompts.get(prompt);
     if (cached) return cached;
-    // Encode the complete rendered prompt, with the tokenizer's default
-    // special-token behavior. Source counts deliberately use a separate memo.
-    const ids = Array.from(tokenizer!(prompt).input_ids.data, Number);
+    // The chat template already emits BOS and PFML controls. Adding the
+    // tokenizer's defaults here would duplicate them.
+    const ids = Array.from(tokenizer!(prompt, { add_special_tokens: false }).input_ids.data, Number);
     return remember(encodedPrompts, prompt, ids, ids.length);
   }
 
@@ -174,38 +174,37 @@ namespace AT.onnxhost {
     if (cached !== undefined) return cached;
     const tok = tokenizer ?? seams.tokenizer!;
     const encoded = tok(text, { add_special_tokens: false });
-    const ids = Array.from(encoded.input_ids.data as ArrayLike<number | bigint>).map(Number);
-    if (!ids.includes(0)) return remember(expandedTexts, text, text, text.length);
+    const ids = Array.from(encoded.input_ids.data, Number);
+    if (!ids.includes(0)) {
+      // The fallback probe already measured these exact no-special-token IDs.
+      remember(countedTexts, text, ids.length);
+      return remember(expandedTexts, text, text, text.length);
+    }
     let out = '';
+    const utf8 = new TextEncoder();
     for (const ch of text) {
-      const one = Array.from(tok(ch, { add_special_tokens: false }).input_ids.data as ArrayLike<number | bigint>).map(Number);
+      const one = Array.from(tok(ch, { add_special_tokens: false }).input_ids.data, Number);
       if (one.length === 1 && one[0] !== 0) {
         out += ch;
         continue;
       }
-      for (const byte of new TextEncoder().encode(ch)) {
+      for (const byte of utf8.encode(ch)) {
         out += '<0x' + byte.toString(16).toUpperCase().padStart(2, '0') + '>';
       }
     }
     return remember(expandedTexts, text, out, out.length);
   }
 
-  /** The PFML3 prompt exactly as `AT.plamo3.buildPrompt` builds it, rendered
-   *  through the tokenizer's own chat template so the special tokens line up
-   *  with the ONNX graph's expectations. */
-  function renderPrompt(target: string, text: string, hint: string | null): string {
-    // Pass the page text as a plain string, not a chat: the template is already
-    // applied here, and a chat input would make the pipeline render it again.
-    // The fallback echoes the decoded prompt; `answerOf` removes that exact prefix.
-    const safe = P.sanitize(text);
-    const context = hint === null ? null : P.sanitize(hint);
+  /** Render the source and requested languages through the model template. */
+  function renderPrompt(target: string, text: string, source: string | null): string {
+    const sourceLang = P.langFor(source);
     return tokenizer!.apply_chat_template(
-      [{ role: 'user', content: expandByteFallback(safe) }],
+      [{ role: 'user', content: expandByteFallback(P.sanitize(text)) }],
       {
-        target_lang: P.langFor(target) ?? 'ko',
+        target_lang: P.langFor(target)!,
         add_generation_prompt: true,
         tokenize: false,
-        ...(context === null ? {} : { context })
+        ...(sourceLang ? { source_lang: sourceLang } : {})
       }
     );
   }
@@ -219,7 +218,6 @@ namespace AT.onnxhost {
   }
 
   async function ensureLoaded(modelId: string, maxTokens: number, target: string): Promise<number> {
-    lastMaxTokens = maxTokens;
     requireTarget(target);
     const version = lifecycle;
     while (loading || unloading) {
@@ -277,6 +275,17 @@ namespace AT.onnxhost {
         setTokenizer(opened.tokenizer);
         pipe = opened.pipe;
       }
+      const [config, generation] = await Promise.all([
+        AT.pipelinehost.modelJson('config.json'), AT.pipelinehost.modelJson('generation_config.json')
+      ]);
+      requireLifecycle(version);
+      modelContextTokens = Number(config?.max_position_embeddings);
+      if (!Number.isSafeInteger(modelContextTokens) || modelContextTokens < 2) {
+        fail('model-load-failed', 'The model does not declare a valid context token limit.');
+      }
+      const eos = generation?.eos_token_id ?? config?.eos_token_id ?? tokenizer?.eos_token_id;
+      eosTokens = (Array.isArray(eos) ? eos : [eos]).map(Number).filter(id => Number.isSafeInteger(id) && id >= 0);
+      if (!eosTokens.length) fail('model-load-failed', 'The model does not declare an end token.');
       loadedId = modelId;
       loadedBytes = Number(record.size) || 0;
       generations = 0;
@@ -329,17 +338,11 @@ namespace AT.onnxhost {
     if (!pipe || !tokenizer) return;
     const session = pipe;
     const version = lifecycle;
-    const lang = P.langFor(target) ?? 'ko';
-    const build = (text: string): string =>
-      tokenizer!.apply_chat_template(
-        [{ role: 'user', content: expandByteFallback(P.sanitize(text)) }],
-        { target_lang: lang, add_generation_prompt: true, tokenize: false }
-      );
     const sample =
       'The meeting was moved to Monday because the vendor could not finish the integration tests on time.';
-    await session(build('Good morning.'), { max_new_tokens: 4, do_sample: false });
+    await session(renderPrompt(target, 'Good morning.', 'en'), { max_new_tokens: 4, do_sample: false, add_special_tokens: false });
     requireLifecycle(version);
-    await session(build(sample), { max_new_tokens: 4, do_sample: false });
+    await session(renderPrompt(target, sample, 'en'), { max_new_tokens: 4, do_sample: false, add_special_tokens: false });
     requireLifecycle(version);
     inlineWarmed = true;
   }
@@ -420,10 +423,12 @@ namespace AT.onnxhost {
     inFlight: number;
     backend?: 'kernels' | 'runtime';
     rows: number;
+    contextTokens?: number;
   };
 
+  type Generated = { tokens: number[]; finishReason: 'eos' | 'length' };
   type EngineJob = {
-    resolve: (tokens: number[]) => void;
+    resolve: (result: Generated) => void;
     reject: (error: Error) => void;
     timer: ReturnType<typeof setTimeout>;
     slot: EngineSlot;
@@ -465,7 +470,7 @@ namespace AT.onnxhost {
     return String((error as { code?: unknown })?.code ?? '');
   }
 
-  function settle(id: number, what: { tokens?: number[]; error?: string; failure?: Error }): void {
+  function settle(id: number, what: { tokens?: number[]; finishReason?: 'eos' | 'length'; error?: string; failure?: Error }): void {
     const job = pending.get(id);
     if (!job) return;
     pending.delete(id);
@@ -473,7 +478,7 @@ namespace AT.onnxhost {
     job.signal?.removeEventListener('abort', job.abort);
     release(job.slot);
     if (what.failure) { job.reject(what.failure); return; }
-    if (what.error === undefined && what.tokens) job.resolve(what.tokens);
+    if (what.error === undefined && what.tokens && what.finishReason) job.resolve({ tokens: what.tokens, finishReason: what.finishReason });
     else {
       const error = new Error(what.error || 'the decode engine failed') as Error & { code: string };
       error.code = 'worker-generate';
@@ -487,6 +492,7 @@ namespace AT.onnxhost {
         slot.ready = true;
         slot.backend = message.backend ?? 'runtime';
         slot.rows = typeof message.rows === 'number' && message.rows >= 1 ? Math.min(8, Math.round(message.rows)) : 1;
+        slot.contextTokens = message.contextTokens;
         if (liveEngines()[0] === slot) {
           state.backend = slot.backend;
           state.rows = slot.rows;
@@ -522,7 +528,7 @@ namespace AT.onnxhost {
         if (stats.decodeMs > 0) state.decodeTokPerSec = (stats.decodeTokens / stats.decodeMs) * 1000;
         publish();
       }
-      settle(message.id, { tokens: message.tokens });
+      settle(message.id, { tokens: message.tokens, finishReason: message.finishReason });
     } else settle(message.id, { error: message.error });
   }
 
@@ -647,33 +653,34 @@ namespace AT.onnxhost {
     const inputIds = promptIds(prompt);
     const slot = acquire();
     const id = (jobId += 1);
-    const tokens = await new Promise<number[]>((resolve, reject) => {
-      const drop = (failure: Error): void => {
-        if (!pending.has(id)) return;
-        settle(id, { failure });
-        // DROP removes only this row; it never tears down a shared model.
-        try { slot.worker.postMessage({ type: L.WORKER_MESSAGE.DROP, id } satisfies AT.local.WorkerDrop); }
-        catch { /* A closed worker has already stopped its rows. */ }
-      };
-      const abort = (): void => drop(L.cancelled());
-      const timer = setTimeout(() => drop(engineTimeout('the decode engine did not answer')),
-        L.GENERATION_TIMEOUT_MS + L.WORKER_REPLY_GRACE_MS);
-      pending.set(id, { resolve, reject, timer, slot, onProgress, progressTokens: 0, signal, abort });
-      signal?.addEventListener('abort', abort, { once: true });
-      if (signal?.aborted) { abort(); return; }
-      try {
-        slot.worker.postMessage({
-          type: L.WORKER_MESSAGE.GENERATE,
-          id,
-          inputIds,
-          maxNewTokens,
-          ...(onProgress ? { stream: true } : {})
-        } satisfies AT.local.WorkerGenerate);
-      } catch (error) { settle(id, { failure: engineFailure(String(error)) }); }
-    });
+    const { promise, resolve, reject } = Promise.withResolvers<Generated>();
+    const drop = (failure: Error): void => {
+      if (!pending.has(id)) return;
+      settle(id, { failure });
+      // DROP removes only this row; it never tears down a shared model.
+      try { slot.worker.postMessage({ type: L.WORKER_MESSAGE.DROP, id } satisfies AT.local.WorkerDrop); }
+      catch { /* A closed worker has already stopped its rows. */ }
+    };
+    const abort = (): void => drop(L.cancelled());
+    const timer = setTimeout(() => drop(engineTimeout('the decode engine did not answer')),
+      L.GENERATION_TIMEOUT_MS + L.WORKER_REPLY_GRACE_MS);
+    pending.set(id, { resolve, reject, timer, slot, onProgress, progressTokens: 0, signal, abort });
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    else try {
+      slot.worker.postMessage({
+        type: L.WORKER_MESSAGE.GENERATE,
+        id,
+        inputIds,
+        maxNewTokens,
+        ...(onProgress ? { stream: true } : {})
+      } satisfies AT.local.WorkerGenerate);
+    } catch (error) { settle(id, { failure: engineFailure(String(error)) }); }
+    const result = await promise;
     L.throwIfAborted(signal);
-    // Worker replies contain only new token IDs, never the PFML prompt.
-    return tokenizer.decode(tokens, { skip_special_tokens: true });
+    // Only EOS proves completeness; clean-looking truncation is still invalid.
+    if (result.finishReason !== 'eos') fail('invalid-output', 'The translation reached its output token limit before an end token.');
+    return tokenizer.decode(result.tokens, { skip_special_tokens: true });
   }
 
   /** The engine first. An engine that is gone finishes this request on the
@@ -722,7 +729,7 @@ namespace AT.onnxhost {
       let sent = '';
       let lastSent = -Infinity;
       let flush: (() => void) | undefined;
-      let streamer: { end: () => void } | undefined;
+      let textStreamer: { put: (tokens: (number | bigint)[][]) => void; end: () => void } | undefined;
       if (onProgress) {
         const tf = seams.runtime?.() ?? (globalThis as Record<string, unknown>).AT_TRANSFORMERS as AT.pipelinehost.TfModule | undefined;
         if (tf?.TextStreamer) {
@@ -734,7 +741,7 @@ namespace AT.onnxhost {
           };
           // Transformers.js emits decoded chunks, not cumulative strings.
           // skip_prompt prevents the tokenizer's PFML header reaching previews.
-          streamer = new tf.TextStreamer(tokenizer!, {
+          textStreamer = new tf.TextStreamer(tokenizer!, {
             skip_prompt: true,
             skip_special_tokens: true,
             callback_function: (text: string) => {
@@ -745,17 +752,31 @@ namespace AT.onnxhost {
           });
         }
       }
+      let promptPending = true;
+      let lastToken: number | undefined;
+      const streamer = {
+        put(tokens: (number | bigint)[][]): void {
+          if (promptPending) promptPending = false;
+          else for (const token of tokens[0] ?? []) lastToken = Number(token);
+          textStreamer?.put(tokens);
+        },
+        end(): void { textStreamer?.end(); }
+      };
       const timer = setTimeout(() => controller.abort(), L.GENERATION_TIMEOUT_MS);
       inlineInFlight += 1;
       try {
         const out = await session(prompt, {
           max_new_tokens: maxNewTokens,
           do_sample: false,
+          add_special_tokens: false,
           abort_signal: controller.signal,
-          ...(streamer ? { streamer } : {})
+          streamer
         });
         L.throwIfAborted(signal);
         requireLifecycle(version);
+        if (lastToken === undefined || !eosTokens.includes(lastToken)) {
+          fail('invalid-output', 'The translation ended without an end token.');
+        }
         flush?.();
         return answerOf(out?.[0]?.generated_text, prompt);
       } finally {
@@ -774,8 +795,7 @@ namespace AT.onnxhost {
     return await L.withSignal(run, signal);
   }
 
-  /** One generation, on a worker or in this document, with protocol validation
-   * before script checks or numbered-batch retries can hide invalid output. */
+  /** One generation with identical structural safety for previews and final text. */
   async function generate(prompt: string, maxNewTokens: number, source: string, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<string> {
     L.throwIfAborted(signal);
     if (!loadedId || !tokenizer) fail('not-loaded', 'no model is loaded');
@@ -800,7 +820,7 @@ namespace AT.onnxhost {
       touchIdleTimer();
       const answer = generated.trim();
       const issue = AT.outputIssue(source, answer);
-      if (issue) fail('invalid-output', 'Invalid translation output: ' + issue);
+      if (issue || L.isRunaway(answer, source)) fail('invalid-output', 'Invalid translation output: ' + (issue ?? 'repetition or runaway output'));
       return answer;
     } catch (error: unknown) {
       L.throwIfAborted(signal);
@@ -828,129 +848,65 @@ namespace AT.onnxhost {
     fail('invalid-output', 'The generated response did not contain the complete decoded prompt.');
   }
 
-  const SELF_SUFFICIENT_CHARS = 40;
-
-  function usable(answer: string, text: string, target: string): boolean {
-    if (!answer || L.isRunaway(answer, text)) return false;
-    const lang = P.langFor(target);
-    return lang === null || P.checkScript(answer, lang);
+  function contextLimit(maxTokens: number): number {
+    return Math.min(L.clampTokens(maxTokens), modelContextTokens,
+      ...liveEngines().map(slot => slot.contextTokens ?? 0));
   }
 
-  async function translateOne(target: string, text: string, hint: string | null, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<string> {
-    L.throwIfAborted(signal);
-    const plain = renderPrompt(target, text, null);
-    const framed = hint === null ? plain : renderPrompt(target, text, hint);
-    const leadIsPlain = hint === null || text.length >= SELF_SUFFICIENT_CHARS;
-    const lead = leadIsPlain ? plain : framed;
-    const cap = L.answerTokens(text, lastMaxTokens, lead);
-    const backend = liveEngines()[0] ?? 'inline';
-    const answer = await generate(lead, cap, text, onProgress, signal);
-    L.throwIfAborted(signal);
-    if (usable(answer, text, target)) return answer;
-    onProgress?.('');
-    const follow = leadIsPlain ? framed : plain;
-    const followCap = L.answerTokens(text, lastMaxTokens, follow);
-    // Greedy generation with identical input, budget and resident backend
-    // cannot repair a script/runaway failure. Different context still retries.
-    if (follow === lead && followCap === cap && backend === (liveEngines()[0] ?? 'inline')) return '';
-    const retry = await generate(follow, followCap, text, onProgress, signal);
-    L.throwIfAborted(signal);
-    if (usable(retry, text, target)) return retry;
-    onProgress?.('');
-    return '';
+  function generationPlan(target: string, text: string, source: string | null, maxTokens: number) {
+    const prompt = renderPrompt(target, text, source);
+    const inputTokens = promptIds(prompt).length;
+    const outputTokens = L.answerTokens(tokenCount(text));
+    return { prompt, outputTokens, totalTokens: inputTokens + outputTokens, limit: contextLimit(maxTokens) };
   }
 
-  async function translateChunk(target: string, texts: string[], hint: string | null, onProgress?: AT.TranslationProgress, signal?: AbortSignal): Promise<string[]> {
+  async function translateOne(target: string, text: string, source: string | null, maxTokens: number, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<string> {
     L.throwIfAborted(signal);
-    if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', hint, onProgress ? (text) => onProgress(0, text) : undefined, signal)];
+    const plan = generationPlan(target, text, source, maxTokens);
+    if (plan.totalTokens > plan.limit) fail('context-overflow', 'The source and output reserve exceed the model context; plan source fragments first.');
+    return await generate(plan.prompt, plan.outputTokens, text, onProgress, signal);
+  }
+
+  async function translateChunk(target: string, texts: string[], source: string | null, maxTokens: number, onProgress?: AT.TranslationProgress, signal?: AbortSignal): Promise<string[]> {
+    L.throwIfAborted(signal);
+    if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', source, maxTokens, onProgress ? (text) => onProgress(0, text) : undefined, signal)];
     // WebGPU rows share weights while keeping each source's prompt, output
     // budget and identity independent. Refill only the advertised row count;
     // the worker owns global admission across concurrent application requests.
     const width = Math.min(texts.length,
       Math.max(1, ...liveEngines().filter((slot) => slot.backend === 'kernels').map((slot) => slot.rows)));
-    if (width > 1) {
-      const controller = new AbortController();
-      const abort = (): void => controller.abort();
-      signal?.addEventListener('abort', abort, { once: true });
-      if (signal?.aborted) abort();
-      const out = new Array<string>(texts.length);
-      let next = 0;
-      const consume = async (): Promise<void> => {
-        for (;;) {
-          L.throwIfAborted(controller.signal);
-          const index = next++;
-          if (index >= texts.length) return;
-          out[index] = await translateOne(target, texts[index]!, hint,
-            onProgress ? (text) => onProgress(index, text) : undefined, controller.signal);
-        }
-      };
-      const running = Array.from({ length: width }, consume);
-      try {
-        await Promise.all(running);
-        return out;
-      } catch (error: unknown) {
-        // A failed batch must not leave sibling rows consuming GPU time or
-        // delivering previews after the caller has rejected the operation.
-        controller.abort();
-        await Promise.allSettled(running);
-        throw error;
-      } finally {
-        signal?.removeEventListener('abort', abort);
+    const controller = new AbortController();
+    const abort = (): void => controller.abort();
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+    const out = new Array<string>(texts.length);
+    let next = 0;
+    const consume = async (): Promise<void> => {
+      for (;;) {
+        L.throwIfAborted(controller.signal);
+        const index = next++;
+        if (index >= texts.length) return;
+        out[index] = await translateOne(target, texts[index]!, source, maxTokens,
+          onProgress ? (text) => onProgress(index, text) : undefined, controller.signal);
       }
+    };
+    const running = Array.from({ length: width }, consume);
+    try {
+      await Promise.all(running);
+      return out;
+    } catch (error: unknown) {
+      // Failed batches must not leave sibling rows generating or publishing.
+      controller.abort();
+      await Promise.allSettled(running);
+      throw error;
+    } finally {
+      signal?.removeEventListener('abort', abort);
     }
-    // Serial runtime fallback retains numbered packing; it cannot share
-    // independent decode rows like the native WebGPU engine.
-    const batch = texts.map((text, index) => `${index + 1}. ${P.sanitize(text).replace(/\s+/g, ' ').trim()}`).join('\n');
-    const prompt = renderPrompt(target, batch, hint);
-    const cap = L.answerTokens(texts, lastMaxTokens, prompt);
-    // A confirmed numbered marker identifies the current segment. Buffer a
-    // trailing partial marker so its digits never appear in the previous text.
-    const shown = onProgress ? new Map<number, string>() : null;
-    const progress = onProgress ? (raw: string): void => {
-      const reset = (): void => {
-        for (const index of shown!.keys()) onProgress(index, '');
-        shown!.clear();
-      };
-      if (!raw) { reset(); return; }
-      const markers = [...raw.matchAll(/^[ \t]*(\d{1,3})[ \t]*[:.)][ \t]+/gm)];
-      if (!markers.length || raw.slice(0, markers[0]!.index).trim() ||
-          markers.some((marker, index) => Number(marker[1]) !== index + 1 || index >= texts.length)) {
-        reset();
-        return;
-      }
-      for (let index = 0; index < markers.length; index += 1) {
-        const marker = markers[index]!;
-        const tail = raw.slice(marker.index + marker[0].length, markers[index + 1]?.index);
-        const text = (index + 1 === markers.length
-          ? tail.replace(/\n[ \t]*\d{0,3}[ \t]*[:.)]?[ \t]*$/u, '') : tail).trim();
-        if (!text) continue;
-        if (!text || AT.outputIssue(texts[index]!, text, true) || L.isRunaway(text, texts[index]!)) {
-          reset();
-          return;
-        }
-        if (shown!.get(index) !== text) {
-          shown!.set(index, text);
-          onProgress(index, text);
-        }
-      }
-    } : undefined;
-    const reply = await generate(prompt, cap, batch, progress, signal);
-    L.throwIfAborted(signal);
-    const parsed = L.parseNumbered(reply, texts.length);
-    if (parsed) return parsed.map((answer) => answer.trim());
-    progress?.('');
-    AT.warn('on-device split mismatch, retrying per text', texts.length);
-    const out: string[] = [];
-    for (let index = 0; index < texts.length; index += 1) {
-      L.throwIfAborted(signal);
-      out.push(await translateOne(target, texts[index]!, hint, onProgress ? (text) => onProgress(index, text) : undefined, signal));
-    }
-    return out;
   }
 
   /** The tokens a prompt string costs in the model's own tokenizer. */
   function promptTokens(prompt: string): number {
-    if (!tokenizer) return L.estimateTokens(prompt);
+    if (!tokenizer) fail('not-loaded', 'The source tokenizer is unavailable.');
     const cached = countedTexts.get(prompt);
     if (cached !== undefined) return cached;
     return remember(countedTexts, prompt, tokenizer(prompt, { add_special_tokens: false }).input_ids.data.length);
@@ -960,14 +916,12 @@ namespace AT.onnxhost {
    *  exactly as `renderPrompt` writes it, and counted without specials so the
    *  number is the text's own cost rather than the template's. */
   function tokenCount(text: string): number {
-    if (!tokenizer) return L.estimateTokens(text);
     return promptTokens(expandByteFallback(P.sanitize(text)));
   }
 
-  type CountRequest = { modelId?: unknown; maxTokens?: unknown; texts?: unknown; target?: unknown; sourceChunkTokens?: unknown };
+  type CountRequest = { modelId?: unknown; maxTokens?: unknown; texts?: unknown; target?: unknown; source?: unknown };
 
-  /** Per-text costs and the empty instruction's own cost, so `engines` can pack
-   *  a batch against the model's real tokenizer instead of an estimate. */
+  /** Exact costs and sentence-first plans, including prompt and output reserve. */
   async function countNow(request: CountRequest, signal?: AbortSignal): Promise<AT.local.TokenCounts> {
     L.throwIfAborted(signal);
     const modelId = typeof request.modelId === 'string' ? request.modelId : '';
@@ -975,34 +929,27 @@ namespace AT.onnxhost {
     const inputs = Array.isArray(request.texts)
       ? request.texts.filter((text): text is string => typeof text === 'string')
       : [];
-    // Legacy callers retain their count limit; fragment plans may not silently
-    // drop source strings beyond it.
-    const texts = request.sourceChunkTokens === undefined ? inputs.slice(0, 200) : inputs;
-    const askedTarget = typeof request.target === 'string' ? request.target : '';
-    const target = P.langFor(askedTarget) !== null ? askedTarget : 'ko';
-    const version = await ensureLoaded(modelId, Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS, target);
+    const texts = inputs;
+    const target = typeof request.target === 'string' ? request.target : '';
+    requireTarget(target);
+    const source = typeof request.source === 'string' ? request.source : null;
+    const maxTokens = Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS;
+    const version = await ensureLoaded(modelId, maxTokens, target);
     L.throwIfAborted(signal);
-    // The chat template refuses empty content, so the instruction's own cost is
-    // read from a one-character text with that character's count removed.
-    const MARKER = 'x';
-    const overhead = Math.max(0, promptTokens(renderPrompt(target, MARKER, null)) - promptTokens(MARKER));
-    const result: AT.local.TokenCounts = { counts: texts.map((text) => tokenCount(text)), overhead };
-    if (request.sourceChunkTokens !== undefined) {
-      const budget = Number(request.sourceChunkTokens);
-      if (!Number.isSafeInteger(budget) || budget < 1) fail('context-overflow', 'Source chunk tokens must be a positive integer.');
-      result.sourceChunks = [];
-      for (const text of texts) {
-        result.sourceChunks.push(await L.sourceChunks(text, budget, (fragment) => {
-          // Planning yields to cancellation; an unload must never turn its
-          // remaining measurements into the estimate tokenCount can fall back to.
-          requireLifecycle(version);
-          if (!tokenizer) fail('model-load-failed', 'The source tokenizer is unavailable.');
-          return tokenCount(fragment);
-        }, signal));
-      }
+    const limit = contextLimit(maxTokens);
+    const result: AT.local.TokenCounts = { counts: [], sourceChunks: [] };
+    for (const text of texts) {
       L.throwIfAborted(signal);
       requireLifecycle(version);
+      result.counts.push(tokenCount(text));
+      result.sourceChunks.push(await L.sourceChunks(text, limit, fragment => {
+        requireLifecycle(version);
+        L.throwIfAborted(signal);
+        return generationPlan(target, fragment, source, maxTokens).totalTokens;
+      }, signal));
     }
+    L.throwIfAborted(signal);
+    requireLifecycle(version);
     return result;
   }
 
@@ -1013,7 +960,7 @@ namespace AT.onnxhost {
       : [];
     const askedTarget = typeof request.target === 'string' ? request.target : '';
     const maxTokens = Number(request.maxTokens) || L.DEFAULT_MAX_TOKENS;
-    const hint = typeof request.context === 'string' ? request.context.slice(0, 200) : null;
+    const source = typeof request.source === 'string' ? request.source : null;
     if (texts.length === 0) return { translations: [] };
     if (P.langFor(askedTarget) === null) {
       fail('no-target', `no model translates into ${askedTarget || 'that language'}`);
@@ -1024,11 +971,10 @@ namespace AT.onnxhost {
     publish();
     let version = lifecycle;
     try {
-      lastMaxTokens = maxTokens;
       version = await ensureLoaded(modelId, maxTokens, askedTarget);
       L.throwIfAborted(signal);
       requireLifecycle(version);
-      const translations = await translateChunk(askedTarget, texts, hint, onProgress, signal);
+      const translations = await translateChunk(askedTarget, texts, source, maxTokens, onProgress, signal);
       L.throwIfAborted(signal);
       requireLifecycle(version);
       state.state = 'ready';

@@ -124,37 +124,68 @@ test('splitWhitespace keeps the layout apart from the content', () => {
 
 // --- run merging -----------------------------------------------------------
 
-test('a sentence split by inline elements is translated as one sentence', async () => {
+test('maxTexts one still translates a full inline sentence without alignment markers', async () => {
   const strong = el('strong', {}, [t('5 items')]);
   const paragraph = el('p', {}, [t('Total '), strong, t(' left')]);
-  // The existing numbered engine contract preserves each segment identity.
-  const labels: Record<string, string> = { Total: '합계', '5 items': '5개 항목', left: '남음' };
-  const { calls, translator, body } = harness(el('div', {}, [paragraph]), (texts) =>
-    texts.map((value) => labels[value]!)
-  );
-
+  const originals = textNodes(paragraph).map((node) => node.nodeValue);
+  const { calls, translator, body } = harness(el('div', {}, [paragraph]),
+    (texts) => texts.map((text) => text === 'Total 5 items left' ? '총 5개 항목이 남았습니다' : ''),
+    { workLimit: () => ({ maxChars: 0, maxTexts: 1 }) });
   const result = await translator.translateRoot(body);
-
-  assert.equal(calls.length, 1, 'one batch');
-  assert.deepEqual(calls[0], ['Total', '5 items', 'left'], 'the indexed batch carries verifiable boundaries without a wasted marker attempt');
-  assert.deepEqual(
-    textNodes(paragraph).map((node) => node.nodeValue),
-    ['합계 ', '5개 항목', ' 남음'],
-    'each node keeps its own element, and words stay whole'
-  );
-  assert.equal(textContent(paragraph), '합계 5개 항목 남음');
-  assert.equal(result.runs, 1, 'the run counts as merged');
+  assert.deepEqual(calls, [['Total 5 items left']]);
+  assert.equal(textContent(paragraph), '총 5개 항목이 남았습니다');
+  assert.equal(textContent(strong), '', 'do not guess translated emphasis offsets');
+  assert.equal(result.runs, 1);
   assert.equal(translator.stats().translated, 3);
+  assert.equal(paragraph.childNodes[1], strong);
+  assert.equal((await translator.translateNodes(textNodes(paragraph))).requested, 0);
+  translator.restore();
+  assert.deepEqual(textNodes(paragraph).map((node) => node.nodeValue), originals);
 });
 
-test('an indexed inline batch preserves each element without a preliminary generation', async () => {
-  const paragraph = el('p', {}, [t('left side '), el('em', {}, [t('middle')]), t(' right side')]);
-  const dictionary: Record<string, string> = { 'left side': '왼쪽', middle: '가운데', 'right side': '오른쪽' };
-  const { translator, body, calls } = harness(el('div', {}, [paragraph]), (texts) => texts.map((value) => dictionary[value] ?? '짧은 답'));
+test('a leading emphasized fragment cannot style the entire translated paragraph', async () => {
+  const emphasized = t('Important');
+  const ordinary = t(': read this whole sentence.');
+  const paragraph = el('p', {}, [el('em', {}, [emphasized]), ordinary]);
+  const { translator, body, calls } = harness(el('div', {}, [paragraph]), () => ['중요: 이 문장 전체를 읽으세요.']);
   await translator.translateRoot(body);
-  assert.equal(calls.length, 1, 'aligned fragments share one request and no speculative marker generation');
-  assert.deepEqual(textNodes(paragraph).map((node) => node.nodeValue), ['왼쪽 ', '가운데', ' 오른쪽']);
-  assert.equal(textContent(paragraph), '왼쪽 가운데 오른쪽');
+  assert.deepEqual(calls, [['Important: read this whole sentence.']]);
+  assert.equal(emphasized.nodeValue, '');
+  assert.equal(ordinary.nodeValue, '중요: 이 문장 전체를 읽으세요.');
+  translator.restore();
+  assert.equal(emphasized.nodeValue, 'Important');
+  assert.equal(ordinary.nodeValue, ': read this whole sentence.');
+});
+
+test('ruby sends the base sentence once without pronunciations and restores every Text', async () => {
+  const paragraph = el('p', {}, [
+    el('ruby', {}, [t('年'), el('rp', {}, [t('（')]), el('rt', {}, [t('ねん')]), el('rp', {}, [t('）')])]),
+    t('金を受け取ります。')
+  ]);
+  const nodes = textNodes(paragraph), sources = nodes.map((node) => node.nodeValue);
+  const { translator, calls } = harness(el('body', {}, [paragraph]), () => ['연금을 받습니다.'],
+    { workLimit: () => ({ maxChars: 0, maxTexts: 1 }) });
+  await translator.translateRoot();
+  assert.deepEqual(calls, [['年金を受け取ります。']]);
+  assert.equal(textContent(paragraph), '연금을 받습니다.');
+  assert.ok(nodes.every((node) => translator.has(node)));
+  translator.restore();
+  assert.deepEqual(nodes.map((node) => node.nodeValue), sources);
+  assert.deepEqual(textNodes(paragraph), nodes);
+});
+
+test('one-character labels and ruby pronunciation never dispatch or fail alone', async () => {
+  const single = t('年'), annotation = t('ねん');
+  const { translator, calls } = harness(el('body', {}, [
+    el('p', {}, [single]), el('rt', {}, [annotation])
+  ]), (texts) => texts);
+  const result = await translator.translateNodes([single, annotation]);
+  assert.deepEqual(calls, []);
+  assert.equal(result.failed, 0);
+  assert.equal(result.error, null);
+  assert.deepEqual(result.pending, []);
+  assert.equal(single.nodeValue, '年');
+  assert.equal(annotation.nodeValue, 'ねん');
 });
 
 test('a block element or a line break ends a run', async () => {
@@ -331,19 +362,20 @@ test('a short paragraph is never split, and scripts without spaces stay tight', 
   );
 });
 
-test('a pass that only ever got the source back is a failure, and writes nothing', async () => {
-  // Measured in a real browser: with the target language equal to the page's,
-  // every answer was an echo and the tab reported `translated` with 0 nodes
-  // changed — the page sat in English with no error anywhere to read.
-  const paragraph = el('p', {}, [t('Batteries keep the grid stable')]);
-  const { translator, body } = harness(el('div', {}, [paragraph]), (texts) => texts);
-
-  await assert.rejects(() => translator.translateRoot(body), /answered with the page's own text/);
-  assert.equal(translator.stats().translated, 0, 'an echo is not a translation');
-  assert.equal(textContent(paragraph), 'Batteries keep the grid stable');
+test('provider-approved unchanged names settle without failing or re-requesting the page', async () => {
+  const paragraph = el('p', {}, [t('QuQu')]);
+  const { translator, body, calls } = harness(el('div', {}, [paragraph]), (texts) => texts);
+  const result = await translator.translateRoot(body);
+  assert.equal(result.failed, 0);
+  assert.equal(result.error, null);
+  assert.equal(translator.has(paragraph.childNodes[0]), true);
+  await translator.translateRoot(body);
+  assert.deepEqual(calls, [['QuQu']]);
+  translator.restore();
+  assert.equal(textContent(paragraph), 'QuQu');
 });
 
-test('a pass with one echo and one real answer still succeeds', async () => {
+test('unchanged provider-approved text cannot poison a page containing translated prose', async () => {
   const first = el('p', {}, [t('Batteries keep the grid stable')]);
   const second = el('p', {}, [t('Wind turbines produce more power in winter')]);
   const { translator, body } = harness(el('div', {}, [first, second]), (texts) =>
@@ -352,7 +384,7 @@ test('a pass with one echo and one real answer still succeeds', async () => {
 
   await translator.translateRoot(body);
 
-  assert.equal(translator.stats().translated, 1, 'the echo is not counted and does not fail the pass');
+  assert.equal(translator.stats().translated, 2, 'both provider-approved answers settle');
   assert.equal(textContent(second), '풍력 터빈은 겨울에 더 많은 전력을 생산합니다.');
 });
 
@@ -609,7 +641,7 @@ test('oversized inline runs remain aligned semantic units', async () => {
   const paragraph = el('p', {}, [t(first), el('strong', {}, [t(second)])]);
   const { translator, calls } = harness(el('body', {}, [paragraph]), upcase, { sentences: sentenceOptions });
   await translator.translateRoot();
-  assert.deepEqual(calls, [[first.trim(), second.trim()]]);
+  assert.deepEqual(calls, [[(first + second).trim()]]);
   assert.equal(textContent(paragraph), (first + second).toUpperCase());
   assert.equal(translator.stats().runs, 1);
 });
@@ -678,34 +710,27 @@ function clipping(node: StubText, visible: number) {
   return { expand: () => { count = Number.MAX_SAFE_INTEGER; } };
 }
 
-test('clipped text returns after its visible prefix and resumes exact source offsets', async () => {
-  const source = '  First sentence.\n\nSecond sentence.  Third sentence.\t';
+test('clipped titles send full meaning rather than a visible Japanese prefix', async () => {
+  const source = '  3Dモデルの新しい衣装です。\t';
   const node = t(source);
   const body = el('body', {}, [el('p', {}, [node])]);
-  const { translator, calls } = harness(body, upcase, { sentences: sentenceOptions });
-  const geometry = clipping(node, source.indexOf('\n'));
-  const first = await translator.translateRoot();
-  assert.deepEqual(calls, [['First sentence.']]);
-  assert.equal(node.nodeValue, '  FIRST SENTENCE.\n\nSecond sentence.  Third sentence.\t');
-  assert.deepEqual(first.pending, [node]);
-  assert.equal(translator.deferred(node), true);
-  assert.equal(translator.has(node), false);
-  assert.equal(body.childNodes[0]!.childNodes![0], node);
-  const second = await translator.translateNodes(first.pending);
-  assert.equal(calls.flat().filter((part) => part === 'First sentence.').length, 1);
-  assert.ok(second.pending.includes(node));
-  geometry.expand();
+  const { translator, calls } = harness(body, () => ['3D 모델의 새 의상입니다.']);
+  const geometry = clipping(node, 5);
+  const result = await translator.translateRoot();
+  assert.deepEqual(calls, [[source.trim()]]);
+  assert.equal(node.nodeValue, '  3D 모델의 새 의상입니다.\t');
+  assert.deepEqual(result.pending, []);
   assert.equal(translator.deferred(node), false);
-  for (let remaining = second.pending, count = 0; remaining.length && count < 10; count++) {
-    remaining = (await translator.translateNodes(remaining)).pending;
-  }
-  assert.equal(node.nodeValue, source.toUpperCase());
   assert.equal(translator.has(node), true);
+  geometry.expand();
+  await translator.translateRoot();
+  assert.equal(calls.length, 1, 'expansion reveals the completed translation');
   translator.restore();
   assert.equal(node.nodeValue, source);
+  assert.equal(body.childNodes[0]!.childNodes![0], node);
 });
 
-test('a clipped prefix restores safely and page edits discard its continuation', async () => {
+test('a clipped full-source translation restores safely and respects page edits', async () => {
   const source = 'First sentence. Second sentence. Third sentence.';
   const node = t(source);
   const { translator, calls } = harness(el('body', {}, [el('p', {}, [node])]), upcase);
@@ -848,7 +873,7 @@ test('failed suffixes are not pending work and direct calls skip completed sourc
   assert.equal(calls.length, before);
 });
 
-test('skipped clipped prefixes advance without being marked translated or presented', async () => {
+test('clipping never hides foreign sentences behind an already-target prefix', async () => {
   const source = '이미 한국어입니다.\nEnglish comment follows. Last English sentence.';
   const node = t(source);
   const events: string[] = [];
@@ -862,12 +887,12 @@ test('skipped clipped prefixes advance without being marked translated or presen
   });
   const geometry = clipping(node, source.indexOf('\n'));
   const first = await translator.translateRoot();
-  assert.deepEqual(calls, []);
-  assert.deepEqual(events, []);
-  assert.equal(first.translated, 0);
+  assert.deepEqual(calls.flat(), ['English comment follows.', 'Last English sentence.']);
+  assert.equal(events[0], 'begin');
+  assert.equal(first.translated, 1);
   assert.equal(first.failed, 0);
-  assert.deepEqual(first.pending, [node]);
-  assert.equal(translator.holds(node), false);
+  assert.deepEqual(first.pending, []);
+  assert.equal(translator.has(node), true);
   geometry.expand();
   await translator.translateNodes(first.pending);
   assert.deepEqual(calls.flat(), ['English comment follows.', 'Last English sentence.']);
@@ -1198,8 +1223,8 @@ test('streaming estimates token-weighted monotonic grapheme boundaries without c
 
 test('generic eligibility preserves numeric identifiers and author metadata but translates short prose', async () => {
   const skipped = ['123,456.78%', '→ ★ + 12', 'https://example.org/a', 'a.reader@example.org',
-    '@reader.name', '550e8400-e29b-41d4-a716-446655440000', '0xdeadbeef', 'ABC-12345', 'user_identifier'];
-  const prose = ['Go', 'I', 'Thank You', 'The Sun Also Rises', '5 items', 'See @reader today'];
+    '@reader.name', '550e8400-e29b-41d4-a716-446655440000', '0xdeadbeef', 'ABC-12345', 'user_identifier', 'I'];
+  const prose = ['Go', 'Thank You', 'The Sun Also Rises', '5 items', 'See @reader today'];
   const author = t('Alice Reader');
   const nodes = [...skipped, ...prose].map(t);
   const root = el('body', {}, [el('span', { classes: ['author-name'] }, [author]),

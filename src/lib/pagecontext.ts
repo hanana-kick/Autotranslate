@@ -8,13 +8,11 @@
 //            organisations, works, glossary terms) and a term list from `dl`,
 //            `dfn` and `abbr[title]`.
 //
-// `collect` reads the DOM (content script only), `analyze` is pure and decides
-// what the values mean, `hint` renders one bounded line for the local engine's
-// prompt. Nothing here touches the network and nothing leaves the browser on
-// the on-device path.
+// `collect` reads the DOM and `analyze` interprets page structure for scheduling
+// and diagnostics. Metadata is never synthesized into translation instructions.
 // Load after lib/constants.js.
 namespace AT.pagecontext {
-  /** What the page appears to be. Small on purpose: each kind changes wording. */
+  /** What the page's structure appears to be. */
   export type PageKind =
     | 'article'
     | 'news'
@@ -117,7 +115,6 @@ namespace AT.pagecontext {
   const MAX_NAV_LINKS = 40;
   const MAX_ENTITY = 80;
   const MAX_ENTITIES = 12;
-  const MAX_HINT_ENTITIES = 3;
   const MAX_TERM = 60;
   const MAX_DEFINITION = 160;
   const MAX_GLOSSARY = 12;
@@ -126,8 +123,6 @@ namespace AT.pagecontext {
   const MAX_JSON_LD_SCRIPTS = 8;
   const MAX_JSON_NODES = 400;
   const MAX_JSON_DEPTH = 6;
-  /** The prompt line has a budget of its own. */
-  const MAX_HINT = 240;
 
   /** Trims, collapses whitespace and caps; nothing untrusted survives longer. */
   function text(value: unknown, limit: number): string | null {
@@ -497,80 +492,6 @@ namespace AT.pagecontext {
     };
   }
 
-  /** "a, b and c" without a comma before a two-item list, and without doubling
-   *  the full stop of a name like "Wikimedia Foundation, Inc.". */
-  function joinNames(names: string[]): string {
-    const clean = names.map((name) => name.replace(/[.;:,]+$/, ''));
-    if (clean.length <= 1) return clean[0] ?? '';
-    return `${clean.slice(0, -1).join(', ')} and ${clean[clean.length - 1]}`;
-  }
-
-  /**
-   * One line of context for the model, or null when the page said nothing.
-   * Deliberately short: the prompt has a token budget and the text itself is
-   * the thing being translated. Glossary terms are not in the line — they are
-   * for consistency work, not for describing the page.
-   */
-  export function hint(context: PageContext | null | undefined): string | null {
-    if (!context || typeof context !== 'object') return null;
-    const site = context.site ? ` from ${context.site}` : '';
-    const section = context.section ? ` in the ${context.section} section` : '';
-    let base: string | null = null;
-    switch (context.kind) {
-      case 'news':
-        base = `This is a news article${section}${site}.`;
-        break;
-      case 'article':
-        base = `This is an article${site}.`;
-        break;
-      case 'blog':
-        base = `This is a blog post${site}.`;
-        break;
-      case 'docs':
-        base = 'This is technical documentation.';
-        break;
-      case 'product':
-        base = `This is a product page${site}.`;
-        break;
-      case 'recipe':
-        base = `This is a recipe${site}.`;
-        break;
-      case 'forum':
-        base = `This is a forum discussion${site}.`;
-        break;
-      case 'qa':
-        base = 'This is a question-and-answer page.';
-        break;
-      case 'video':
-        base = `This is the description of a video${site}.`;
-        break;
-      case 'social':
-        base = `This is a social profile${site}.`;
-        break;
-      case 'search':
-        base = 'This is a list of search results.';
-        break;
-      default:
-        // A host alone is not context: every page has one, and saying so would
-        // spend prompt tokens and a line of the tuned template on nothing.
-        base = null;
-    }
-
-    const named: string[] = [];
-    for (const entity of Array.isArray(context.entities) ? context.entities : []) {
-      const name = text(entity?.name, MAX_ENTITY);
-      if (name) named.push(name);
-      if (named.length >= MAX_HINT_ENTITIES) break;
-    }
-    const topic = named.length > 0 ? `${base ? 'It mentions' : 'This text is about'} ${joinNames(named)}.` : null;
-    const combined = [base, topic].filter((part): part is string => Boolean(part)).join(' ');
-    if (!combined) return null;
-    if (combined.length <= MAX_HINT) return combined;
-    // Cut on a word boundary rather than mid-name.
-    const cut = combined.slice(0, MAX_HINT);
-    const space = cut.lastIndexOf(' ');
-    return `${(space > MAX_HINT / 2 ? cut.slice(0, space) : cut).replace(/[,;:]$/, '')}.`;
-  }
 
   const KINDS: Record<string, PageKind | undefined> = {
     article: 'article',

@@ -21,8 +21,6 @@ namespace AT.local {
   export const MIN_MAX_TOKENS = 128;
   export const MAX_MAX_TOKENS = 8192;
   export const DEFAULT_MAX_TOKENS = 1024;
-  /** Each parallel translation consumes at most this many actual source tokens. */
-  export const SOURCE_CHUNK_TOKENS = 64;
   /** Never promise the model less than this for its answer. */
   export const MIN_OUTPUT_TOKENS = 64;
 
@@ -109,12 +107,10 @@ namespace AT.local {
     source?: unknown;
     target?: unknown;
     maxTokens?: unknown;
-    /** One line of page context, already rendered and bounded by the engine. */
-    context?: unknown;
   };
 
-  /** The answer at/local-count gives: per-text counts and the instruction. */
-  export type TokenCounts = { counts: number[]; overhead: number; sourceChunks?: string[][] };
+  /** Exact source costs and complete source coverage within the model budget. */
+  export type TokenCounts = { counts: number[]; sourceChunks: string[][] };
 
   /**
    * The messages the host and one decode worker exchange. A worker owns one
@@ -151,7 +147,7 @@ namespace AT.local {
   /** The host gave up on a request (its own deadline): stop spending steps. */
   export type WorkerDrop = { type: typeof WORKER_MESSAGE.DROP; id: number };
   export type WorkerReply =
-    | { type: typeof WORKER_MESSAGE.READY; ok: true; backend?: 'kernels' | 'runtime'; rows?: number }
+    | { type: typeof WORKER_MESSAGE.READY; ok: true; backend?: 'kernels' | 'runtime'; rows?: number; contextTokens: number }
     | { type: typeof WORKER_MESSAGE.READY; ok: false; error: string; code: string }
     /** Cumulative generated ids, never the prompt. */
     | { type: typeof WORKER_MESSAGE.PROGRESS; id: number; tokens: number[] }
@@ -160,6 +156,7 @@ namespace AT.local {
         id: number;
         ok: true;
         tokens: number[];
+        finishReason: 'eos' | 'length';
         /** Cumulative phase work in this worker, for tokens-per-second rates. */
         stats?: { prefillTokens: number; decodeTokens: number; prefillMs: number; decodeMs: number };
       }
@@ -171,7 +168,6 @@ namespace AT.local {
     translations?: string[];
     engine?: string;
     counts?: number[];
-    overhead?: number;
     sourceChunks?: string[][];
   };
 
@@ -369,169 +365,6 @@ namespace AT.local {
     return AT.plamo3.sanitize(text);
   }
 
-  /** Our code for the code PLaMo answers: its `target_lang` spells Chinese in
-   *  two ways (`zh-hans`, `zh-hant`) that no other code of ours collapses onto.
-   *  A code it was never released with is refused here rather than written into
-   *  the prompt, because its own `check_lang` only tests the *shape* of a
-   *  language tag - an invented code passes the template and answers in
-   *  whatever language the model then guessed. */
-  function plamo3LangFor(target: string): AT.plamo3.Plamo3Lang {
-    const lang = AT.plamo3.langFor(target);
-    if (lang === null) throw new TypeError(`plamo3: no prompt for "${String(target).slice(0, 20)}"`);
-    return lang;
-  }
-
-  /** One text. `hint` is one line of page context: it rides in the PFML3
-   *  prompt's own `context` element, which costs 4 tokens. */
-  export function buildEnginePrompt(target: string, text: string, hint?: string | null): string {
-    return AT.plamo3.buildPrompt(sanitizeText(text), {
-      target: plamo3LangFor(target),
-      context: hint ? sanitizeText(hint) : null
-    });
-  }
-
-  /**
-   * Several texts in one generation; the reply is parsed by `parseNumbered`.
-   *
-   * PLaMo's card has no batch shape, so the numbered list rides inside a single
-   * `input` element, off-spec. It answers it correctly and it is 3.5× cheaper
-   * per segment than one generation per text (a 33-segment chunk of a real page
-   * in 3.19 s natively against 20-odd single generations), which is the whole
-   * reason to batch. What it must not be given is an instruction about the
-   * numbering: asked with `Translate each numbered segment below into Japanese…`
-   * ahead of the list, it translated that sentence too and answered it as line
-   * 1 - 11 lines for 10 segments, 254 prompt tokens where the bare list costs
-   * 213 and answers 10 for 10. The numbers alone carry the format, because in
-   * this template the shape of the prompt is the instruction.
-   */
-  export function buildEngineBatch(target: string, texts: string[], hint?: string | null): string {
-    const first = texts[0] ?? '';
-    if (texts.length === 1) return buildEnginePrompt(target, first, hint);
-    const lines = texts.map((text, index) => `${index + 1}. ${sanitizeText(text).replace(/\s+/g, ' ').trim()}`);
-    return AT.plamo3.buildPrompt(lines.join('\n'), {
-      target: plamo3LangFor(target),
-      context: hint ? sanitizeText(hint) : null
-    });
-  }
-
-  // A reply line starts a new segment; everything until the next marker belongs
-  // to the previous one, so a translation may contain its own newlines.
-  const SEGMENT_START = /^[ \t]*(\d{1,3})[ \t]*[:.)][ \t]*/;
-
-  /**
-   * Recovers one translation per input text, or null when the reply cannot be
-   * trusted. Numbering first; when the model answers without it, a reply whose
-   * blank-line blocks or lines line up exactly with the segment count is
-   * accepted, because that is the same information in another shape.
-   */
-  export function parseNumbered(reply: string, count: number): string[] | null {
-    const numbered = parseByNumber(reply, count);
-    if (numbered) return numbered;
-    if (typeof reply !== 'string' || count < 2) return null;
-    // If the model tried to number and got it wrong, that is a failure, not an
-    // invitation to read the lines literally.
-    if (reply.split('\n').some((line) => SEGMENT_START.test(line))) return null;
-    const blocks = reply
-      .split(/\n\s*\n/)
-      .map((block) => block.trim())
-      .filter((block) => block.length > 0);
-    if (blocks.length === count) return dedupe(blocks);
-    const lines = reply.split('\n').map((line) => line.trim()).filter((line) => line.length > 0);
-    if (lines.length === count) return dedupe(lines);
-    return null;
-  }
-
-  /** Every part must carry text; an empty segment is a failed reply. */
-  function dedupe(parts: string[]): string[] | null {
-    return parts.every((part) => part.length > 0) ? parts : null;
-  }
-
-  function parseByNumber(reply: string, count: number): string[] | null {
-    if (typeof reply !== 'string' || reply.length === 0) return null;
-    const found: Record<string, string> = {};
-    let current: number | null = null;
-    let buffer: string[] = [];
-    for (const line of reply.split('\n')) {
-      const match = SEGMENT_START.exec(line);
-      if (match) {
-        if (current !== null) found[String(current)] = buffer.join('\n').trim();
-        current = Number(match[1]);
-        buffer = [line.slice(match[0].length)];
-      } else if (current !== null) {
-        buffer.push(line);
-      }
-    }
-    if (current !== null) found[String(current)] = buffer.join('\n').trim();
-    const out: string[] = [];
-    for (let index = 1; index <= count; index += 1) {
-      const value = found[String(index)];
-      if (typeof value !== 'string' || value.length === 0) return null;
-      out.push(value);
-    }
-    return out;
-  }
-
-  /** The cost of a string, in tokens, under the published priors. */
-  function rawTokens(text: string, priors: Priors): number {
-    if (typeof text !== 'string' || !text) return 0;
-    let latin = 0;
-    let cyrillic = 0;
-    let semitic = 0;
-    let thai = 0;
-    let hangul = 0;
-    let kana = 0;
-    let han = 0;
-    for (const character of text) {
-      const code = character.codePointAt(0) ?? 0;
-      if (
-        // Hangul, incl. the Jamo that spell the older forms.
-        (code >= 0x1100 && code <= 0x11ff) ||
-        (code >= 0xac00 && code <= 0xd7af)
-      ) {
-        hangul += 1;
-      } else if ((code >= 0x3040 && code <= 0x30ff) || (code >= 0x31f0 && code <= 0x31ff)) {
-        // Kana, incl. the Katakana extensions. Tested before the Han range
-        // because that range contains these blocks.
-        kana += 1;
-      } else if (
-        (code >= 0x2e80 && code <= 0x9fff) ||
-        (code >= 0xf900 && code <= 0xfaff) ||
-        (code >= 0x20000 && code <= 0x3ffff)
-      ) {
-        // Han, incl. extension A, the compatibility plane and the astral planes.
-        han += 1;
-      } else if ((code >= 0x0400 && code <= 0x04ff) || (code >= 0x0370 && code <= 0x03ff)) {
-        cyrillic += 1;
-      } else if ((code >= 0x0e00 && code <= 0x0eff) || (code >= 0x0d00 && code <= 0x0dff)) {
-        // Thai and Lao: measured 1.73 characters per token, well below Arabic.
-        thai += 1;
-      } else if (
-        (code >= 0x0590 && code <= 0x05ff) || // Hebrew
-        (code >= 0x0600 && code <= 0x06ff) || // Arabic
-        (code >= 0x0900 && code <= 0x0bff) // Devanagari … Gurmukhi
-      ) {
-        semitic += 1;
-      } else {
-        latin += 1;
-      }
-    }
-    return (
-      latin / priors.latin +
-      cyrillic / priors.cyrillic +
-      semitic / priors.semitic +
-      thai / priors.thai +
-      hangul / priors.hangul +
-      kana / priors.kana +
-      han / priors.han
-    );
-  }
-
-  /** Prompt plus expected reply, in tokens. Deliberately rough: it only picks
-   *  how many texts fit in one generation; the host's context window is the
-   *  bound that decides. */
-  export function estimateTokens(text: string): number {
-    return Math.ceil(rawTokens(text, PRIORS));
-  }
 
   /**
    * Plan raw-preserving source fragments using the loaded tokenizer's count,
@@ -608,37 +441,6 @@ namespace AT.local {
     return await split(source, 0);
   }
 
-  /** The prompt's own cost, counted with the same priors. */
-  function promptTokens(prompt: string): number {
-    return Math.ceil(rawTokens(prompt, PRIORS));
-  }
-
-  /**
-   * Groups texts so one generation stays inside the token budget. Each text
-   * pays for its own tokens and leaves room for an answer of the same length -
-   * a measured answer runs about its source's token count (1.0× over a
-   * 33-segment batch) - and a numbered row pays `batchRow` on top; the frame is
-   * paid once per chunk. A text too long to ever fit stays a chunk of its own
-   * rather than being dropped.
-   */
-  export function chunkByTokens(texts: string[], maxTokens: number): string[][] {
-    const limit = clampTokens(maxTokens);
-    const chunks: string[][] = [];
-    let current: string[] = [];
-    let used = PRIORS.promptOverhead;
-    for (const text of texts) {
-      const cost = estimateTokens(text) * 2 + PRIORS.batchRow;
-      if (current.length && used + cost > limit) {
-        chunks.push(current);
-        current = [];
-        used = PRIORS.promptOverhead;
-      }
-      current.push(text);
-      used += cost;
-    }
-    if (current.length) chunks.push(current);
-    return chunks;
-  }
 
   /** The budget, kept inside the range the settings page can ask for. */
   export function clampTokens(maxTokens: number): number {
@@ -647,13 +449,10 @@ namespace AT.local {
     return Math.min(MAX_MAX_TOKENS, Math.max(MIN_MAX_TOKENS, asked));
   }
 
-  /** How much of the budget the answer may use once the prompt is paid for. */
-  export function outputTokens(maxTokens: number, prompt: string): number {
-    const limit = clampTokens(maxTokens);
-    return Math.max(
-      MIN_OUTPUT_TOKENS,
-      limit - Math.min(promptTokens(prompt), limit - MIN_OUTPUT_TOKENS)
-    );
+  /** Reserve from exact source tokens, including byte-fallback tokens.
+   * The ratio is an expansion allowance, not a tokenizer estimate. */
+  export function answerTokens(sourceTokens: number): number {
+    return Math.max(MIN_OUTPUT_TOKENS, sourceTokens * ANSWER_TOKEN_RATIO + ANSWER_TOKEN_MARGIN);
   }
 
   /** A real answer is about its source's length in tokens: 1.2× at the median
@@ -665,102 +464,7 @@ namespace AT.local {
   export const ANSWER_TOKEN_RATIO = 3;
   export const ANSWER_TOKEN_MARGIN = 24;
 
-  /** Characters per token per script, plus the three fixed costs the model pays
-   *  outside the words of the text. */
-  export type Priors = {
-    latin: number;
-    cyrillic: number;
-    semitic: number;
-    thai: number;
-    hangul: number;
-    kana: number;
-    han: number;
-    /** The instruction and the turn markers, with no text in them. */
-    promptOverhead: number;
-    /** One numbered row of the *request*, beyond the words of its text. */
-    batchRow: number;
-    /** One row of the *reply*, beyond the words of its translation. */
-    answerRow: number;
-  };
 
-  // Measured through the tokenizer of `pfnet/plamo-3-translate-0.8b` (vocab
-  // 107520): distinct sentences fed to it, characters divided by the tokens it
-  // returned. Repeating one sentence instead of varying them reads ~15% cheap,
-  // so every figure here comes from distinct text. The pre-tokenizer does not
-  // split CJK per character, so the three scripts that share a number above
-  // spread apart here: Korean costs nearly a token a character, three times what
-  // Japanese costs, and one CJK figure would under-predict a Korean page by a
-  // half and over-chunk it. `promptOverhead` is the PFML frame - 15 tokens with
-  // no source language named, 19 with one, 23 with a `form`, 4 more for a
-  // `context` element and 7 per glossary pair, so 24 covers every shape.
-  // `batchRow` is 2.8-3.5 per row measured over 5, 10 and 20-row requests, and 4
-  // leaves one spare. `answerRow` is the `N: ` marker and the break the reply
-  // spends per row: about 1-3 measured.
-  export const PRIORS: Priors = {
-    latin: 5.33,
-    cyrillic: 1.64,
-    semitic: 1.24,
-    thai: 1.43,
-    hangul: 1.06,
-    kana: 3.07,
-    han: 1.19,
-    promptOverhead: 24,
-    batchRow: 4,
-    answerRow: 8
-  };
-
-  /**
-   * Groups texts by counts the model's tokenizer produced, not by an estimate.
-   * `overhead` is the measured cost of the instruction; each text pays for its
-   * own tokens and leaves room for an answer of the same length.
-   */
-  export function chunkByCounts(
-    texts: string[],
-    counts: number[],
-    maxTokens: number,
-    overhead: number
-  ): string[][] {
-    const limit = Math.max(MIN_MAX_TOKENS, Math.min(maxTokens, MAX_MAX_TOKENS));
-    const base = Math.max(0, Math.min(overhead, limit));
-    let current: string[] = [];
-    let used = base;
-    const chunks: string[][] = [];
-    texts.forEach((text, index) => {
-      const count = Number.isFinite(counts[index]) ? Math.max(0, counts[index] as number) : estimateTokens(text);
-      const cost = count * 2;
-      if (current.length && used + cost > limit) {
-        chunks.push(current);
-        current = [];
-        used = base;
-      }
-      current.push(text);
-      used += cost;
-    });
-    if (current.length) chunks.push(current);
-    return chunks;
-  }
-
-  /**
-   * How many tokens an answer to `sources` may spend. `outputTokens` hands the
-   * whole remainder of the window to a single answer, and a model that ignores
-   * its end token spends every one of them: measured on this artifact, 24 s at
-   * a ~440-token ceiling, 58 s at ~950 and 62 s at ~1980 - then the same again
-   * for the retry `isRunaway` asks for. A healthy answer stops at the end token
-   * far below this cap, so bounding it costs nothing and cuts the tail; the
-   * floor is what a short label needs. A batch pays `answerRow` per row on top
-   * of its words, because a numbered list costs more than its contents.
-   */
-  export function answerTokens(
-    sources: string | readonly string[],
-    maxTokens: number,
-    prompt: string
-  ): number {
-    const list: readonly string[] = typeof sources === 'string' ? [sources] : sources || [];
-    let tokens = 0;
-    for (const text of list) tokens += estimateTokens(text) * ANSWER_TOKEN_RATIO + PRIORS.answerRow;
-    const wanted = Math.ceil(tokens) + ANSWER_TOKEN_MARGIN;
-    return Math.max(MIN_OUTPUT_TOKENS, Math.min(outputTokens(maxTokens, prompt), wanted));
-  }
 
   const ID_PATTERN = /^[a-z0-9][a-z0-9._-]{1,95}$/;
 

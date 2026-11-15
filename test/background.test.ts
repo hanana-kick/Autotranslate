@@ -156,7 +156,6 @@ function inlineHostStub(record: { place: string | null; handled: string[]; messa
         case 'at/local-query':
           return { status: state };
         case 'at/local-count': {
-          if (!message.sourceChunkTokens) return {};
           const texts: string[] = message.texts ?? [];
           return { counts: texts.map(() => 10), overhead: 10, sourceChunks: texts.map(text => [text]) };
         }
@@ -217,7 +216,7 @@ function environment({
       // background only ever sees the reply.
       recorded.hostMessages.push(message);
       const answer = hostReplies?.[message.type];
-      if (answer === undefined && message.type === 'at/local-count' && message.sourceChunkTokens) {
+      if (answer === undefined && message.type === 'at/local-count') {
         return Promise.resolve({ ok: true, counts: message.texts.map(() => 10), overhead: 10,
           sourceChunks: message.texts.map((text: string) => [text]) });
       }
@@ -968,7 +967,7 @@ test('the real host reports a browser without WebGPU before anything is download
 
 
 
-test('page context from the content script is normalised before the engine sees it', async () => {
+test('page metadata never changes the translation request or result', async () => {
   const { AT, recorded, send } = environment({
     inlineHost: 'stub',
     settings: { enabled: true, localModelId: 'model-a', targetLang: 'ko' }
@@ -983,11 +982,8 @@ test('page context from the content script is normalised before the engine sees 
 
   const request = recorded.inline.messages.find((entry) => entry.type === AT.C.MSG.LOCAL_TRANSLATE);
   assert.ok(request, 'the batch reached the host');
-  assert.equal(
-    request.context,
-    'This is a product page from Example Shop.',
-    'the page sent markup, the extension sent one bounded line'
-  );
+  assert.equal(request.context, undefined);
+  assert.deepEqual(reply.translations, ['»hello«']);
   assert.deepEqual(recorded.hostMessages, [], 'the inline host is called, not messaged');
 });
 
@@ -1009,14 +1005,15 @@ test('the on-device engine translates through the host in place', async () => {
   assert.ok(recorded.inline.handled.includes(AT.C.MSG.LOCAL_TRANSLATE), 'the generation reached the host');
   const request = recorded.inline.messages.find((m) => m.type === AT.C.MSG.LOCAL_TRANSLATE)!;
   assert.equal(request.modelId, 'model-a');
-  assert.deepEqual(request.texts, ['Good morning', 'Thank you']);
+  assert.deepEqual(recorded.inline.messages.filter(m => m.type === AT.C.MSG.LOCAL_TRANSLATE).flatMap(m => m.texts),
+    ['Good morning', 'Thank you']);
   assert.equal(request.target, 'ko', 'the host is named a target, never a source');
   assert.equal(request.source, 'en', 'a stated source travels as it stands');
   assert.equal(request.maxTokens, 512, 'the budget travels with the batch');
-  assert.equal(typeof request.context, 'string', 'the batch carries the one rendered context line');
+  assert.equal(request.context, undefined);
 });
 
-test('a batch too long for the budget becomes one generation per chunk', async () => {
+test('independent texts retain their order through model-budget planning', async () => {
   const { AT, recorded } = environment({ inlineHost: 'stub' });
   const texts = [1, 2, 3].map((n) => `${n}: ` + 'lorem ipsum dolor sit amet '.repeat(10));
 
@@ -1029,17 +1026,17 @@ test('a batch too long for the budget becomes one generation per chunk', async (
   });
 
   const chunks = recorded.inline.messages.filter((entry) => entry.type === AT.C.MSG.LOCAL_TRANSLATE);
-  assert.equal(chunks.length, 3, 'three texts that cannot share a prompt pay three generations');
+  assert.equal(chunks.length, 3);
   for (const chunk of chunks) {
-    assert.equal(chunk.texts.length, 1, 'no chunk is over the budget it was given');
+    assert.equal(chunk.texts.length, 1);
     assert.equal(chunk.maxTokens, 128, 'every chunk carries the same budget');
   }
   assert.deepEqual(
     chunks.flatMap((chunk) => chunk.texts),
-    texts,
-    'nothing is dropped or repeated on the way through the packer'
+    texts.map(text => text.trim()),
+    'only outer whitespace is removed'
   );
-  assert.deepEqual(result.translations, texts.map((text) => `\u00bb${text}\u00ab`), 'the answers come back in page order');
+  assert.deepEqual(result.translations, texts.map((text) => `\u00bb${text.trim()}\u00ab`), 'the answers come back in page order');
   assert.equal(result.requested, 3);
 });
 
@@ -1055,8 +1052,7 @@ test('an empty batch is an answer from the inline host, not a failure', async ()
     modelId: 'model-a',
     texts: [],
     target: 'ko',
-    maxTokens: 512,
-    context: ''
+    maxTokens: 512
   });
   assert.equal(reply.ok, true);
   assert.deepEqual(reply.translations, [], 'an empty batch is an answer, not a failure');
@@ -1331,7 +1327,6 @@ function scheduledBatchEnvironment(translationConcurrency: 1 | 2 | 4 | 8) {
   env.AT.engines.createFragmentScheduler = (width: number) => { widths.push(width); return create(width); };
   env.AT.local.callHost = async (message: ATNamespace, _progress: unknown, signal: AbortSignal) => {
     if (message.type === env.AT.C.MSG.LOCAL_COUNT) {
-      assert.equal(message.sourceChunkTokens, 64);
       return { ok: true, sourceChunks: message.texts.map((text: string) => plans.get(text) ?? [text]) };
     }
     assert.equal(message.type, env.AT.C.MSG.LOCAL_TRANSLATE);

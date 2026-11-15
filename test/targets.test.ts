@@ -227,11 +227,7 @@ test('visible continuations get a turn before fresh text but yield after their q
   assert.deepEqual(targets.plan(entries).flatMap((group: { ids: string[] }) => group.ids), ['new', 'partial']);
 });
 
-test('each region gets a line the prompt can use, and prose gets none', () => {
-  assert.equal(targets.roleHint('navigation'), 'These are navigation labels.');
-  assert.equal(targets.roleHint('comment'), 'These are reader comments.');
-  assert.equal(targets.roleHint('article'), null, 'the page context already says what an article is');
-  assert.equal(targets.roleHint('unknown'), null);
+test('region roles normalize independently of translation prompts', () => {
   assert.equal(targets.normalizeRole('comment'), 'comment');
   assert.equal(targets.normalizeRole('nope'), 'unknown');
   assert.equal(targets.normalizeRole(null), 'unknown');
@@ -249,19 +245,3 @@ test('sentences end at sentence punctuation', () => {
   assert.deepEqual(targets.sentences('   '), []);
 });
 
-test('the context line is capped and keeps the page before the region', () => {
-  assert.equal(
-    targets.composeContext('This is a news article from Example News.', 'These are reader comments.'),
-    'This is a news article from Example News. These are reader comments.'
-  );
-  assert.equal(targets.composeContext('Only the page.', null), 'Only the page.');
-  assert.equal(targets.composeContext(null, 'These are navigation labels.'), 'These are navigation labels.');
-  assert.equal(targets.composeContext('   ', undefined), '', 'nothing to say is an empty string');
-
-  const long = 'word '.repeat(200);
-  const composed = targets.composeContext('Page line.', long);
-  assert.ok(composed.length <= targets.CONTEXT_MAX_CHARS, `capped at ${targets.CONTEXT_MAX_CHARS}, got ${composed.length}`);
-  assert.ok(composed.startsWith('Page line.'), 'the page line survives the cut');
-  assert.ok(!composed.endsWith(' '), 'cut on a word boundary, not mid-space');
-  assert.ok(!/\s{2,}/.test(composed), 'no doubled spaces after joining');
-});

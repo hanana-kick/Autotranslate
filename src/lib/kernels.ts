@@ -114,7 +114,7 @@ namespace AT.kernels {
   export function geometryOf(model: AT.onnxweights.ModelWeights): Geometry {
     const first = model.layers[0];
     if (!first) throw new Error('kernels: the model has no layers');
-    const headDim = 128;
+    const headDim = first.qNorm.length;
     const heads = (first.qkv.N - 2 * headDim) / headDim;
     if (!Number.isInteger(heads) || heads <= 0) throw new Error(`kernels: qkv width ${first.qkv.N} is not a head layout`);
     if (first.gateUp.N % 2 !== 0) throw new Error(`kernels: gate_up width ${first.gateUp.N} is odd`);
@@ -129,10 +129,6 @@ namespace AT.kernels {
     };
   }
 
-  /** The q/k scale the exported graph applies to both halves (a double Sqrt). */
-  const QK_SCALE = 0.297358;
-  /** The card's end-of-turn ids. */
-  export const EOS = [1, 16];
   /** Largest small-batch GEMV specialization; larger tiles use GEMM. */
   export const POSITIONS = 8;
   /** Independent request slots; prefill tile width is configured separately. */
@@ -169,7 +165,7 @@ namespace AT.kernels {
       }
       let inv = 1.0 / sqrt(sums[0] / f32(info.n) + 1e-6);
       for (var i: u32 = lane; i < info.n; i = i + 128u) {
-        y[row * info.n + i] = x[base + i] * inv * w[i];
+        y[row * info.n + i] = quantizeToF16(quantizeToF16(x[base + i] * inv) * w[i]);
       }
     }
   `;
@@ -213,14 +209,14 @@ namespace AT.kernels {
       let postInv = inverseRms(acc, lane);
       acc = 0.0;
       for (var i = lane; i < info.n; i += 128u) {
-        let normalized = x[base + i] * postInv * post[i];
-        let v = residual[base + i] + normalized;
+        let normalized = quantizeToF16(quantizeToF16(x[base + i] * postInv) * post[i]);
+        let v = quantizeToF16(residual[base + i] + normalized);
         combined[base + i] = v;
         acc = acc + v * v;
       }
       let preInv = inverseRms(acc, lane);
       for (var i = lane; i < info.n; i += 128u) {
-        y[base + i] = combined[base + i] * preInv * pre[i];
+        y[base + i] = quantizeToF16(quantizeToF16(combined[base + i] * preInv) * pre[i]);
       }
     }
   `;
@@ -316,7 +312,7 @@ namespace AT.kernels {
           for (var i: u32 = 0u; i < 16u; i = i + 1u) {
             sum = sum + partial[(tile * ${width}u + p) * 16u + i];
           }
-          y[p * info.n + outRow] = sum;
+          y[p * info.n + outRow] = quantizeToF16(sum);
         }
       }
     }
@@ -324,9 +320,8 @@ namespace AT.kernels {
   }
 
 
-  /** Fuse 128-wide Q RMSNorm and RoPE, one workgroup per (head, row).
-   *  Preserve the RMS lane ownership, 64..1 sum tree, x*inv*w order and RoPE
-   *  arithmetic. Shared FP32 normalised values replace the qN storage buffer.
+  /** Fuse 128-wide Q RMSNorm and RoPE, retaining the graph's FP16 boundaries.
+   *  Shared FP32 storage holds values rounded at Cast/Mul boundaries.
    *  Five storage bindings and 1 KiB workgroup storage; no optional features. */
   const NORM_ROPE = `
     struct Info { heads: u32, rows: u32, half: u32, scale: f32, stride: u32, start: u32, pad: u32, pad2: u32 };
@@ -359,18 +354,18 @@ namespace AT.kernels {
         stride = stride / 2u;
       }
       let normInv = 1.0 / sqrt(sums[0] / f32(2u * half) + 1e-6);
-      normalised[d] = v * normInv * w[d];
+      normalised[d] = quantizeToF16(quantizeToF16(v * normInv) * w[d]);
       workgroupBarrier();
       let angle = f32(positions[row]) * inv[d % half];
-      let c = cos(angle);
-      let s = sin(angle);
+      let c = quantizeToF16(cos(angle));
+      let s = quantizeToF16(sin(angle));
       var out: f32;
       if (d < half) {
-        out = normalised[d] * c - normalised[d + half] * s;
+        out = quantizeToF16(normalised[d] * c) - quantizeToF16(normalised[d + half] * s);
       } else {
-        out = normalised[d] * c + normalised[d - half] * s;
+        out = quantizeToF16(normalised[d] * c) + quantizeToF16(normalised[d - half] * s);
       }
-      y[at + d] = out * info.scale;
+      y[at + d] = quantizeToF16(quantizeToF16(out) * quantizeToF16(info.scale));
     }
   `;
 
@@ -392,7 +387,8 @@ namespace AT.kernels {
       let row = i / info.half;
       let base = row * 2u * info.half;
       let a = fused[base + within];
-      y[i] = (a / (1.0 + exp(-a))) * fused[base + info.half + within];
+      let sigmoid = quantizeToF16(1.0 / (1.0 + exp(-a)));
+      y[i] = quantizeToF16(quantizeToF16(a * sigmoid) * fused[base + info.half + within]);
     }
   `;
 
@@ -533,8 +529,8 @@ namespace AT.kernels {
     matmul?: MatmulMode;
     matrixSubgroupSize?: number;
     attention?: 'tiled' | 'decode';
-    /** Empty disables early stopping, for fixed-token throughput measurements. */
-    eosTokens?: readonly number[];
+    /** Model-declared sentinels; empty disables stopping for fixed-token diagnostics. */
+    eosTokens: readonly number[];
     /** Optional diagnostics; computeMs is wall time, not a GPU timestamp. */
     onStep?: (sample: StepSample) => void;
     /** Profiling: '' (normal), 'nohead', 'noattn', 'onelay'. */
@@ -548,12 +544,15 @@ namespace AT.kernels {
     const capacity = Math.max(rows, Math.min(64, Math.floor(options.prefillPositions ?? 64)));
     const mixedCapacity = Math.max(rows, Math.min(capacity, Math.floor(options.mixedPositions ?? 32)));
     const ablate = options.ablate ?? '';
-    const eos = options.eosTokens ?? EOS;
+    const eos = options.eosTokens;
     // 0 normal, 1 skip the value pass, 2 skip the score pass.
     const attnMode = ablate === 'attn_novalue' ? 1 : ablate === 'attn_noscore' ? 2 : 0;
     const coalesceMs = Math.max(0, Math.floor(options.coalesceMs ?? 0));
     const { hidden, heads, headDim, intermediate, qkvWidth, vocab, layers } = geometry;
     const qWidth = heads * headDim;
+    if (headDim !== 128 || model.layers.some(layer => layer.kNorm.length !== headDim)) {
+      throw new Error('kernels: only 128-wide single-KV-head attention is supported');
+    }
     const matrices = [model.head, ...model.layers.flatMap(layer =>
       [layer.qkv, layer.o, layer.gateUp, layer.down])];
     const alignedBytes = (bytes: number): number => Math.max(16, Math.ceil(bytes / 4) * 4);
@@ -749,7 +748,7 @@ namespace AT.kernels {
       metaU32[2] = headDim / 2;
       metaU32[4] = qkvWidth;
       metaU32[5] = metaU32[6] = metaU32[7] = 0;
-      metaF32[3] = QK_SCALE;
+      metaF32[3] = Math.sqrt(1 / Math.sqrt(headDim));
       put(target, metaU32);
     };
     /** The width of the step that is about to run: a lone request costs one
@@ -1185,13 +1184,18 @@ namespace AT.kernels {
 
     return {
       add(job) {
-        const prompt = job.prompt.filter((id) => Number.isFinite(id) && id >= 0 && id < vocab).slice(0, maxTokens - 1);
+        if (!job.prompt.length || job.prompt.some(id => !Number.isSafeInteger(id) || id < 0 || id >= vocab) ||
+            !Number.isSafeInteger(job.maxNewTokens) || job.maxNewTokens < 1 ||
+            job.prompt.length + job.maxNewTokens > maxTokens) {
+          onDone({ id: job.id, ok: false, error: 'Invalid tokens or generation exceeds the backend context limit' });
+          return;
+        }
         queue.push({
           id: job.id,
           cache: 0,
           cancelled: false,
-          prompt,
-          maxNewTokens: Math.max(1, Math.min(job.maxNewTokens, maxTokens - prompt.length)),
+          prompt: job.prompt,
+          maxNewTokens: job.maxNewTokens,
           generated: [],
           onProgress: job.onProgress,
           fed: 0,

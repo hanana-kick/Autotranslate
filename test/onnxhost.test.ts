@@ -44,6 +44,9 @@ fakeTokenizer.decode = (ids: ArrayLike<number | bigint>) => {
 fakeTokenizer.apply_chat_template = (messages: { content: string }[]) => `PROMPT:${messages[0]?.content ?? ''}`;
 
 test.beforeEach(() => {
+  onnxhost.configure({ modelFiles: async (name: string) => new Blob([JSON.stringify(
+    name === 'config.json' ? { max_position_embeddings: 8192, eos_token_id: 1 } : { eos_token_id: 1 }
+  )]) });
   onnxhost.configure({ tokenizer: fakeTokenizer });
 });
 
@@ -137,7 +140,9 @@ test('the answer is the generation alone, not the prompt the pipeline echoes bac
     runtime: () => ({
       env: { backends: { onnx: { wasm: {} } } },
       AutoTokenizer: { from_pretrained: async () => fakeTokenizer },
-      pipeline: async () => async (prompt: string) => {
+      pipeline: async () => async (prompt: string, options: ATNamespace) => {
+        options.streamer?.put([[2]]);
+        options.streamer?.put([[1]]);
         prompts.push(prompt);
         return [{ generated_text: prompt + answer }];
       }
@@ -198,6 +203,7 @@ class FakeEngine {
   static holdInit = false;
   static backend: 'kernels' | 'runtime' = 'runtime';
   static rows = 1;
+  static contextTokens = 2048;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessageerror: (() => void) | null = null;
@@ -215,7 +221,7 @@ class FakeEngine {
         this.onmessage?.({
           data: failure
             ? { type: 'ready', ok: false, error: failure, code: 'worker-init' }
-            : { type: 'ready', ok: true, backend: FakeEngine.backend, rows: FakeEngine.rows }
+            : { type: 'ready', ok: true, backend: FakeEngine.backend, rows: FakeEngine.rows, contextTokens: FakeEngine.contextTokens }
         });
       });
       return;
@@ -233,10 +239,10 @@ class FakeEngine {
       maxNewTokens: message.maxNewTokens ?? 0
     });
   }
-  answer(job: EngineJob, text: string): void {
+  answer(job: EngineJob, text: string, finishReason: 'eos' | 'length' = 'eos'): void {
     FakeEngine.inFlight = FakeEngine.inFlight.filter((entry) => entry !== job);
     const tokens = Array.from(text).map((character) => character.codePointAt(0) ?? 0);
-    this.onmessage?.({ data: { type: 'result', id: job.id, ok: true, tokens } });
+    this.onmessage?.({ data: { type: 'result', id: job.id, ok: true, tokens, finishReason } });
   }
   crash(): void {
     FakeEngine.inFlight = FakeEngine.inFlight.filter((job) => job.worker !== this);
@@ -253,6 +259,7 @@ class FakeEngine {
     FakeEngine.holdInit = false;
     FakeEngine.backend = 'runtime';
     FakeEngine.rows = 1;
+    FakeEngine.contextTokens = 2048;
   }
 }
 
@@ -283,6 +290,7 @@ function installSession(options: {
   beforeGenerate?: () => Promise<void>;
   tokenizer?: typeof codepoints;
   generatedText?: (prompt: string) => string;
+  finishReason?: 'eos' | 'length';
   previewChunks?: string[];
   onStreamer?: (options: { skip_prompt?: boolean; skip_special_tokens?: boolean }) => void;
 } = {}) {
@@ -319,6 +327,12 @@ function installSession(options: {
           this.config = config;
           options.onStreamer?.(config);
         }
+        private promptPending = true;
+        put(tokens: number[][]) {
+          if (this.promptPending) { this.promptPending = false; return; }
+          const text = codepoints.decode((tokens[0] ?? []).filter(id => id !== 1));
+          if (text) this.config.callback_function(text);
+        }
         end() {}
       },
       AutoTokenizer: {
@@ -332,11 +346,14 @@ function installSession(options: {
         calls.pipelines += 1;
         await options.beforePipeline?.();
         const pipe = async (prompt: string, generation: {
-          streamer?: { config: { callback_function: (text: string) => void } };
+          streamer?: { put: (tokens: number[][]) => void; end: () => void };
         }) => {
           inline.push(prompt);
           await options.beforeGenerate?.();
-          for (const chunk of options.previewChunks ?? []) generation.streamer?.config.callback_function(chunk);
+          generation.streamer?.put([codepoints(prompt).input_ids.data]);
+          for (const chunk of options.previewChunks ?? []) generation.streamer?.put([codepoints(chunk).input_ids.data]);
+          generation.streamer?.put([[options.finishReason === 'length' ? 42 : 1]]);
+          generation.streamer?.end();
           return [{ generated_text: options.generatedText?.(prompt) ?? `${prompt}문서` }];
         };
         pipe.dispose = async () => { calls.disposed += 1; };
@@ -597,7 +614,7 @@ test('kernel load and token counting need no document generation session', async
       type: 'at/local-count', modelId: 'onnx-model', texts: [ASK_ONE], target: 'ko'
     });
     assert.deepEqual(counts.counts, [ASK_ONE.length]);
-    assert.equal(Object.hasOwn(counts, 'sourceChunks'), false, 'legacy counting does not opt into fragment planning');
+    assert.deepEqual(counts.sourceChunks, [[ASK_ONE]], 'all count calls include safe source plans');
     assert.equal(session.calls.tokenizers, 1);
     assert.equal(session.calls.pipelines, 0);
     assert.equal(session.inline.length, 0);
@@ -606,7 +623,7 @@ test('kernel load and token counting need no document generation session', async
   }
 });
 
-test('count and complete-prompt memos preserve exact IDs, special-token options and context', async () => {
+test('count and complete-prompt memos preserve exact IDs, special tokens and languages', async () => {
   const calls: { text: string; specials: boolean }[] = [];
   const tokenizer = Object.assign((text: string, options?: { add_special_tokens?: boolean }) => {
     const specials = options?.add_special_tokens !== false;
@@ -615,8 +632,8 @@ test('count and complete-prompt memos preserve exact IDs, special-token options 
     return { input_ids: { data: specials ? [17, ...ids] : ids } };
   }, {
     decode: codepoints.decode,
-    apply_chat_template: (messages: { content: string }[], options?: { target_lang?: string; context?: string }) =>
-      `PROMPT:${options?.target_lang}:${options?.context ?? ''}:${messages[0]?.content ?? ''}`
+    apply_chat_template: (messages: { content: string }[], options?: { target_lang?: string; source_lang?: string }) =>
+      `PROMPT:${options?.target_lang}:${options?.source_lang ?? ''}:${messages[0]?.content ?? ''}`
   });
   const session = installSession({ tokenizer });
   FakeEngine.reset();
@@ -631,20 +648,17 @@ test('count and complete-prompt memos preserve exact IDs, special-token options 
     const before = calls.length;
     assert.deepEqual(await onnxhost.handle(countRequest), counted);
     assert.equal(calls.length, before, 'repeat source counts reuse expansion and no-special counts');
-    for (const context of [undefined, undefined, 'greeting', 'greeting']) {
-      const request = onnxhost.translate({ ...translateRequest(source), ...(context ? { context } : {}) });
+    for (const sourceLang of [undefined, undefined, 'ja', 'ja']) {
+      const request = onnxhost.translate({ ...translateRequest(source), source: sourceLang });
       started.push(request);
       await until('memoized prompt admitted', () => FakeEngine.inFlight.length === 1);
       const job = jobFor(source);
-      const prompt = `PROMPT:ko:${context ?? ''}:${source}`;
-      assert.deepEqual(job.inputIds, [17, ...codepoints(prompt).input_ids.data],
-        'the whole prompt, including Unicode and specials, is encoded together');
+      const prompt = `PROMPT:ko:${sourceLang ?? ''}:${source}`;
+      assert.deepEqual(job.inputIds, codepoints(prompt).input_ids.data,
+        'a rendered template must not acquire a second set of special tokens');
       job.worker.answer(job, '번역');
       await request;
     }
-    assert.equal(calls.filter((call) => call.text === plain && call.specials).length, 1,
-      'no-special count IDs never substitute for complete prompt IDs');
-    assert.equal(calls.filter((call) => call.text === `PROMPT:ko:greeting:${source}` && call.specials).length, 1);
     assert.equal((await onnxhost.status()).generations, 4, 'only tokenizer work is reused, never translations');
   } finally {
     await finish(started, session);
@@ -689,6 +703,7 @@ test('LOCAL_COUNT plans actual-token bounded raw source fragments with the loade
   }), { decode: codepoints.decode, apply_chat_template: codepoints.apply_chat_template });
   const session = installSession({ tokenizer: weightedTokenizer });
   FakeEngine.reset();
+  FakeEngine.contextTokens = 78; // 7 prompt tokens + 7 source tokens + 64 output reserve.
   (globalThis as ATNamespace).Worker = FakeEngine;
   const texts = [
     ' \t最初です。次です！終わり？ \n',
@@ -701,7 +716,7 @@ test('LOCAL_COUNT plans actual-token bounded raw source fragments with the loade
   ];
   try {
     const reply = await onnxhost.handle({
-      type: 'at/local-count', modelId: 'onnx-model', texts, target: 'ko', sourceChunkTokens: 7
+      type: 'at/local-count', modelId: 'onnx-model', texts, target: 'ko'
     });
     const plans: string[][] = reply.sourceChunks;
     assert.equal(plans.length, texts.length);
@@ -723,27 +738,24 @@ test('LOCAL_COUNT plans actual-token bounded raw source fragments with the loade
     assert.equal(session.calls.tokenizers, 1, 'planning reuses the resident tokenizer');
     assert.equal(session.calls.pipelines, 0, 'planning does not generate translations');
     await assert.rejects(onnxhost.handle({
-      type: 'at/local-count', modelId: 'onnx-model', texts: ['👩‍👩‍👧‍👦'], target: 'ko', sourceChunkTokens: 6
+      type: 'at/local-count', modelId: 'onnx-model', texts: ['e' + '\u0301'.repeat(80)], target: 'ko'
     }), { reason: 'context-overflow', code: 'config', message: /grapheme/ });
-    await assert.rejects(onnxhost.handle({
-      type: 'at/local-count', modelId: 'onnx-model', texts: ['text'], target: 'ko', sourceChunkTokens: 0
+    await assert.rejects(onnxhost.translate({
+      ...translateRequest('a source that cannot fit this execution context')
     }), { reason: 'context-overflow', code: 'config' });
   } finally {
     await finish([], session);
   }
 });
 
-test('opt-in source planning never truncates the list at the legacy count limit', async () => {
+test('source planning covers lists larger than the former count limit', async () => {
   const session = installSession();
   FakeEngine.reset();
   (globalThis as ATNamespace).Worker = FakeEngine;
   const texts = Array.from({ length: 201 }, (_unused, index) => `${index}。`);
   try {
-    const legacy = await onnxhost.handle({ type: 'at/local-count', modelId: 'onnx-model', texts, target: 'ko' });
-    assert.equal(legacy.counts.length, 200);
-    assert.equal(Object.hasOwn(legacy, 'sourceChunks'), false);
     const planned = await onnxhost.handle({
-      type: 'at/local-count', modelId: 'onnx-model', texts, target: 'ko', sourceChunkTokens: local.SOURCE_CHUNK_TOKENS
+      type: 'at/local-count', modelId: 'onnx-model', texts, target: 'ko'
     });
     assert.equal(planned.counts.length, texts.length);
     assert.deepEqual(planned.sourceChunks, texts.map((text) => [text]));
@@ -755,19 +767,19 @@ test('opt-in source planning never truncates the list at the legacy count limit'
 test('LOCAL_COUNT cancellation stops source planning during actual tokenization', async () => {
   const controller = new AbortController();
   let afterCancellation = 0;
-  let firstSentenceCounts = 0;
   const cancellingTokenizer = Object.assign((text: string, options?: { add_special_tokens?: boolean }) => {
     if (controller.signal.aborted) afterCancellation += 1;
-    // The host first probes byte fallback, then counts the resulting ids.
-    if (text === '最初です。' && ++firstSentenceCounts === 2) controller.abort();
+    // Cancel while measuring the first sentence's complete rendered prompt.
+    if (text === 'PROMPT:最初です。') controller.abort();
     return codepoints(text, options);
   }, { decode: codepoints.decode, apply_chat_template: codepoints.apply_chat_template });
   const session = installSession({ tokenizer: cancellingTokenizer });
   FakeEngine.reset();
   (globalThis as ATNamespace).Worker = FakeEngine;
+  FakeEngine.contextTokens = 78;
   try {
     await assert.rejects(onnxhost.handle({
-      type: 'at/local-count', modelId: 'onnx-model', texts: ['最初です。次です！終わり？'], target: 'ko', sourceChunkTokens: 7
+      type: 'at/local-count', modelId: 'onnx-model', texts: ['最初です。次です！終わり？'], target: 'ko'
     }, undefined, controller.signal), { code: 'cancelled' });
     assert.equal(controller.signal.aborted, true);
     assert.equal(afterCancellation, 0, 'planning does no tokenizer work after cancellation');
@@ -876,12 +888,12 @@ test('tokenizer completion cannot publish readiness before the overlapping GPU w
     await until('tokenizer and worker opened', () => session.calls.tokenizers === 1 && FakeEngine.made.length === 1);
     assert.equal(ready, false);
     assert.equal((await onnxhost.status()).state, 'loading');
-    FakeEngine.made[0]!.onmessage?.({ data: { type: 'ready', ok: true, backend: 'kernels', rows: 8 } });
+    FakeEngine.made[0]!.onmessage?.({ data: { type: 'ready', ok: true, backend: 'kernels', rows: 8, contextTokens: 2048 } });
     await loading;
     assert.equal((await onnxhost.status()).state, 'ready');
     assert.equal(session.calls.pipelines, 0);
   } finally {
-    for (const worker of FakeEngine.made) worker.onmessage?.({ data: { type: 'ready', ok: true, backend: 'kernels', rows: 8 } });
+    for (const worker of FakeEngine.made) worker.onmessage?.({ data: { type: 'ready', ok: true, backend: 'kernels', rows: 8, contextTokens: 2048 } });
     await finish(started, session);
   }
 });
@@ -1042,52 +1054,43 @@ test('worker previews decode cumulative generated ids and hold incomplete Unicod
   } finally { await finish(started, session); }
 });
 
-test('a different-context retry clears its old preview and ignores progress from the old request id', async () => {
-  const tokenizer = Object.assign((text: string) => codepoints(text), {
-    decode: codepoints.decode,
-    apply_chat_template: (messages: { content: string }[], options?: { context?: string }) =>
-      `PROMPT:${options?.context ?? ''}:${messages[0]?.content ?? ''}`
-  });
-  const session = installSession({ tokenizer });
+test('Japanese quotes, paths and proper names survive both preview and final validation', async () => {
+  const session = installSession();
   FakeEngine.reset();
   (globalThis as ATNamespace).Worker = FakeEngine;
-  const seen: string[] = [];
   const started: Promise<unknown>[] = [];
   try {
-    const request = onnxhost.translate({ ...translateRequest(ASK_ONE), context: 'greeting' },
-      (_index: number, text: string) => seen.push(text));
-    started.push(request);
-    await until('first attempt', () => FakeEngine.inFlight.length === 1);
-    const first = jobFor(ASK_ONE);
-    first.worker.onmessage?.({ data: { type: 'progress', id: first.id, tokens: [...'こんにちは'].map((ch) => ch.codePointAt(0)) } });
-    first.worker.answer(first, 'こんにちは');
-    await until('retry', () => FakeEngine.inFlight.length === 1);
-    const second = jobFor(ASK_ONE);
-    assert.notEqual(second.id, first.id);
-    assert.notDeepEqual(second.inputIds, first.inputIds, 'only a different rendered prompt retries');
-    first.worker.onmessage?.({ data: { type: 'progress', id: first.id, tokens: [...'wrong late'].map((ch) => ch.codePointAt(0)) } });
-    assert.deepEqual(seen, ['こんにちは', '']);
-    second.worker.answer(second, '번역');
-    assert.deepEqual((await request).translations, ['번역']);
+    for (const answer of ['「こんにちは」는 일본어 인사입니다.', '/images/画像 경로를 사용합니다.', '夏目漱石의 작품입니다.']) {
+      const seen: string[] = [];
+      const request = onnxhost.translate(translateRequest(ASK_ONE), (_index: number, text: string) => seen.push(text));
+      started.push(request);
+      await until('single translation', () => FakeEngine.inFlight.length === 1);
+      const job = jobFor(ASK_ONE);
+      job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: codepoints(answer).input_ids.data } });
+      job.worker.answer(job, answer);
+      assert.deepEqual((await request).translations, [answer]);
+      assert.deepEqual(seen, [answer], 'valid preview never rolls back because of its script');
+      assert.equal(FakeEngine.inFlight.length, 0);
+    }
   } finally { await finish(started, session); }
 });
 
 for (const mode of ['native', 'fallback'] as const) {
-  test(`${mode}: identical rendered greedy retry is skipped even when a template ignores context`, async () => {
+  test(`${mode}: an unchanged Japanese quote is not retried or rejected by script`, async () => {
     const session = installSession({ generatedText: (prompt) => prompt + 'こんにちは' });
     FakeEngine.reset();
     if (mode === 'fallback') FakeEngine.failInit = 'use document fallback';
     (globalThis as ATNamespace).Worker = FakeEngine;
     const started: Promise<unknown>[] = [];
     try {
-      const request = onnxhost.translate({ ...translateRequest(ASK_ONE), context: 'ignored by template' });
+      const request = onnxhost.translate(translateRequest(ASK_ONE));
       started.push(request);
       if (mode === 'native') {
         await until('first greedy attempt', () => FakeEngine.inFlight.length === 1);
         const job = jobFor(ASK_ONE);
         job.worker.answer(job, 'こんにちは');
       }
-      assert.deepEqual((await request).translations, ['']);
+      assert.deepEqual((await request).translations, ['こんにちは']);
       assert.equal((await onnxhost.status()).generations, 1);
       assert.equal(FakeEngine.inFlight.length, 0);
       assert.equal(session.inline.length, mode === 'fallback' ? 1 : 0);
@@ -1212,36 +1215,26 @@ for (const cause of ['cancel', 'invalid-output'] as const) {
   });
 }
 
-test('serial runtime numbered batch maps streaming segments and resets before per-text retry', async () => {
+test('serial runtime uses the same independent prompt and preview protocol as native rows', async () => {
   const session = installSession();
   FakeEngine.reset();
   (globalThis as ATNamespace).Worker = FakeEngine;
   const seen: [number, string][] = [];
   const started: Promise<unknown>[] = [];
   try {
-    const request = onnxhost.translate(
-      { ...translateRequest(ASK_ONE), texts: [ASK_ONE, ASK_TWO] },
-      (index: number, text: string) => seen.push([index, text])
-    );
+    const request = onnxhost.translate({ ...translateRequest(ASK_ONE), texts: [ASK_ONE, ASK_TWO] },
+      (index: number, text: string) => seen.push([index, text]));
     started.push(request);
-    await until('batch job', () => FakeEngine.inFlight.length === 1);
-    const batch = jobFor(ASK_ONE);
-    const progress = (text: string) => batch.worker.onmessage?.({
-      data: { type: 'progress', id: batch.id, tokens: Array.from(text).map((ch) => ch.codePointAt(0)) }
-    });
-    progress('1. 첫째\n2.');
-    assert.deepEqual(seen, [[0, '첫째']], 'an unfinished marker cannot leak into a translation');
-    progress('1. 첫째\n2. 둘째');
-    assert.deepEqual(seen, [[0, '첫째'], [1, '둘째']]);
-    batch.worker.answer(batch, '1. 첫째\n3. 잘못됨');
-    await until('first individual retry', () => FakeEngine.inFlight.length === 1);
-    assert.deepEqual(seen, [[0, '첫째'], [1, '둘째'], [0, ''], [1, '']]);
-    const first = jobFor(ASK_ONE);
-    first.worker.answer(first, '첫째');
-    await until('second individual retry', () => FakeEngine.inFlight.length === 1);
-    const second = jobFor(ASK_TWO);
-    second.worker.answer(second, '둘째');
-    assert.deepEqual((await request).translations, ['첫째', '둘째']);
+    for (const [index, source] of [ASK_ONE, ASK_TWO].entries()) {
+      await until('independent runtime prompt', () => FakeEngine.inFlight.length === 1);
+      const job = jobFor(source);
+      assert.equal(codepoints.decode(job.inputIds), `PROMPT:${source}`);
+      job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: codepoints(`번역${index}`).input_ids.data } });
+      job.worker.answer(job, `번역${index}`);
+    }
+    assert.deepEqual((await request).translations, ['번역0', '번역1']);
+    assert.deepEqual(seen, [[0, '번역0'], [1, '번역1']]);
+    assert.equal((await onnxhost.status()).generations, 2);
   } finally { await finish(started, session); }
 });
 
@@ -1371,4 +1364,143 @@ test('inline cancellation is prompt but retains serialization until the real ker
     gate.resolve();
     await finish(started, session);
   }
+});
+
+test('one template policy names only the requested languages on both sides of 40 characters', async () => {
+  const rendered: { content: string; options: Record<string, unknown> }[] = [];
+  const tokenizer = Object.assign((text: string) => codepoints(text), {
+    decode: codepoints.decode,
+    apply_chat_template(messages: { content: string }[], options: Record<string, unknown> = {}) {
+      const content = messages[0]!.content;
+      rendered.push({ content, options });
+      return `PROMPT:${options.source_lang ?? ''}:${options.target_lang}:${content}`;
+    }
+  });
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  try {
+    for (const length of [39, 40, 75]) {
+      const source = 'あ'.repeat(length - 1) + '。';
+      const request = onnxhost.translate({ ...translateRequest(source), source: 'ja', target: 'zh-TW' });
+      started.push(request);
+      await until('language-conditioned request', () => FakeEngine.inFlight.length === 1);
+      const job = jobFor(source);
+      job.worker.answer(job, '翻譯完成。');
+      assert.deepEqual((await request).translations, ['翻譯完成。']);
+    }
+    assert.equal(rendered.length, 3, 'no alternate prompt or greedy retry');
+    for (const { options } of rendered) assert.deepEqual(options,
+      { source_lang: 'ja', target_lang: 'zh-hant', add_generation_prompt: true, tokenize: false });
+  } finally { await finish(started, session); }
+});
+
+test('emoji byte-token cost raises the reserve and clean cap-ended output is rejected', async () => {
+  const tokenizer = Object.assign((text: string) => ({
+    input_ids: { data: Array.from(text).flatMap(character =>
+      Array(character === '😀' ? 4 : 1).fill(character.codePointAt(0))) }
+  }), { decode: codepoints.decode, apply_chat_template: codepoints.apply_chat_template });
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  const source = '😀'.repeat(14) + '【よくある質問】';
+  const seen: string[] = [];
+  try {
+    const request = onnxhost.translate(translateRequest(source), (_index: number, text: string) => seen.push(text));
+    const rejected = assert.rejects(request, { reason: 'invalid-output', message: /token limit/ });
+    started.push(rejected);
+    await until('emoji generation', () => FakeEngine.inFlight.length === 1);
+    const job = FakeEngine.inFlight[0]!;
+    assert.equal(job.maxNewTokens, local.answerTokens(tokenizer(source).input_ids.data.length));
+    assert.ok(job.maxNewTokens > 64);
+    assert.ok(job.inputIds.length + job.maxNewTokens <= 512);
+    const partial = '😀'.repeat(14) + '【자주 묻';
+    job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: codepoints(partial).input_ids.data } });
+    job.worker.answer(job, partial, 'length');
+    await rejected;
+    assert.deepEqual(seen, [partial, '']);
+    assert.equal(session.calls.pipelines, 0, 'a cap is not a reason to change backend or retry');
+  } finally { await finish(started, session); }
+});
+
+test('inline fallback also rejects unfinished output and clears its preview', async () => {
+  const session = installSession({ finishReason: 'length', previewChunks: ['자주 묻'], generatedText: prompt => prompt + '자주 묻' });
+  FakeEngine.reset();
+  FakeEngine.failInit = 'worker unavailable';
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const seen: string[] = [];
+  try {
+    await assert.rejects(onnxhost.translate(translateRequest(ASK_ONE), (_index: number, text: string) => seen.push(text)),
+      { reason: 'invalid-output', message: /end token/ });
+    assert.equal(seen.at(-1), '');
+    assert.equal(session.inline.length, 1);
+  } finally { await finish([], session); }
+});
+
+test('large input plans preserve sentences against the actual execution context, not source64', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  FakeEngine.contextTokens = 512;
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  try {
+    const sentence = 'あ'.repeat(74) + '。';
+    const source = sentence.repeat(200);
+    const result = await onnxhost.handle({
+      type: 'at/local-count', modelId: 'onnx-model', maxTokens: 8192, target: 'ko', source: 'ja', texts: [sentence, source]
+    });
+    assert.deepEqual(result.sourceChunks[0], [sentence], 'a fitting sentence over 64 tokens stays intact');
+    const fragments: string[] = result.sourceChunks[1];
+    assert.equal(fragments.join(''), source);
+    assert.equal(fragments.length, 200);
+    for (const fragment of fragments) {
+      assert.equal(fragment, sentence);
+      assert.ok(codepoints(`PROMPT:${fragment}`).input_ids.data.length + local.answerTokens(fragment.length) <= 512);
+    }
+    assert.equal(FakeEngine.inFlight.length, 0);
+    assert.equal(session.calls.pipelines, 0);
+  } finally { await finish([], session); }
+});
+
+test('the model context and configured total budget both constrain exact source planning', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  onnxhost.configure({ modelFiles: async (name: string) => new Blob([JSON.stringify(
+    name === 'config.json' ? { max_position_embeddings: 256, eos_token_id: 1 } : { eos_token_id: 1 }
+  )]) });
+  const source = 'あいうえお。'.repeat(40);
+  try {
+    for (const maxTokens of [128, 8192]) {
+      const result = await onnxhost.handle({
+        type: 'at/local-count', modelId: 'onnx-model', maxTokens, target: 'ko', texts: [source]
+      });
+      assert.equal(result.sourceChunks[0].join(''), source);
+      for (const fragment of result.sourceChunks[0]) {
+        assert.ok(fragment.endsWith('。'), 'fitting sentence boundaries are retained');
+        assert.ok(codepoints(`PROMPT:${fragment}`).input_ids.data.length + local.answerTokens(fragment.length)
+          <= Math.min(maxTokens, 256));
+      }
+    }
+    assert.equal(session.calls.pipelines, 0);
+  } finally { await finish([], session); }
+});
+
+test('structural repetition still fails without retry after script restrictions are removed', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate(translateRequest(ASK_ONE));
+    const rejected = assert.rejects(request, { reason: 'invalid-output' });
+    started.push(rejected);
+    await until('single translation', () => FakeEngine.inFlight.length === 1);
+    const job = FakeEngine.inFlight[0]!;
+    job.worker.answer(job, '반복되는 문장입니다. '.repeat(20));
+    await rejected;
+    assert.equal(FakeEngine.inFlight.length, 0);
+    assert.equal(session.calls.pipelines, 0);
+  } finally { await finish(started, session); }
 });

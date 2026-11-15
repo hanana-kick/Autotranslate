@@ -26,6 +26,7 @@ namespace AT.translationtext {
     col: true, ul: true, ol: true, menu: true, dl: true, picture: true,
     audio: true, video: true, iframe: true, object: true, embed: true,
     xmp: true, plaintext: true, noembed: true, noframes: true,
+    ruby: true, rb: true, rt: true, rp: true,
   };
   const STYLES = `
     :host {

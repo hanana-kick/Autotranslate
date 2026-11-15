@@ -109,7 +109,7 @@ test('one pass reads the page, plans it, and translates in plan order', async ()
     ['unknown:Hello there', 'navigation:Home'],
     'generic prose is primary content even without an article landmark'
   );
-  assert.ok(batches[0]?.context, 'the page context travels with the batch');
+  assert.equal(batches[0]?.context, undefined, 'page metadata stays in scheduling, not the prompt');
   assert.equal(translator.context()?.site, null);
   assert.ok(body);
 });
@@ -566,7 +566,7 @@ test('unchanged failed comment fragments do not consume every mutation tick', as
 });
 
 test('a failed bounded request does not discard the unattempted comments behind it', async () => {
-  for (const failure of ['throw', 'echo']) {
+  for (const failure of ['throw', 'empty']) {
     const fixture = page([
       { text: 'First reader comment', top: 100, attrs: { class: 'comment-body' } },
       { text: 'Second reader comment', top: 200, attrs: { class: 'comment-body' } }
@@ -578,7 +578,7 @@ test('a failed bounded request does not discard the unattempted comments behind 
         asked.push(...texts);
         if (asked.length === 1) {
           if (failure === 'throw') throw new Error('refused first comment');
-          return texts;
+          return texts.map(() => '');
         }
         return texts.map(text => `»${text}«`);
       }
@@ -866,12 +866,14 @@ test('a many-node comment does not hide the independent second lane behind the n
   });
   const running = translator.translate();
   for (let turn = 0; gates.length < 2 && turn < 20; turn++) await Promise.resolve();
-  assert.deepEqual(gates.map(gate => gate.texts), [
-    ['First original comment fragment'], ['Independent second comment']
-  ]);
+  const source = 'First original comment fragmentAnother fragment in the first commentThird fragment in the first comment';
+  assert.deepEqual(new Set(gates.flatMap(gate => gate.texts)), new Set([source, 'Independent second comment']));
+  assert.equal(gates.length, 2, 'both semantic units start before either completes');
   gates.forEach(gate => gate.resolve(gate.texts.map(text => text.toUpperCase())));
-  assert.equal((await running).hasMore, true, 'the first comment retains its unattempted siblings');
-  assert.equal(fixture.texts[1]!.nodeValue, 'Another fragment in the first comment');
+  assert.equal((await running).hasMore, false, 'merged siblings are completed together');
+  assert.equal(fixture.texts.slice(0, 3).map(node => node.nodeValue).join(''), source.toUpperCase());
+  translator.restore();
+  assert.equal(fixture.texts.slice(0, 3).map(node => node.nodeValue).join(''), source);
 });
 
 test('one visible reading unit borrows both fragment slots, idle prefetch stays serial', async () => {
@@ -961,7 +963,7 @@ test('whole-document slices finish offscreen support and exclude unmeasurable or
   assert.equal(translator.restore().restored, 4);
 });
 
-test('whole-document duplicate units share in-flight work while context remains isolated', async () => {
+test('duplicate units share one in-flight translation across page roles', async () => {
   const fixture = page([
     { text: 'Repeated source', top: 100 },
     { text: 'Repeated source', top: 200 },
@@ -978,7 +980,7 @@ test('whole-document duplicate units share in-flight work while context remains 
   });
   const running = translator.translate();
   await nextTurn();
-  assert.deepEqual(gates.map(gate => gate.role), ['unknown', 'navigation']);
+  assert.deepEqual(gates.map(gate => gate.role), ['unknown']);
   gates.forEach(gate => gate.resolve(['REPEATED SOURCE']));
   const result = await running;
   assert.equal(result.translated, 3);

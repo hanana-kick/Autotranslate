@@ -318,7 +318,7 @@ check('aligned inline text preserves the link and restores exact authored nodes'
   assert.equal(result.restored, true);
 });
 
-check('indexed segments never move unrelated words into a link including unspaced CJK', async (page) => {
+check('owner-bounded sources never move unrelated words into a link including unspaced CJK', async (page) => {
   const result = await page.evaluate(async () => {
     const root = document.querySelector('#fixture');
     root.innerHTML = '<h1>Inline link safety</h1><p>Read <a href="/privacy">privacy policy</a> before you continue.</p>';
@@ -584,7 +584,7 @@ check('long-lived virtualized DOM keeps bounded records and no extra provider wo
   assert.equal(result.final.cached, 0);
 });
 
-check('identical indexed inline units reuse the verified aligned cache', async (page) => {
+check('identical owner-bounded inline units reuse their translation cache', async (page) => {
   const result = await page.evaluate(async () => {
     const root = document.querySelector('#fixture');
     root.innerHTML = '<p>Read <a href="/guide">the guide</a> now.</p>'.repeat(2);
@@ -597,7 +597,7 @@ check('identical indexed inline units reuse the verified aligned cache', async (
     await translator.translateRoot(root);
     return { calls, links: [...root.querySelectorAll('a')].map(a => a.textContent) };
   });
-  assert.deepEqual(result.calls, [['Read', 'the guide', 'now.']], 'one indexed batch; the second identical inline unit is cached');
+  assert.deepEqual(result.calls.flat(), ['Read', 'the guide', 'now.'], 'each owned source is generated once');
   assert.deepEqual(result.links, ['안내서', '안내서']);
 });
 
@@ -746,7 +746,22 @@ check('aurora preserves inline geometry links and original Text identity', async
     }
   }));
   assert.deepEqual(await page.evaluate(async () => {
-    requests[0].resolve(requests[0].texts.map((_text, index) => ['자세한 소개를 읽으세요', '개인정보처리방침과 보관 관행', '다국어 기사를 계속하기 전에'][index]));
+    let finished = false;
+    void task.then(() => { finished = true; });
+    const translations = {
+      'Read this detailed introduction to': '자세한 소개를 읽으세요',
+      'our privacy policy and storage practices': '개인정보처리방침과 보관 관행',
+      'before continuing with the rest of this multilingual article.': '다국어 기사를 계속하기 전에'
+    };
+    let answered = 0;
+    for (let turn = 0; !finished && turn < 50; turn++) {
+      while (answered < requests.length) {
+        const request = requests[answered++];
+        request.resolve(request.texts.map(text => translations[text]));
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    if (!finished) throw new Error('owner-bounded requests did not settle');
     await task; link.click();
     const root = document.querySelector('#fixture');
     const translated = { sameLink: root.querySelector('a') === link, href: link.getAttribute('href'),
@@ -1160,4 +1175,80 @@ check('whole-document continuations finish offscreen source while hidden clipped
   assert.equal(result.scrollY, 0);
   assert.equal(result.restored, result.sources.length);
   assert.equal(result.exactRestore, true);
+});
+
+check('production page scheduling keeps ruby and formatted link labels whole without model markers', async (page) => {
+  for (const mode of ['aurora', 'immediate']) {
+    const result = await page.evaluate(async (mode) => {
+      const root = document.querySelector('#fixture');
+      root.innerHTML = '<p><ruby>年<rp>（</rp><rt>ねん</rt><rp>）</rp></ruby>金を<strong>受け取り</strong>ます。</p>' +
+        '<p><a href="/guide">詳しい<span>説明</span>を読む</a></p>' +
+        '<p>QuQu</p><p>年</p><code>保持するコード</code><p class="notranslate">翻訳しない</p><p contenteditable="true">入力欄です</p>';
+      const original = root.innerHTML;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      const sources = nodes.map(node => node.data);
+      const link = root.querySelector('a');
+      let clicked = 0;
+      link.addEventListener('click', event => { event.preventDefault(); clicked++; });
+      const requests = [];
+      const dictionary = { '年金を受け取ります。': '연금을 받습니다.', '詳しい説明を読む': '자세한 설명을 읽기', QuQu: 'QuQu' };
+      const pipeline = AT.pipeline.create({
+        doc: document, settings: () => ({ maxNodes: 100, translationConcurrency: 8 }),
+        workLimit: () => ({ maxChars: 0, maxTexts: 1 }),
+        presentation: AT.translationtext.create(document, mode),
+        translate: async ({ texts }) => { requests.push(...texts); return texts.map(text => dictionary[text] ?? ''); }
+      });
+      const pass = await pipeline.translate();
+      link.click();
+      const state = { requests, failed: pass.failed, error: pass.error,
+        paragraph: root.querySelector('p').textContent, ruby: root.querySelector('ruby').textContent,
+        link: link.textContent, href: link.getAttribute('href'), sameLink: root.querySelector('a') === link, clicked,
+        protected: [...root.querySelectorAll('code, .notranslate, [contenteditable]')].map(element => element.textContent),
+        noRubyWrappers: !root.querySelector('ruby at-translation-text'),
+        identities: nodes.every(node => root.contains(node)) };
+      pipeline.restore();
+      return { ...state, restored: root.innerHTML === original && nodes.every((node, index) => node.data === sources[index]) };
+    }, mode);
+    assert.deepEqual(new Set(result.requests), new Set(['年金を受け取ります。', '詳しい説明を読む', 'QuQu']));
+    assert.equal(result.requests.length, 3);
+    assert.equal(result.failed, 0);
+    assert.equal(result.error, null);
+    assert.equal(result.paragraph, '연금을 받습니다.');
+    assert.equal(result.ruby, '');
+    assert.equal(result.link, '자세한 설명을 읽기');
+    assert.equal(result.href, '/guide');
+    assert.equal(result.sameLink, true);
+    assert.equal(result.clicked, 1);
+    assert.equal(result.noRubyWrappers, true);
+    assert.deepEqual(result.protected, ['保持するコード', '翻訳しない', '入力欄です']);
+    assert.equal(result.identities, true);
+    assert.equal(result.restored, true);
+  }
+});
+
+check('a changed inline member invalidates the entire pending semantic answer', async (page) => {
+  const result = await page.evaluate(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = '<p>元の<span>文章</span>です。</p>';
+    const paragraph = root.firstChild, changed = root.querySelector('span').firstChild;
+    let release;
+    const requests = [];
+    const translator = AT.dom.createTranslator({ doc: document,
+      translate: texts => { requests.push(...texts); return new Promise(resolve => { release = resolve; }); } });
+    const pending = translator.translateRoot(root);
+    for (let turn = 0; !release && turn < 20; turn++) await Promise.resolve();
+    if (!release) throw new Error('semantic request was not dispatched');
+    changed.data = '編集された文章';
+    release(['오래된 번역']);
+    await pending;
+    const after = paragraph.textContent;
+    translator.restore();
+    return { requests, after, restored: paragraph.textContent, same: root.querySelector('span').firstChild === changed };
+  });
+  assert.deepEqual(result.requests, ['元の文章です。']);
+  assert.equal(result.after, '元の編集された文章です。');
+  assert.equal(result.restored, result.after);
+  assert.equal(result.same, true);
 });

@@ -99,7 +99,7 @@ namespace AT.kernelmatmul {
         let row = baseM + i / 64u;
         let output = baseN + i % 64u;
         if (row < info.rows && output < info.n) {
-          y[row * info.n + output] = ww[i];
+          y[row * info.n + output] = quantizeToF16(ww[i]);
         }
       }
     }
@@ -140,7 +140,7 @@ namespace AT.kernelmatmul {
         for (var j = 0u; j < 4u; j++) {
           let output = baseN + n * 4u + j;
           if (output < info.n) {
-            y[(baseM + m + ${r}u) * info.n + output] = c${r}[j];
+            y[(baseM + m + ${r}u) * info.n + output] = quantizeToF16(c${r}[j]);
           }
         }
       }`).join('');

@@ -16,7 +16,7 @@ async function fixture(run) {
   } finally { await page.close(); }
 }
 
-test('real line-clamped lyrics yield after visible lines, then expand without retranslating the prefix', async () => {
+test('real line-clamped lyrics translate completely before expansion without changing clipping', async () => {
   const result = await fixture(async () => {
     const root = document.querySelector('#fixture');
     root.innerHTML = '<div id="lyrics" style="width:360px;font:16px/24px monospace;white-space:pre-line;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden"></div><p id="ordinary">Other visible comment.</p>';
@@ -47,11 +47,12 @@ test('real line-clamped lyrics yield after visible lines, then expand without re
     translator.restore();
     return { initial, promoted, finished, prefixRequests, restored: node.nodeValue === source && element.firstChild === node };
   });
-  assert.deepEqual(result.initial.requests, ['First visible lyric.', 'Second visible lyric.', 'Other visible comment.']);
-  assert.equal(result.initial.partial.startsWith('FIRST VISIBLE LYRIC.\nSECOND VISIBLE LYRIC.\nHidden lyric number 0.'), true);
-  assert.equal(result.initial.pending, true);
-  assert.equal(result.initial.deferred, true);
-  assert.equal(result.initial.complete, false);
+  assert.deepEqual(result.initial.requests, ['First visible lyric.', 'Second visible lyric.',
+    ...Array.from({ length: 40 }, (_, i) => `Hidden lyric number ${i}.`), 'Other visible comment.']);
+  assert.equal(result.initial.partial.startsWith('FIRST VISIBLE LYRIC.\nSECOND VISIBLE LYRIC.\nHIDDEN LYRIC NUMBER 0.'), true);
+  assert.equal(result.initial.pending, false);
+  assert.equal(result.initial.deferred, false);
+  assert.equal(result.initial.complete, true);
   assert.equal(result.initial.identity, true);
   assert.equal(result.initial.style, true);
   assert.equal(result.promoted, true);
@@ -60,7 +61,7 @@ test('real line-clamped lyrics yield after visible lines, then expand without re
   assert.equal(result.restored, true);
 });
 
-test('clipped attributed text keeps its visible prefix bounded with the production shadow presentation', async () => {
+test('clipped attributed text sends full source with the production shadow presentation', async () => {
   const result = await fixture(async () => {
     const root = document.querySelector('#fixture');
     document.documentElement.style.overflow = 'visible';
@@ -84,12 +85,12 @@ test('clipped attributed text keeps its visible prefix bounded with the producti
     return { ...state, scrollY, bodyHeight: document.body.clientHeight,
       restored: element.firstChild === node && node.data === source && !root.querySelector('at-translation-text') };
   });
-  assert.equal(result.requests[0].includes('僕'), false, 'hidden lyrics never enter the visible-prefix request');
+  assert.equal(result.requests[0].includes('僕'), true, 'source meaning is independent of clipping');
   assert.equal(result.requests[1], 'Other visible comment.');
   assert.ok(result.scrollY > 0, 'the viewport has moved beyond the zero-height body origin');
   assert.equal(result.bodyHeight, 0);
-  assert.equal(result.pending, true);
-  assert.equal(result.complete, false);
+  assert.equal(result.pending, false);
+  assert.equal(result.complete, true);
   assert.equal(result.sourceSuffix, true);
   assert.equal(result.identity, true);
   assert.equal(result.restored, true);
@@ -130,7 +131,7 @@ test('committed preview handoff does not hide a clipped source continuation from
   assert.equal(result.restored, true);
 });
 
-test('nested scaled overflow clips use padding-box geometry and preserve bidi, blank lines and surrogate pairs', async () => {
+test('nested scaled overflow preserves full bidi text, blank lines and surrogate pairs', async () => {
   const result = await fixture(async () => {
     const root = document.querySelector('#fixture');
     root.innerHTML = '<section style="width:370px;height:54px;padding:4px;border:7px solid black;overflow:hidden;transform:scale(1.15);transform-origin:top left"><div id="text" dir="rtl" style="font:16px/24px monospace;white-space:pre-wrap"></div></section>';
@@ -152,15 +153,15 @@ test('nested scaled overflow clips use padding-box geometry and preserve bidi, b
     return { first, untouchedSuffix, finished, validUnicode, restored: node.nodeValue === source, identity: element.firstChild === node && element.childNodes.length === 1 };
   });
   assert.equal(result.first.includes('First English'), true);
-  assert.equal(result.first.includes('Third hidden'), false);
-  assert.equal(result.untouchedSuffix, true);
+  assert.equal(result.first.includes('Third hidden'), true);
+  assert.equal(result.untouchedSuffix, false);
   assert.equal(result.finished, true);
   assert.equal(result.validUnicode, true);
   assert.equal(result.restored, true);
   assert.equal(result.identity, true);
 });
 
-test('horizontal ellipsis clips and zero-width newline ranges do not drain a hidden suffix', async () => {
+test('horizontal ellipsis and zero-width newlines never truncate the model source', async () => {
   const results = await fixture(async () => {
     const root = document.querySelector('#fixture');
     const results = [];
@@ -189,7 +190,7 @@ test('horizontal ellipsis clips and zero-width newline ranges do not drain a hid
     }
     return results;
   });
-  for (const result of results) assert.deepEqual(result, { bounded: true, pending: true, finished: true, restored: true });
+  for (const result of results) assert.deepEqual(result, { bounded: false, pending: false, finished: true, restored: true });
 });
 
 test('restoring during a real clipped continuation discards its reply and retains Text identity', async () => {
@@ -203,6 +204,7 @@ test('restoring during a real clipped continuation discards its reply and retain
     let release;
     let first = true;
     const translator = AT.dom.createTranslator({ doc: document,
+      workLimit: () => ({ maxChars: 16, maxTexts: 1 }),
       translate: async (texts) => {
         if (first) { first = false; return texts.map((text) => text.toUpperCase()); }
         return new Promise((resolve) => { release = () => resolve(texts.map((text) => text.toUpperCase())); });
@@ -221,7 +223,7 @@ test('restoring during a real clipped continuation discards its reply and retain
   assert.deepEqual(result, { restored: true, identity: true, complete: false });
 });
 
-test('real clipping skips a target-language prefix before presentation and resumes the foreign source', async () => {
+test('real clipping preserves a target-language prefix while translating the full foreign remainder', async () => {
   const result = await fixture(async () => {
     const root = document.querySelector('#fixture');
     root.innerHTML = '<div style="font:16px/24px monospace;white-space:pre-wrap;height:24px;overflow:hidden;width:500px"></div>';
@@ -242,8 +244,8 @@ test('real clipping skips a target-language prefix before presentation and resum
       }
     });
     const first = await translator.translateNodes([node]);
-    const skipped = requests.length === 0 && events.length === 0 && first.failed === 0 &&
-      first.translated === 0 && first.pending.includes(node) && node.nodeValue === source;
+    const skipped = requests.length === 2 && events[0] === 'begin' && first.failed === 0 &&
+      first.translated === 1 && !first.pending.length && node.nodeValue.startsWith('이미 한국어입니다.\n');
     element.style.height = 'auto';
     await translator.translateNodes(first.pending);
     const finished = node.nodeValue === source.toUpperCase() && translator.has(node);
@@ -334,4 +336,33 @@ test('interactive quanta resume real unclipped and clipped inline comments with 
     assert.deepEqual(result.initial, { bounded: true, exactSuffix: true, untouchedInline: true, pending: true, incomplete: true });
     for (const [name, value] of Object.entries(result)) if (name !== 'initial') assert.equal(value, true, name);
   }
+});
+
+test('a clipped Japanese card title is translated in full and visually stays clipped', async () => {
+  const result = await fixture(async () => {
+    const root = document.querySelector('#fixture');
+    root.innerHTML = '<a href="/product" style="display:block;width:48px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font:16px monospace">3Dモデルの新しい衣装についての詳しい説明</a>';
+    const link = root.firstChild, node = link.firstChild;
+    const original = root.innerHTML, source = node.data, style = link.getAttribute('style');
+    const requests = [];
+    const translator = AT.dom.createTranslator({
+      doc: document, workLimit: () => ({ maxChars: 0, maxTexts: 1 }),
+      presentation: AT.translationtext.create(document, 'immediate'),
+      translate: async (texts) => { requests.push(...texts); return ['3D 모델의 새로운 의상에 대한 자세한 설명']; }
+    });
+    const beforeWidth = link.getBoundingClientRect().width;
+    await translator.translateRoot(root);
+    const translated = node.data;
+    const clipped = getComputedStyle(link).textOverflow === 'ellipsis' &&
+      link.scrollWidth > link.clientWidth && link.getBoundingClientRect().width === beforeWidth;
+    const keptStyle = link.getAttribute('style') === style;
+    translator.restore();
+    return { requests, source, translated, clipped, keptStyle,
+      restored: root.innerHTML === original && link.firstChild === node };
+  });
+  assert.deepEqual(result.requests, [result.source]);
+  assert.equal(result.translated, '3D 모델의 새로운 의상에 대한 자세한 설명');
+  assert.equal(result.clipped, true);
+  assert.equal(result.keptStyle, true);
+  assert.equal(result.restored, true);
 });

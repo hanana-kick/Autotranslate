@@ -54,12 +54,9 @@ function stubSend(reply: (message: ATNamespace) => unknown, counts?: (message: A
   sent = [];
   AT.sendMessage = async (message: ATNamespace) => {
     sent.push(message);
-    // The engine asks the host for real token counts before it packs; a stub
-    // that answers everything as a translation would starve that path. The
-    // default failure makes every test without explicit counts exercise the
-    // character-estimate fallback.
+    // The host plans complete source coverage using its resident tokenizer.
     if (message.type === AT.C.MSG.LOCAL_COUNT) {
-      return counts ? counts(message) : { ok: false, error: 'no counts' };
+      return counts ? counts(message) : { ok: true, sourceChunks: message.texts.map((text: string) => [text]) };
     }
     return reply(message);
   };
@@ -134,29 +131,6 @@ test('local: an explicit source skips the detector', async () => {
   assert.equal((translates()[0] as ATNamespace).source, 'ja');
 });
 
-test('local: the region of the page joins the page context in one line', async () => {
-  stubSend(() => ({ ok: true, translations: ['안녕'] }));
-  const context = {
-    kind: 'news', site: 'Example News', title: 'Headline', section: 'Politics',
-    sections: [], language: 'en', summary: null, tags: [], entities: [], glossary: []
-  };
-  await localModel({ context, role: 'comment' });
-  assert.equal(
-    (translates()[0] as ATNamespace).context,
-    'This is a news article in the Politics section from Example News. These are reader comments.',
-    'the region decides register: a comment is not prose'
-  );
-
-  await localModel({ context, role: 'article' });
-  assert.equal(
-    (translates()[1] as ATNamespace).context,
-    'This is a news article in the Politics section from Example News.',
-    'article text adds no line of its own'
-  );
-
-  await localModel({ context: null, role: 'navigation' });
-  assert.equal((translates()[2] as ATNamespace).context, 'These are navigation labels.');
-});
 
 test('local: the target is the model code, not the picker code', async () => {
   stubSend(() => ({ ok: true, translations: ['你好'] }));
@@ -197,53 +171,24 @@ test('local: a picker code the model cannot express fails as no-target', async (
   assert.equal(translates().length, 0, 'no generation is attempted');
 });
 
-test('local: the page context becomes one bounded line for the host', async () => {
-  stubSend(() => ({ ok: true, translations: ['안녕'] }));
-  const context = {
-    kind: 'news',
-    site: 'Example News',
-    title: 'Headline',
-    section: 'Politics',
-    language: 'en',
-    summary: null,
-    tags: []
-  };
-  await localModel({ context });
-  assert.equal(
-    (translates()[0] as ATNamespace).context,
-    'This is a news article in the Politics section from Example News.',
-    'the analyzer renders the line, the host only pastes it'
-  );
 
-  await localModel({ context: null });
-  assert.equal((translates()[1] as ATNamespace).context, '', 'no context, no line');
-
-  await localModel({ context: { ...context, kind: 'unknown', site: 'example.com' } });
-  assert.equal((translates()[2] as ATNamespace).context, '', 'a host alone is not context');
-});
-
-test('local: a token budget splits the work and the answers stay in order', async () => {
-  // 900 Latin characters are ~150 tokens each, and a chunk pays for input and
-  // its answer: two fit in 1024, three do not.
+test('local: independent prompts keep every requested source and answer in order', async () => {
   const texts = Array.from({ length: 5 }, (_unused, index) => `s${index} ${'x'.repeat(897)}`);
   stubSend((message) => ({ ok: true, translations: message.texts.map((text: string) => `[${text.slice(0, 2)}]`) }));
   const result = await localModel({ texts, localMaxTokens: 1024 });
   assert.deepEqual(
     translates().map((call) => call.texts.length),
-    [2, 2, 1],
-    'each chunk stays inside the budget'
+    [1, 1, 1, 1, 1],
+    'each source has an independent prompt'
   );
   assert.deepEqual(result.translations, texts.map((text) => `[${text.slice(0, 2)}]`));
 });
 
-test('local: Korean packs by script-aware estimate, not by Latin characters', async () => {
-  // The same character count is worth ~3.4x the tokens in Hangul (1.82
-  // characters per token against 6.12 for Latin), so a batch that looks small
-  // by length must still be split when the host cannot count.
+test('local: long Korean sources retain coverage through tokenizer plans', async () => {
   const korean = Array.from({ length: 4 }, (_unused, index) => `${index}번째 ` + '인공지능 번역 모델은 문장의 의미와 뉘앙스를 정확하게 전달해야 하며, 원문의 문체와 문화적 맥락을 함께 고려해야 합니다. '.repeat(4));
   stubSend((message) => ({ ok: true, translations: message.texts.map(() => '번역') }));
   await localModel({ texts: korean, localMaxTokens: 1024, source: 'ko', target: 'en' });
-  assert.ok(translates().length >= 2, 'the Latin-sized batch would have overflowed the context');
+  assert.equal(translates().length, korean.length);
   assert.equal(
     translates().reduce((sum, call) => sum + call.texts.length, 0),
     korean.length,
@@ -285,13 +230,13 @@ test('local: mixed batches skip only proven target fragments and retain every po
   detector.answer = { isReliable: true, languages: [{ language: 'ko', percentage: 99 }] };
   stubSend(
     message => ({ ok: true, translations: message.texts.map((text: string) => '번역: ' + text) }),
-    message => ({ ok: true, counts: message.texts.map(() => 10), overhead: 10 })
+    message => ({ ok: true, sourceChunks: message.texts.map((text: string) => [text]) })
   );
   const texts = [korean, 'Hello', korean, mixed, 'Hello', '감사합니다', '日本語'];
   const result = await localModel({ texts });
   const eligible = ['Hello', mixed, '日本語'];
   assert.deepEqual(sent.find(message => message.type === AT.C.MSG.LOCAL_COUNT)?.texts, eligible);
-  assert.deepEqual(translates()[0]?.texts, eligible);
+  assert.deepEqual(translates().flatMap(message => message.texts), eligible);
   assert.deepEqual(result.translations, [korean, '번역: Hello', korean, '번역: ' + mixed, '번역: Hello', '감사합니다', '번역: 日本語']);
   assert.equal(result.requested, 3, 'only unique eligible fragments count, regardless of detector majority');
 });
@@ -336,20 +281,19 @@ test('local: the host explanation reaches the user', async () => {
 });
 
 test('local: a reply that does not match the request is refused', async () => {
-  stubSend(() => ({ ok: true, translations: ['only one'] }));
+  stubSend(() => ({ ok: true, translations: [] }));
   await assert.rejects(
     () => localModel({ texts: ['hello there', 'goodbye now'] }),
     (thrown) => {
       const error = engineError(thrown);
-      return error.code === 'format' && error.reason === 'count' && error.expected === 2 && error.got === 1;
+      return error.code === 'format' && error.reason === 'count' && error.expected === 1 && error.got === 0;
     }
   );
 });
 
-test('local: an empty answer remains incomplete for the DOM layer', async () => {
-  stubSend(() => ({ ok: true, translations: ['', '안녕'] }));
-  const result = await localModel({ texts: ['hello', 'goodbye'] });
-  assert.deepEqual(result.translations, ['', '안녕']);
+test('local: an empty answer rejects the operation instead of completing partial output', async () => {
+  stubSend(() => ({ ok: true, translations: [''] }));
+  await assert.rejects(localModel({ texts: ['hello', 'goodbye'] }), /unusable fragment/);
 });
 
 test('local: test() probes through the same host', async () => {
@@ -362,13 +306,10 @@ test('local: test() probes through the same host', async () => {
   assert.equal(translates()[0]!.texts.length, 1);
 });
 
-test('local: the host counts tokens, and the packing obeys those counts', async () => {
-  // The host owns the tokenizer, so the engine asks before it packs. These
-  // counts say each text is 500 tokens: two of them plus the instruction do
-  // not fit in 1024, and no character arithmetic is involved.
+test('local: the host plans fragments and generation obeys those boundaries', async () => {
   stubSend(
     (message) => ({ ok: true, translations: message.texts.map(() => '번역') }),
-    (message) => ({ ok: true, counts: message.texts.map(() => 500), overhead: 90 })
+    (message) => ({ ok: true, sourceChunks: message.texts.map((text: string) => [text]) })
   );
   const texts = ['alpha', 'beta', 'gamma'];
   await localModel({ texts, localMaxTokens: 1024 });
@@ -378,30 +319,14 @@ test('local: the host counts tokens, and the packing obeys those counts', async 
   assert.deepEqual(
     translates().map((call) => call.texts),
     [['alpha'], ['beta'], ['gamma']],
-    'one text per generation: 90 + 2 x 500 already exceeds the budget'
+    'the exact plan is dispatched without regrouping or numbering'
   );
 });
 
-test('local: a host that cannot count falls back to character estimates', async () => {
-  stubSend(
-    (message) => ({ ok: true, translations: message.texts.map((text: string) => text.toUpperCase()) }),
-    () => ({ ok: false, error: 'the tokenizer did not load' })
-  );
-  const warnings: unknown[][] = [];
-  const originalWarn = AT.warn;
-  AT.warn = (...args: unknown[]) => {
-    warnings.push(args);
-  };
-  try {
-    const result = await localModel({ texts: ['one', 'two'], localMaxTokens: 1024 });
-    assert.deepEqual(result.translations, ['ONE', 'TWO']);
-  } finally {
-    AT.warn = originalWarn;
-  }
-  assert.equal(translates().length, 1, 'small texts still pack together');
-  assert.deepEqual(translates()[0]!.texts, ['one', 'two']);
-  assert.equal(warnings.length, 1, 'the fallback is announced, not silent');
-  assert.match(String(warnings[0]![0]), /did not count tokens/);
+test('local: unavailable tokenizer fails without estimated packing or generation', async () => {
+  stubSend(() => assert.fail('must not generate'), () => ({ ok: false, error: 'the tokenizer did not load' }));
+  await assert.rejects(localModel({ texts: ['one', 'two'] }), /tokenizer did not load/);
+  assert.equal(translates().length, 0);
 });
 
 test('local: streamed indices survive counts, chunking, deduplication and skipped target text', async t => {
@@ -413,7 +338,7 @@ test('local: streamed indices survive counts, chunking, deduplication and skippe
   AT.local.callHost = async (message: ATNamespace, onProgress?: (index: number, text: string) => void) => {
     requests.push(message);
     assert.equal(message.onProgress, undefined);
-    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, counts: message.texts.map(() => 500), overhead: 90 };
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, sourceChunks: message.texts.map((text: string) => [text]) };
     previous?.(0, '늦은 응답');
     previous = onProgress;
     onProgress?.(0, '초안');
@@ -442,7 +367,7 @@ test('local: an invalid final count clears streamed duplicates and rejects stale
   const seen: [number, string][] = [];
   let stale: ((index: number, text: string) => void) | undefined;
   AT.local.callHost = async (message: ATNamespace, progress?: (index: number, text: string) => void) => {
-    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, counts: [10], overhead: 10 };
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, sourceChunks: message.texts.map((text: string) => [text]) };
     stale = progress;
     progress?.(0, '안녕');
     return { ok: true, translations: [] };
@@ -458,7 +383,7 @@ test('local: cancellation clears previews even when the host completes later', a
   const controller = new AbortController();
   const seen: string[] = [];
   AT.local.callHost = async (message: ATNamespace, progress?: (index: number, text: string) => void) => {
-    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, counts: [10], overhead: 10 };
+    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, sourceChunks: message.texts.map((text: string) => [text]) };
     progress?.(0, '안녕');
     controller.abort();
     progress?.(0, '늦은 응답');
@@ -492,8 +417,10 @@ test('local: preaborted requests do not count and cancellation skips subsequent 
   const calls: string[] = [];
   AT.local.callHost = async (message: ATNamespace, _progress: unknown, signal: AbortSignal) => {
     calls.push(message.type);
-    assert.equal(signal, controller.signal);
-    if (message.type === AT.C.MSG.LOCAL_COUNT) return { ok: true, counts: [500, 500], overhead: 90 };
+    if (message.type === AT.C.MSG.LOCAL_COUNT) {
+      assert.equal(signal, controller.signal);
+      return { ok: true, sourceChunks: message.texts.map((text: string) => [text]) };
+    }
     controller.abort();
     return { ok: true, translations: ['번역'] };
   };
@@ -516,7 +443,7 @@ test('interactive fragments hide out-of-order completion and preserve duplicate 
     gates.push({ progress, resolve: gate.resolve });
     return gate.promise;
   };
-  const result = localModel({ texts: [source, source], source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2,
+  const result = localModel({ texts: [source, source], source: 'ja', fragmentConcurrency: 2,
     onProgress: (index: number, text: string) => seen.push([index, text]) });
   for (let turn = 0; gates.length < 2 && turn < 30; turn++) await Promise.resolve();
   assert.equal(gates.length, 2);
@@ -548,7 +475,7 @@ test('interactive fragment failure aborts its sibling, clears preview and never 
     gates.push({ signal, progress, resolve: gate.resolve });
     return gate.promise;
   };
-  const result = localModel({ texts: [parts.join('')], source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2,
+  const result = localModel({ texts: [parts.join('')], source: 'ja', fragmentConcurrency: 2,
     onProgress: (_index: number, text: string) => seen.push(text) });
   const rejected = assert.rejects(result, /unusable fragment/);
   for (let turn = 0; gates.length < 2 && turn < 30; turn++) await Promise.resolve();
@@ -564,8 +491,8 @@ test('interactive fragment failure aborts its sibling, clears preview and never 
 });
 
 test('interactive source planning never silently falls back to character estimates', async () => {
-  stubSend(() => { throw new Error('must not generate'); });
-  await assert.rejects(localModel({ texts: ['図書館からのお知らせです。'], sourceChunkTokens: 64 }), /no counts/);
+  stubSend(() => { throw new Error('must not generate'); }, () => ({ ok: false, error: 'no counts' }));
+  await assert.rejects(localModel({ texts: ['図書館からのお知らせです。'] }), /no counts/);
   assert.equal(translates().length, 0);
 });
 
@@ -586,7 +513,6 @@ function fragmentHost(plans: Map<string, string[]>) {
   let peak = 0;
   AT.local.callHost = async (message: ATNamespace, progress: FragmentGate['progress'], signal: AbortSignal) => {
     if (message.type === AT.C.MSG.LOCAL_COUNT) {
-      assert.equal(message.sourceChunkTokens, 64);
       return { ok: true, sourceChunks: message.texts.map((text: string) => plans.get(text) ?? [text]) };
     }
     assert.equal(message.type, AT.C.MSG.LOCAL_TRANSLATE);
@@ -606,7 +532,7 @@ test('shared fragment slots lend a completed short unit slot to the unfinished l
   const source = parts.join('');
   const { gates, peak } = fragmentHost(new Map([[source, parts]]));
   const fragmentScheduler = engines.createFragmentScheduler(2);
-  const common = { source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2, fragmentScheduler };
+  const common = { source: 'ja', fragmentConcurrency: 2, fragmentScheduler };
   const short = localModel({ ...common, texts: ['今日は晴れです。'] });
   await flushFragments();
   const seen: string[] = [];
@@ -633,7 +559,7 @@ test('shared serial admission caps overlapping parallel fragment requests at one
   const parts = ['図書館を開きます。', '本を借りられます。'];
   const source = parts.join('');
   const { gates, peak } = fragmentHost(new Map([[source, parts]]));
-  const common = { source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(1) };
+  const common = { source: 'ja', fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(1) };
   const first = localModel({ ...common, texts: [source] });
   const second = localModel({ ...common, texts: ['今日は晴れです。'] });
   await flushFragments();
@@ -652,7 +578,7 @@ test('queued fragment cancellation never generates or publishes and leaves other
   const originalHost = AT.local.callHost;
   t.after(() => { AT.local.callHost = originalHost; });
   const { gates } = fragmentHost(new Map());
-  const common = { source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(1) };
+  const common = { source: 'ja', fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(1) };
   const survivor = localModel({ ...common, texts: ['今日は晴れです。'] });
   await flushFragments();
   const controller = new AbortController();
@@ -682,7 +608,7 @@ test('fragment failure removes only its queued siblings before lending the slot 
   const parts = ['図書館を開きます。', '本を借りられます。', '予約もできます。'];
   const source = parts.join('');
   const { gates, peak } = fragmentHost(new Map([[source, parts]]));
-  const common = { source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(2) };
+  const common = { source: 'ja', fragmentConcurrency: 2, fragmentScheduler: engines.createFragmentScheduler(2) };
   const survivor = localModel({ ...common, texts: ['今日は晴れです。'] });
   await flushFragments();
   const seen: string[] = [];
@@ -713,7 +639,7 @@ for (const width of [1, 2, 4, 8]) {
     const parts = Array.from({ length: 10 }, () => '図書館を開きます。');
     const source = parts.join('');
     const { gates, peak } = fragmentHost(new Map([[source, parts]]));
-    const result = localModel({ texts: [source], source: 'ja', sourceChunkTokens: 64, fragmentConcurrency: width });
+    const result = localModel({ texts: [source], source: 'ja', fragmentConcurrency: width });
     await flushFragments();
     assert.equal(gates.length, width);
     for (let index = 0; index < parts.length; index++) {

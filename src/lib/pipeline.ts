@@ -6,7 +6,7 @@
 //
 // One pass is: read the page's metadata once, take a snapshot of its text, ask
 // `targets` for a plan (visible reading order, adjacent texts of the same role), and hand
-// each group to the batch callback with the page context and the group's role.
+// each group to the batch callback. Page structure remains local to scheduling.
 // The callback is the only thing this module knows about the outside world, so
 // the whole flow is testable without a browser or a model.
 // Load after lib/constants.js, lib/pagecontext.js, lib/targets.js and lib/dom.js.
@@ -21,7 +21,6 @@ namespace AT.pipeline {
   export type Batch = {
     texts: string[];
     role: AT.targets.TextRole;
-    context: AT.pagecontext.PageContext | null;
     onProgress?: AT.TranslationProgress | undefined;
     signal?: AbortSignal | undefined;
     /** Shares the page's selected slots between units and their fragments. */
@@ -450,7 +449,7 @@ namespace AT.pipeline {
         workLimit: request.workLimit ?? (() => viewportMode ? viewportWork : ordinaryWork),
         shouldAbort: request.shouldAbort,
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
-        translate: (texts, onProgress, signal) => request.translate({ texts, role: 'unknown', context, onProgress, signal })
+        translate: (texts, onProgress, signal) => request.translate({ texts, role: 'unknown', onProgress, signal })
       });
       return translator;
     }
@@ -608,7 +607,6 @@ namespace AT.pipeline {
           .map((id) => ordered[Number(id)])
           .filter((node): node is Text => node !== undefined && node.isConnected !== false && !dom.has(node));
         if (subset.length === 0) return;
-        const jobContext = context;
         const jobEngagement = engagement && subset.some(node => engagement!.root.contains(node)) ? engagement : null;
         let jobRequests = 0;
         const unit = unitOf(subset[0]!);
@@ -617,14 +615,14 @@ namespace AT.pipeline {
         }
         continuity.set(unit, (continuity.get(unit) ?? 0) + 1);
         const execution: AT.dom.Execution = {
+          cacheScope: '',
           ready,
-          cacheScope: JSON.stringify([jobContext, group.role]),
           shouldYield: () => replanned || (viewportMode && jobRequests > 0),
           translate: (texts, onProgress, signal) => {
             batches++;
             jobRequests++;
             dispatched++;
-            return request.translate({ texts, role: group.role, context: jobContext, onProgress, signal,
+            return request.translate({ texts, role: group.role, onProgress, signal,
               fragmentConcurrency: prefetch ? 1 : concurrency });
           }
         };

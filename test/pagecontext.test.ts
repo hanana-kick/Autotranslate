@@ -86,10 +86,6 @@ test('a news article is recognised, with its section and site', () => {
   assert.equal(context.section, 'Politics');
   assert.equal(context.language, 'en-GB');
   assert.equal(context.summary, 'Who won where, and by how much.', 'whitespace is collapsed');
-  assert.equal(
-    pagecontext.hint(context),
-    'This is a news article in the Politics section from Example News.'
-  );
 });
 
 test('the markup beats the URL, and the site name beats the host', () => {
@@ -103,18 +99,15 @@ test('the markup beats the URL, and the site name beats the host', () => {
   );
   assert.equal(product.kind, 'product', 'og:type wins over the path');
   assert.equal(product.site, 'Example Shop');
-  assert.equal(pagecontext.hint(product), 'This is a product page from Example Shop.');
 });
 
 test('a page with no markup is unknown, and says nothing it cannot back', () => {
   const context = pagecontext.analyze(pagecontext.collect(document_({ href: 'https://example.com/' })));
   assert.equal(context.kind, 'unknown');
   assert.equal(context.site, 'example.com', 'the host is the last resort for a site name');
-  assert.equal(pagecontext.hint(context), null, 'a host alone is not worth a prompt line');
 
   const nothing = pagecontext.analyze(pagecontext.collect(document_({})));
   assert.equal(nothing.site, null);
-  assert.equal(pagecontext.hint(nothing), null, 'a blank page adds no context line');
 });
 
 test('docs sites are recognised from the generator, not only the host', () => {
@@ -127,7 +120,6 @@ test('docs sites are recognised from the generator, not only the host', () => {
     )
   );
   assert.equal(context.kind, 'docs');
-  assert.equal(pagecontext.hint(context), 'This is technical documentation.');
 });
 
 test('schema.org types are read without parsing the whole script', () => {
@@ -266,7 +258,7 @@ test('structured data yields the entities the page declares', () => {
   );
 });
 
-test('the page names its subjects in the hint, within one line', () => {
+test('the page retains its named subjects for structure analysis', () => {
   const context = pagecontext.analyze(
     pagecontext.collect(
       document_({
@@ -290,14 +282,11 @@ test('the page names its subjects in the hint, within one line', () => {
       })
     )
   );
-  assert.equal(
-    pagecontext.hint(context),
-    'This is a news article in the Politics section from Example News. ' +
-      'It mentions the budget, Alice Smith and Bob Jones.',
-  );
+  assert.deepEqual(context.entities.map((entity: { name: string }) => entity.name),
+    ['the budget', 'Alice Smith', 'Bob Jones', 'Carol White', 'Dave Brown']);
 });
 
-test('an unnamed page still gets a topic line when it names something', () => {
+test('an unnamed page retains its declared topic without guessing a kind', () => {
   const context = pagecontext.analyze(
     pagecontext.collect(
       document_({
@@ -307,7 +296,7 @@ test('an unnamed page still gets a topic line when it names something', () => {
     )
   );
   assert.equal(context.kind, 'unknown');
-  assert.equal(pagecontext.hint(context), 'This text is about entropy.');
+  assert.equal(context.entities[0].name, 'entropy');
 });
 
 test('navigation labels become the site sections, without the page name', () => {
@@ -330,7 +319,6 @@ test('navigation labels become the site sections, without the page name', () => 
     )
   );
   assert.deepEqual(context.sections, ['World', 'Politics', 'Business']);
-  assert.equal(pagecontext.hint(context), null, 'sections alone are not a page kind');
 });
 
 test('a term list is read from dl pairs and abbr titles', () => {
@@ -418,7 +406,6 @@ test('a shop that lists every variant in JSON-LD is still one product page', () 
   );
   assert.equal(context.kind, 'product');
   assert.deepEqual(context.entities, [], 'no catalogue entries, no locale marker');
-  assert.equal(pagecontext.hint(context), 'This is a product page from IKEA.');
 });
 
 test('a forum is recognised from its platform alone', () => {
@@ -432,7 +419,6 @@ test('a forum is recognised from its platform alone', () => {
     )
   );
   assert.equal(context.kind, 'forum');
-  assert.equal(pagecontext.hint(context), 'This is a forum discussion from Discourse Meta.');
 });
 
 test('a page whose markup claims nothing stays unknown and silent', () => {
@@ -446,5 +432,4 @@ test('a page whose markup claims nothing stays unknown and silent', () => {
     )
   );
   assert.equal(context.kind, 'unknown');
-  assert.equal(pagecontext.hint(context), null, 'the model is not told a guess');
 });

@@ -221,33 +221,6 @@ namespace AT.targets {
   }
 
 
-  /**
-   * One line that tells the model what kind of text this is. The page context
-   * already says what the page is; this says what the *batch* is, which is what
-   * decides register — a menu label is not prose.
-   */
-  export function roleHint(role: TextRole | null | undefined): string | null {
-    switch (role) {
-      case 'comment':
-        return 'These are reader comments.';
-      case 'heading':
-        return 'These are headings.';
-      case 'navigation':
-        return 'These are navigation labels.';
-      case 'list':
-        return 'These are items in a list.';
-      case 'form':
-        return 'These are form labels and buttons.';
-      case 'metadata':
-        return 'These are short metadata lines, such as dates and authors.';
-      case 'aside':
-        return 'These are sidebar notes.';
-      case 'footer':
-        return 'These are footer links.';
-      default:
-        return null;
-    }
-  }
 
   const ROLES: Record<string, TextRole | undefined> = {
     article: 'article',
@@ -267,32 +240,6 @@ namespace AT.targets {
     return typeof raw === 'string' ? ROLES[raw] ?? 'unknown' : 'unknown';
   }
 
-  /**
-   * The share of the prompt that page and region lines may take, in characters
-   * (~40 tokens, 8% of the input available at `localMaxTokens: 1024`). Above
-   * that the policy is to drop lines, not to grow the context: measured, a
-   * full metadata block (glossary, sections, entities) costs up to 382 tokens
-   * on a docs page — 75% of that input budget — so it stays out of the prompt
-   * and is kept for consistency work instead.
-   */
-  export const CONTEXT_MAX_CHARS = 240;
-
-  /**
-   * The context line for one batch: what the page is, then what this batch is.
-   * The page line goes first because everything else is relative to it; the
-   * region line only exists for regions where register matters (a menu label is
-   * not prose). Clamped to `CONTEXT_MAX_CHARS` on a word boundary.
-   */
-  export function composeContext(pageHint: string | null | undefined, roleHint: string | null | undefined): string {
-    const lines = [pageHint, roleHint]
-      .map((line) => (typeof line === 'string' ? line.trim() : ''))
-      .filter((line) => line.length > 0);
-    const joined = lines.join(' ');
-    if (!joined || joined.length <= CONTEXT_MAX_CHARS) return joined;
-    const cut = joined.slice(0, CONTEXT_MAX_CHARS);
-    const space = cut.lastIndexOf(' ');
-    return (space > CONTEXT_MAX_CHARS / 2 ? cut.slice(0, space) : cut).replace(/[,;:]$/, '');
-  }
 
   /**
    * Sentences, so a batch can be cut at a boundary instead of mid-clause.

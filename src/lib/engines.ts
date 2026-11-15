@@ -162,10 +162,6 @@ namespace AT.engines {
     signal?: AbortSignal;
     /** Cumulative decoded preview; empty text clears an earlier attempt. */
     onProgress?: AT.TranslationProgress | undefined;
-    /** What kind of page the texts came from, if the caller knows. */
-    context?: AT.pagecontext.PageContext | null;
-    /** Which part of the page these texts came from. */
-    role?: AT.targets.TextRole | null;
     texts?: unknown[];
     /** 'auto' or a C.LANGS code */
     source?: string;
@@ -173,8 +169,6 @@ namespace AT.engines {
     /** model id; empty means nothing is selected and the call is a config error */
     localModelId?: string;
     localMaxTokens?: number;
-    /** Interactive pages opt into exact tokenizer-bounded source fragments. */
-    sourceChunkTokens?: number;
     fragmentConcurrency?: AT.settings.TranslationConcurrency;
     /** Internal shared admission, independent of this request's worker count. */
     fragmentScheduler?: FragmentScheduler;
@@ -213,15 +207,7 @@ namespace AT.engines {
       texts: args.texts,
       source: source ?? '',
       target,
-      maxTokens: args.localMaxTokens,
-      // Rendered once, here: the host only has to paste bounded lines. The page
-      // says what the site is; the region says what this batch is (a menu, a
-      // comment), which is what decides register. The budget is fixed in
-      // `AT.targets.composeContext`: above it, the line is cut, not grown.
-      context: AT.targets.composeContext(
-        AT.pagecontext.hint(args.context ?? null),
-        AT.targets.roleHint(args.role ?? null)
-      )
+      maxTokens: args.localMaxTokens
     }, args.onProgress, args.signal);
     AT.local.throwIfAborted(args.signal);
     if (!reply?.ok) {
@@ -243,15 +229,6 @@ namespace AT.engines {
     return { translations, detected };
   }
 
-  /** Chunk indices are never the caller's indices after filtering and deduplication. */
-  function mappedProgress(originals: string[], chunk: string[], progress?: AT.TranslationProgress): AT.TranslationProgress | undefined {
-    if (!progress) return undefined;
-    const positions = chunk.map(text => originals.flatMap((original, index) => original === text ? [index] : []));
-    return (index, text) => {
-      if (!Number.isInteger(index) || typeof text !== 'string') return;
-      for (const position of positions[index] ?? []) progress(position, text);
-    };
-  }
 
   export async function translate(request: TranslateRequest = {}): Promise<TranslateResult> {
     let active = true;
@@ -291,7 +268,7 @@ namespace AT.engines {
   /** Parallel generation, but only the contiguous source-order prefix is visible. */
   async function translateFragments(
     request: TranslateRequest & { target: string; localModelId: string; localMaxTokens: number },
-    originals: string[], unique: string[], plans: string[][], countMs: number
+    originals: string[], unique: string[], plans: string[][], countMs: number, resolvedSource: ResolvedSource
   ): Promise<TranslateResult> {
     const started = Date.now();
     const controller = new AbortController();
@@ -302,7 +279,6 @@ namespace AT.engines {
     const states = plans.map(parts => parts.map(() => ({ text: '', done: false })));
     const jobs = plans.flatMap((parts, unit) => parts.map((text, part) => ({ text, unit, part })));
     const positions = unique.map(text => originals.flatMap((original, index) => original === text ? [index] : []));
-    const sources = unique.map(text => resolveSource(request.source, [text]));
     let cursor = 0;
     const joined = (parts: string[]) => parts.map(text => text.trim()).filter(Boolean).join(/^(ja|zh)(-|$)/u.test(request.target) ? '' : ' ');
     const publish = (unit: number) => {
@@ -320,7 +296,7 @@ namespace AT.engines {
           AT.local.throwIfAborted(controller.signal);
           const job = jobs[cursor++]!;
           const state = states[job.unit]![job.part]!;
-          const resolved = await sources[job.unit]!;
+          const resolved = resolvedSource;
           const generate = async () => {
             try {
               const result = await translateChunk({
@@ -359,10 +335,9 @@ namespace AT.engines {
       await Promise.all(Array.from({ length: Math.min(jobs.length, width) }, run));
       AT.local.throwIfAborted(controller.signal);
       const outputs = new Map(unique.map((text, index) => [text, joined(states[index]!.map(part => part.text))]));
-      const resolved = await Promise.all(sources);
       return {
         translations: originals.map(text => outputs.get(text) ?? text),
-        detected: resolved.find(source => source.detected)?.detected ?? null,
+        detected: resolvedSource.detected,
         requested: unique.length,
         timing: { countMs, hostMs: Date.now() - started, chunks: jobs.length }
       };
@@ -388,77 +363,32 @@ namespace AT.engines {
     const unique = [...new Set(pending)];
     if (unique.length === 0) return { translations: originals, detected: null, requested: 0 };
 
-    /**
-     * The model is sized by tokens, so the packing asks the host — which owns
-     * the tokenizer — how many tokens each text is, rather than dividing
-     * characters by a constant. The estimate is only the fallback for a host
-     * that cannot answer (an older document, a failed load).
-     */
+    // Planning and generation use the same resolved language and tokenizer.
+    const resolved = await resolveSource(source, unique);
+    AT.local.throwIfAborted(request.signal);
     const countStarted = Date.now();
     const counted = await AT.local.callHost({
       type: C.MSG.LOCAL_COUNT,
       modelId: localModelId,
       maxTokens: localMaxTokens,
       texts: unique,
-      ...(request.sourceChunkTokens ? { sourceChunkTokens: request.sourceChunkTokens } : {}),
-      source: AT.plamo3.langFor(source) ?? '',
-      target: AT.plamo3.langFor(target) ?? '',
-      context: AT.pagecontext.hint(request.context ?? null) ?? ''
+      source: resolved.lang ?? '',
+      target: AT.plamo3.langFor(target) ?? ''
     }, undefined, request.signal);
     AT.local.throwIfAborted(request.signal);
     if (counted?.code === 'cancelled') throw AT.local.cancelled();
     const countMs = Date.now() - countStarted;
-    if (request.sourceChunkTokens) {
-      if (!counted?.ok) {
-        throw new EngineError(LOCAL_CODES[String(counted?.code)] ?? 'provider',
-          String(counted?.error ?? 'the host did not plan source fragments'));
-      }
-      const plans = counted?.sourceChunks;
-      if (!counted?.ok || !Array.isArray(plans) || plans.length !== unique.length ||
-          plans.some((parts, index) => !Array.isArray(parts) || !parts.length ||
-            parts.some(part => typeof part !== 'string' || !part.trim()) || parts.join('') !== unique[index])) {
-        throw new EngineError('provider', String(counted?.error ?? 'the host did not plan source fragments'));
-      }
-      return translateFragments({ ...request, target, localModelId, localMaxTokens }, originals, unique, plans, countMs);
+    if (!counted?.ok) {
+      throw new EngineError(LOCAL_CODES[String(counted?.code)] ?? 'provider',
+        String(counted?.error ?? 'the host did not plan source fragments'));
     }
-    const counts = Array.isArray(counted?.counts) ? counted.counts.map((value) => Number(value)) : null;
-    const overhead = Number(counted?.overhead);
-    let chunks: string[][];
-    if (counted?.ok && counts && counts.length === unique.length && Number.isFinite(overhead)) {
-      chunks = AT.local.chunkByCounts(unique, counts, localMaxTokens, overhead);
-    } else {
-      AT.warn('the host did not count tokens, packing by estimate');
-      chunks = AT.local.chunkByTokens(unique, localMaxTokens);
+    const plans = counted.sourceChunks;
+    if (!Array.isArray(plans) || plans.length !== unique.length ||
+        plans.some((parts, index) => !Array.isArray(parts) || !parts.length ||
+          parts.some(part => typeof part !== 'string' || !part.trim()) || parts.join('') !== unique[index])) {
+      throw new EngineError('provider', 'the host did not plan source fragments');
     }
-
-    const hostStarted = Date.now();
-    const batchOut = new Map<string, string>();
-    let detected: string | null = source !== 'auto' && C.isSupportedLang(source) ? source : null;
-    for (const chunk of chunks) {
-      AT.local.throwIfAborted(request.signal);
-      let active = true;
-      const progress = mappedProgress(originals, chunk, request.onProgress);
-      try {
-        const result = await translateChunk({ ...request, texts: chunk, target, localModelId, localMaxTokens,
-          onProgress: progress ? (index, text) => { if (active) progress(index, text); } : undefined });
-        chunk.forEach((text, index) => batchOut.set(text, result.translations[index] ?? text));
-        detected ??= result.detected;
-      } finally { active = false; }
-    }
-
-    const translations = originals.map((text) => {
-      if (!needsTranslation(text) || AT.isTargetLanguage(text, target)) return text;
-      const translated = batchOut.get(text);
-      // An empty model answer is not a successful identity translation. Keep
-      // the distinction so the DOM can retain the source without marking done.
-      return typeof translated === 'string' ? translated : '';
-    });
-    return {
-      translations,
-      detected,
-      requested: unique.length,
-      timing: { countMs, hostMs: Date.now() - hostStarted, chunks: chunks.length }
-    };
+    return translateFragments({ ...request, target, localModelId, localMaxTokens }, originals, unique, plans, countMs, resolved);
   }
 
   export async function test(request: TranslateRequest = {}): Promise<TestResult> {

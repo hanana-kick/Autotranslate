@@ -178,10 +178,6 @@ declare var __autotranslate: AT.content.Boot | undefined;
       sourceLang: settings.sourceLang,
       ...(settings.translationKey ? { translationKey: settings.translationKey } : {}),
       url: location.href,
-      // Read once per pass. Only a context that would actually change the
-      // prompt is sent: an unidentified page adds nothing to a request.
-      context: AT.pagecontext.hint(batch.context) ? batch.context : null,
-      role: batch.role,
       fragmentConcurrency: batch.fragmentConcurrency ?? 1
     }, batch.onProgress, batch.signal)) as AT.content.BatchReply | undefined;
     if (batch.signal?.aborted || epoch !== state.epoch) throw new DOMException('Translation cancelled', 'AbortError');
@@ -218,8 +214,8 @@ declare var __autotranslate: AT.content.Boot | undefined;
         doc: document,
         presentation,
         settings: () => ({ maxNodes: snapshot.maxNodes, translationConcurrency: state.settings?.translationConcurrency ?? 8 }),
-        // The host owns the exact 64-source-token plan and bounded admission.
-        // Do not serialize that plan behind a second character-based split.
+        // The host owns source-token planning. One request entry can own many
+        // inline Text nodes; DOM collection keeps that semantic unit intact.
         workLimit: () => ({ maxChars: 0, maxTexts: 1 }),
         shouldTranslate: (text) => !AT.isTargetLanguage(text, snapshot.targetLang),
         // A pass owns an immutable settings snapshot, not mutable global state.
@@ -991,7 +987,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     const gap = /\s/.test(selected) ? ' ' : '';
     const texts = parts.length > 1 ? parts : [selected.slice(0, C.SENTENCE_MAX_CHARS)];
     const epoch = state.epoch;
-    const translated = await requestBatch({ texts, role: 'unknown', context: null }, settings);
+    const translated = await requestBatch({ texts, role: 'unknown' }, settings);
     if (epoch !== state.epoch) return { status: 'cancelled' };
     showCard(translated.filter((text) => text).join(gap) || selected, settings);
     return { status: 'selection' };

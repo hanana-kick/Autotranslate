@@ -25,14 +25,14 @@ namespace AT.pipelinehost {
       skip_prompt?: boolean;
       skip_special_tokens?: boolean;
       callback_function?: (text: string) => void;
-    }) => { end: () => void };
+    }) => { put: (tokens: (number | bigint)[][]) => void; end: () => void };
   };
   export type Tokenizer = {
     (text: string, options?: { add_special_tokens?: boolean }): { input_ids: { data: ArrayLike<number | bigint> } };
     decode(ids: number[] | ArrayLike<number | bigint>, options?: { skip_special_tokens?: boolean }): string;
     apply_chat_template(
       messages: { role: string; content: string }[],
-      options: { target_lang: string; add_generation_prompt: boolean; tokenize: false }
+      options: { target_lang: string; source_lang?: string; add_generation_prompt: boolean; tokenize: false }
     ): string;
     pad_token_id?: number | null;
     eos_token_id?: number | null;
@@ -106,9 +106,9 @@ namespace AT.pipelinehost {
   /** The model's own small files live next to the graph in OPFS; the graph
    *  itself is served as one response so Transformers.js streams it into the
    *  WebGPU session without a second copy in the JS heap. */
-  async function modelFile(name: string): Promise<Blob | null> {
+  async function modelFile(name: string, modelId = modelIdForCache): Promise<Blob | null> {
     if (seams.modelFiles) return seams.modelFiles(name);
-    const record = await AT.modelstore.get(modelIdForCache).catch(() => null);
+    const record = await AT.modelstore.get(modelId).catch(() => null);
     if (!record) return null;
     // Bundled bytes live in the package beside the code: read them from there,
     // never the network, and never copy them into OPFS.
@@ -123,8 +123,8 @@ namespace AT.pipelinehost {
 
   /** One of the model's small JSON files, read through the same cache as
    *  everything else: the card's sentinel ids live in `generation_config`. */
-  export async function modelJson(name: string): Promise<Record<string, unknown> | null> {
-    const blob = await modelFile(name);
+  export async function modelJson(name: string, modelId?: string): Promise<Record<string, unknown> | null> {
+    const blob = await modelFile(name, modelId);
     if (!blob) return null;
     try {
       return JSON.parse(await blob.text()) as Record<string, unknown>;

@@ -50,7 +50,7 @@ namespace AT.dom {
     doc: DocumentRoot;
     maxNodes?: number;
     translate: Provider;
-    /** Send a sentence split across inline elements as one request. Default true. */
+    /** Merge non-interactive inline text into one source, without model markers. */
     mergeInline?: boolean;
     /** Split long text nodes into sentences. Off when absent. */
     sentences?: Sentences | undefined;
@@ -58,7 +58,7 @@ namespace AT.dom {
     shouldAbort?: (() => boolean) | undefined;
     /** Yield queued work without cancelling replies already in flight. */
     shouldYield?: (() => boolean) | undefined;
-    /** Per-request source budget; zero maxChars preserves the ordinary limit. */
+    /** Per-request entry budget, independent of how many DOM nodes a unit owns. */
     workLimit?: (() => { maxChars: number; maxTexts: number }) | undefined;
     /** Source-fragment eligibility, checked before presentation or dispatch. */
     shouldTranslate?: ((text: string) => boolean) | undefined;
@@ -79,6 +79,8 @@ namespace AT.dom {
     lead: string;
     core: string;
     trail: string;
+    /** Ruby pronunciation/fallback text is restored, but never sent as source. */
+    annotation?: boolean | undefined;
   };
 
   /** `text` is what the node held before we touched it; `applied` what we wrote. */
@@ -161,22 +163,6 @@ namespace AT.dom {
       : { lead: '', core: text, trail: '' };
   }
 
-  /** Exact boundaries only. Missing, reordered, duplicated or empty segments
-   *  are unsafe, particularly for links; the caller falls back to fragments. */
-  export function splitRun(reply: string, count: number): string[] | null {
-    const matches = [...reply.matchAll(/\uE000(\d+)\uE001/g)];
-    if (matches.length !== count - 1 || matches.some((match, index) => Number(match[1]) !== index + 1)) return null;
-    if (/[\uE000\uE001]/u.test(reply.replace(/\uE000\d+\uE001/g, ''))) return null;
-    const parts: string[] = [];
-    let offset = 0;
-    for (const match of matches) {
-      parts.push(reply.slice(offset, match.index).trim());
-      offset = match.index! + match[0].length;
-    }
-    parts.push(reply.slice(offset).trim());
-    return parts.length === count && parts.every(Boolean) ? parts : null;
-  }
-
   const GRAPHEME_SEGMENTER = typeof Intl.Segmenter === 'function'
     ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : undefined;
 
@@ -226,9 +212,6 @@ namespace AT.dom {
     // A late request must never settle a newer presentation of the same Text.
     const presenting = new Map<Text, Set<Text>>();
     let completed = 0;
-    /** Answers written back unchanged: a real failure with no exception of its
-     *  own, counted so a pass that changed nothing cannot report success. */
-    let echoed = 0;
     const cache = new Map<string, { answers: string[]; bytes: number }>();
     let cacheBytes = 0;
     let generation = 0;
@@ -361,7 +344,18 @@ namespace AT.dom {
       return { node, source, ...splitWhitespace(source) };
     }
 
-    const eligible = (text: string): boolean => hasText(text) && shouldTranslate?.(text) !== false;
+    const eligible = (text: string): boolean => text.trim().length > 1 && hasText(text) && shouldTranslate?.(text) !== false;
+    const runSource = (items: Item[]): string => items.filter((item) => !item.annotation).map((item) => item.source).join('');
+    function runAnchor(items: Item[]): Item | undefined {
+      let anchor: Item | undefined, depth = Infinity;
+      for (const item of items) {
+        if (item.annotation || !/\S/u.test(item.source)) continue;
+        let currentDepth = 0;
+        for (let parent = item.node.parentElement; parent; parent = parent.parentElement) currentDepth++;
+        if (currentDepth < depth) { anchor = item; depth = currentDepth; }
+      }
+      return anchor;
+    }
 
     /** Range rects include text beyond a line clamp. Intersect them with every
      * clipping ancestor's padding box, not with the viewport or the text box.
@@ -437,16 +431,6 @@ namespace AT.dom {
       return visibleEnd(node, start) <= start && start < (node.nodeValue?.length ?? 0);
     }
 
-    /** Keep a visible word whole when possible; never cut a surrogate pair. */
-    function boundary(text: string, end: number): number {
-      if (end >= text.length) return text.length;
-      if (end > 0 && /[\uD800-\uDBFF]/u.test(text[end - 1]!)) end--;
-      if (end > 0 && /[\p{L}\p{N}]/u.test(text[end - 1]!) && /[\p{L}\p{N}]/u.test(text[end]!)) {
-        const space = text.slice(end).search(/\s/u);
-        if (space >= 0) end += space;
-      }
-      return end;
-    }
 
     /** Prefer complete sentences or words inside the quantum, not beyond it.
      * A code point is indivisible even when the budget is one UTF-16 unit. */
@@ -469,15 +453,9 @@ namespace AT.dom {
       const state = progress.get(item.node);
       const offset = state?.offset ?? 0;
       const remaining = item.core.slice(offset);
-      const domStart = item.lead.length + (state?.prefix.length ?? 0);
-      const visible = Math.max(0, visibleEnd(item.node, domStart) - domStart);
+      // Clipping is presentation, not a source boundary. Translating a title's
+      // visible prefix and appending its Japanese tail changes its meaning.
       let size = remaining.length;
-      if (visible < remaining.length) {
-        const hiddenSentence = !visible ? sentenceJob({ ...item, core: remaining })?.ends[0] : undefined;
-        size = boundary(remaining, visible || hiddenSentence || state?.chunk || sentences?.maxChars || AT.C.PACKED_TEXT_CHARS);
-        // A leading zero-width/newline or a single surrogate must not stall.
-        if (!size) size = remaining.codePointAt(0)! > 0xFFFF ? 2 : 1;
-      }
       const maxChars = workLimit?.().maxChars ?? 0;
       if (maxChars > 0 && size > maxChars) size = quantumBoundary(remaining, maxChars);
       return { item: { ...item, core: remaining.slice(0, size) }, offset, bounded: size < remaining.length };
@@ -488,10 +466,14 @@ namespace AT.dom {
       return (sentenceJob(item)?.parts ?? [item.core]).some(eligible);
     }
     function accepted(node: Text): boolean {
-      if (node.isConnected === false || !hasText(node.nodeValue)) return false;
-      const parent = node.parentElement;
-      if (!parent || isIgnoredElement(parent)) return false;
+      if (node.isConnected === false) return false;
       const known = originals.get(node);
+      if (known?.complete && known.applied === node.nodeValue) return false;
+      const recorded = runs.get(runOf.get(node) ?? '');
+      if (recorded && recorded.every(owns)) return eligible(runSource(recorded));
+      if (!hasText(node.nodeValue)) return false;
+      const parent = node.parentElement;
+      if (!parent || isIgnoredElement(parent) || parent.closest('rt, rp')) return false;
       // Already translated and untouched since: leave it alone. If the page
       // rewrote the text, forget the record and treat it as new.
       if (known) {
@@ -512,14 +494,6 @@ namespace AT.dom {
     function apply(item: Item, translated: string, complete = true): boolean {
       const body = translated.trim();
       if (!body || !owns(item)) return false;
-      // An answer identical to the source is an echo, not a translation. Writing
-      // it would mark the node done and hide a failed request behind the page's
-      // own words (measured: five English sentences "translated" into English,
-      // the pass reported translated, and the page never changed).
-      if (body === item.source.trim()) {
-        echoed++;
-        return false;
-      }
       const issue = AT.outputIssue(item.source, body);
       if (issue) throw new Error('invalid translation output: ' + issue);
       const next = item.lead + body + item.trail;
@@ -531,12 +505,9 @@ namespace AT.dom {
       return true;
     }
 
-    /**
-     * Group the translatable text nodes under `root` into runs: the text a
-     * reader sees as one sentence, i.e. consecutive text nodes sharing a block
-     * ancestor. Translating a run as a whole is what keeps a sentence that is
-     * split by `<strong>`/`<a>`/`<em>` readable in the target language.
-     */
+    /** Collect complete plain-text units within one interactive owner. Formatting
+     * spans can be emptied and restored; links and controls are hard boundaries
+     * because generated text has no trustworthy per-element alignment. */
     function collect(root: Node | null | undefined, limit = maxNodes): Text[] {
       prune();
       runs.clear();
@@ -574,33 +545,58 @@ namespace AT.dom {
       if (!start) return nodes;
       let current: Item[] | null = null;
       const flush = () => {
-        if (current && current.length > 1) {
-          const id = `r${runSeq}`;
-          runSeq += 1;
-          runs.set(id, current);
-          for (const item of current) runOf.set(item.node, id);
-        }
+        const items = current;
         current = null;
+        if (!items?.length) return;
+        const source = runSource(items);
+        const first = runAnchor(items);
+        if (!first) return;
+        // Do not paint an entire paragraph with an arbitrary emphasized child's
+        // typography when no ordinary parent-owned Text can carry the result.
+        const emphasized = /^(STRONG|EM|B|I|U|S|SMALL|SUB|SUP)$/.test(first.node.parentElement?.tagName ?? '');
+        if (mergeInline && items.length > 1 && eligible(source) && !emphasized) {
+          const id = `r${runSeq++}`;
+          // One representative makes the semantic unit indivisible to the page
+          // scheduler, including ruby bases that happen to be a single letter.
+          runs.set(id, items);
+          for (const item of items) runOf.set(item.node, id);
+          // Schedule from the sentence's start, not its commit anchor: the
+          // parent-owned tail may be behind an ellipsis while its ruby is visible.
+          nodes.push(items.find((item) => !item.annotation && /\S/u.test(item.source))!.node);
+        } else {
+          for (const item of items) if (!item.annotation && accepted(item.node)) nodes.push(item.node);
+        }
       };
       const visit = (element: Element): void => {
         for (const child of Array.from(element.childNodes)) {
           if (nodes.length >= limit) return;
           if (child.nodeType === 3) {
             const textNode = child as Text;
-            if (!accepted(textNode) || !rendered(textNode)) {
-              // Whitespace and punctuation between inline elements get their own
-              // text node; the run's key cannot carry them, so it has to end
-              // here instead of welding the words on both sides.
+            const annotation = Boolean(textNode.parentElement?.closest('rt, rp'));
+            const known = originals.get(textNode);
+            if (!annotation && !rendered(textNode) || known?.complete && known.applied === textNode.nodeValue ||
+                isIgnoredElement(textNode.parentElement) ||
+                !annotation && hasText(textNode.nodeValue) && (textNode.nodeValue?.trim().length ?? 0) > 1 &&
+                  !hasEligibleFragment(itemFor(textNode))) {
               flush();
               continue;
             }
+            // Punctuation and whitespace belong to the sentence, even when they
+            // occupy a separate Text. Ruby pronunciation does not.
             if (!current) current = [];
-            current.push(itemFor(textNode));
-            nodes.push(textNode);
+            current.push({ ...itemFor(textNode), annotation });
           } else if (child.nodeType === 1) {
             const childElement = child as Element;
+            const annotation = childElement.tagName === 'RT' || childElement.tagName === 'RP';
+            if (annotation) {
+              if (mergeInline && !isIgnoredElement(childElement)) visit(childElement);
+              continue;
+            }
             if (LEAF_TAGS[childElement.tagName] || subtreeHidden(childElement)) { flush(); continue; }
-            if (BLOCK_TAGS[childElement.tagName]) {
+            if (BLOCK_TAGS[childElement.tagName] ||
+                !/^(SPAN|STRONG|EM|B|I|U|S|SMALL|SUB|SUP|RUBY|RB|RT|RP|AT-TRANSLATION-TEXT)$/.test(childElement.tagName) ||
+                childElement.closest('[role], [tabindex], [onclick]') === childElement ||
+                /^(block|flex|grid|inline-block|inline-flex|inline-grid|table)/.test(style(childElement)?.display ?? '')) {
               flush();
               if (!isIgnoredElement(childElement)) visit(childElement);
               flush();
@@ -693,7 +689,6 @@ namespace AT.dom {
         presented.clear();
         return true;
       };
-      const incoming = new Set(nodes);
       const claimed = new Set<Text>();
       const jobs: Item[][] = [];
       const quantum = workLimit?.();
@@ -704,19 +699,11 @@ namespace AT.dom {
         if (claimed.has(node) || !accepted(node)) continue;
         const id = mergeInline ? runOf.get(node) : undefined;
         const recorded = id ? runs.get(id) : undefined;
-        // Oversized interactive runs fall back per element, preserving exact
-        // ownership rather than sending an unbounded semantic unit.
-        if (recorded && recorded.length > 1 && recorded.every((item) => incoming.has(item.node) && accepted(item.node)) &&
-            recorded.every((item) => !/[\uE000\uE001]/u.test(item.source)) &&
-            (!quantum || (recorded.length <= maxTexts &&
-              (quantum.maxChars <= 0 || recorded.reduce((sum, item) => sum + itemFor(item.node).core.length, 0) <= maxChars))) &&
-            recorded.every((item) => {
-              const current = itemFor(item.node);
-              return !progress.has(item.node) && visibleEnd(item.node) >= current.lead.length + current.core.length &&
-                eligible(current.core) &&
-                (!shouldTranslate || (sentenceJob(current)?.parts ?? [current.core]).every(eligible));
-            })) {
-          const items = recorded.map((item) => itemFor(item.node));
+        // maxTexts limits model inputs, not the Text nodes belonging to one
+        // input. The collector returns the representative of each safe unit.
+        if (recorded && recorded.length > 1 && recorded.every(owns) &&
+            !recorded.some((item) => progress.has(item.node)) && eligible(runSource(recorded))) {
+          const items = recorded.map((item) => ({ ...itemFor(item.node), annotation: item.annotation }));
           items.forEach((item) => claimed.add(item.node));
           jobs.push(items);
         } else {
@@ -731,7 +718,6 @@ namespace AT.dom {
       let error: string | null = null;
       let firstError: unknown = null;
       let wrote = 0;
-      const echoesBefore = echoed;
       const pending = new Set<Text>();
       const failedNodes = new Set<Text>();
       let reported = 0;
@@ -855,7 +841,7 @@ namespace AT.dom {
           for (; valid < end; valid++) {
             const selected = indices[replyAt] === valid;
             const answer = selected ? reply[replyAt++] : parts[valid];
-            if (selected && (!answer || answer === parts[valid])) break;
+            if (selected && !answer) break;
             answers.push(answer ?? '');
             prefix += (split?.gaps[valid] ?? whitespace.lead) + (answer ?? '');
           }
@@ -864,8 +850,9 @@ namespace AT.dom {
           const complete = !/\S/u.test(item.core.slice(sourceEnd));
           if (valid > offset) {
             const next = prefix + item.core.slice(sourceEnd);
-            // Advancing past ineligible source is not a translation or failure.
-            if (next !== item.core) write(item, next, complete);
+            // Identity is a valid provider result (names and identifiers). The
+            // engine, not the DOM writer, owns semantic output validation.
+            write(item, next, complete);
             if (owns(item)) {
               progress.set(item.node, { source: item.source, value: item.node.nodeValue ?? '',
                 offset: sourceEnd, prefix,
@@ -877,7 +864,7 @@ namespace AT.dom {
           if (valid < end) {
             failed++;
             failedNodes.add(item.node);
-            error ??= 'empty or echoed translation segment';
+            error ??= 'empty translation segment';
             firstError ??= new Error(error);
             return;
           }
@@ -959,7 +946,7 @@ namespace AT.dom {
             const value = (reply[at] ?? '').trim();
             for (const slot of group) {
               answers[slot] = value;
-              if (value && value !== live[slot]!.core && owns(live[slot]!)) remember(keys[slot]!, [value]);
+              if (value && owns(live[slot]!)) remember(keys[slot]!, [value]);
             }
           });
         }
@@ -989,7 +976,7 @@ namespace AT.dom {
         if (!presentation || cancelled()) return;
         for (const item of items) {
           const part = fragment(item).item;
-          if (owns(item) && (sentenceJob(part)?.parts ?? [part.core]).some(eligible)) {
+          if (!item.annotation && owns(item) && (sentenceJob(part)?.parts ?? [part.core]).some(eligible)) {
             presentation.begin(item.node);
             presented.add(item.node);
             presenting.set(item.node, presented);
@@ -1059,54 +1046,43 @@ namespace AT.dom {
           while (inFlight.length >= packWindow) await drain();
           continue;
         }
-        // A numbered run and a sentence split read the page's own structure, so
-        // they start once every pack has landed.
+        // A whole inline unit and a sentence split retain ordered ownership.
         await drainAll();
         if (cancelled()) break;
         if (shouldYield?.()) {
           for (const remaining of jobs.slice(job)) for (const item of remaining) pending.add(item.node);
           break;
         }
+        // Presentation may insert a wrapper; choose the authored anchor before
+        // that changes relative depths in the live DOM.
+        const anchor = items.length > 1 ? runAnchor(items)! : first;
         try {
           begin(items);
           if (items.length === 1) {
             await single(first);
           } else {
-            const key = keyFor('run-numbered-v3', items.map((item) => item.source));
-            let pieces = cached(key);
-            if (!pieces) {
-              // Use the engine's existing numbered-segment contract directly.
-              // Private-use markers were normally dropped, wasting one full
-              // generation before the same fragments were translated again.
-              const reply = await ask(items.map((item) => item.core), (index, text) => preview(items[index]!, text));
-              if (cancelled() || !items.every(owns)) continue;
-              pieces = reply.length === items.length && reply.every(Boolean) ? reply : null;
+            const source = runSource(items);
+            const envelope = splitWhitespace(source);
+            const key = keyFor('plain-run', [source]);
+            const reply = cached(key) ?? await ask([envelope.core]);
+            if (execution) await execution.ready;
+            if (cancelled() || !items.every(owns)) continue;
+            const answer = reply[0]?.trim() ?? '';
+            const issue = AT.outputIssue(envelope.core, answer);
+            if (issue) throw new Error('invalid translation output: ' + issue);
+            const unchanged = answer === envelope.core;
+            // Commit every member together, retaining all authored elements and
+            // Text identities. Never guess translated offsets for a link.
+            for (const item of items) {
+              const next = unchanged ? item.source : item === anchor ? envelope.lead + answer + envelope.trail : '';
+              if (!originals.get(item.node)?.complete) completed++;
+              originals.set(item.node, { source: item.source, text: item.source, applied: next, complete: true });
+              if (item.node.nodeValue !== next) item.node.nodeValue = next;
+              presentation?.applied(item.node, true);
+              wrote++;
             }
-            if (pieces) {
-              // Validate the entire unit before writing any part of it.
-              if (!cancelled() && items.every(owns)) {
-                for (let index = 0; index < items.length; index++) {
-                  const issue = AT.outputIssue(items[index]!.source, pieces[index]!);
-                  if (issue) throw Object.assign(new Error(issue), { reason: 'invalid-output' });
-                }
-                remember(key, pieces);
-                items.forEach((item, index) => write(item, pieces![index]!));
-                mergedRuns++;
-              }
-            } else {
-              // Never guess an alignment by length. Retain the element/meaning
-              // association, even when this costs a less fluent fragment fallback.
-              for (const item of items) {
-                if (cancelled()) break;
-                await single(item, JSON.stringify(['run-fallback', items.map((part) => part.source)]));
-              }
-              // A validated per-node fallback is also an aligned translation.
-              // Cache the whole run so repeated link fragments do not repeatedly
-              // spend a generation attempting markers the model already omitted.
-              if (!cancelled() && items.every((item) => owns(item) && originals.get(item.node)?.complete)) {
-                remember(key, items.map((item) => splitWhitespace(originals.get(item.node)!.applied).core));
-              }
-            }
+            remember(key, [answer]);
+            mergedRuns++;
           }
         } catch (caught: unknown) {
           if (cancelled()) break;
@@ -1122,17 +1098,8 @@ namespace AT.dom {
       await drainAll();
       const remaining = [...pending].filter((node) => !failedNodes.has(node) && !originals.get(node)?.complete);
       if (!cancelled() && wrote === 0) {
-        // Nothing was written: either a request threw, or every answer was the
-        // page's own text. Reporting that as "translated" is how a page sat in
-        // its source language with no error anywhere to read.
-        // A yielded request failure must not label its unattempted neighbours
-        // failed. Return those pending nodes so the planner can still admit them.
+        // A yielded failure must not label its unattempted neighbours failed.
         if (failed > 0 && remaining.length === 0) throw firstError ?? new Error(error ?? 'translation failed');
-        if (echoed > echoesBefore) {
-          error ??= 'the model answered with the page\'s own text — check that the target language differs from the page';
-          if (remaining.length === 0) throw new Error(error);
-          failed++;
-        }
       }
       return { requested, translated: stats().translated, runs: mergedRuns, failed, error, pending: remaining };
     }

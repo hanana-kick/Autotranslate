@@ -9,6 +9,99 @@ binding. Browser/native harnesses operate the shipped toolbar popup for ON/OFF;
 opening settings must not select or restore a web tab. Automatic URL/language
 preferences remain global settings.
 
+## Report-driven ONNX policy and reading-unit correction (0.1.13)
+
+- No fabricated site/role hints, 40-character prompt switch, contextual retry,
+  fixed source64 split, hint truncation, or blanket Han/kana rejection.
+  The model tokenizer template receives only source text and requested languages.
+- Rendered templates are encoded with `add_special_tokens: false`, including
+  the document fallback. The previous worker prompt duplicated BOS (`1,1,16`);
+  the model-native prompt starts `1,16`. See the upstream
+  [chat-template warning](https://huggingface.co/docs/transformers/chat_templating).
+- Exact tokenizer costs cover the complete prompt and output reserve, including
+  emoji byte fallback. Model metadata and backend capacity bound admission;
+  cap-ended output is not a completed translation. Empty/protocol/repetition
+  guards remain, as do hardware limits.
+- Inline prose is one source within its interactive owner, even at `maxTexts=1`.
+  Ruby readings are excluded; clipping no longer truncates source. Identical
+  model-approved names settle. Links and external edits retain ownership, and
+  OFF restores original Text objects and strings.
+- Inline emphasis has no guessed word alignment: original spans remain, but
+  may become empty; translated prose uses a parent-owned Text where available.
+- Kernels now round at FP16 projection, normalization, residual, activation,
+  rotation and attention-output boundaries. Fused attention/reduction order
+  still differs from ORT; bit-identical logits are not claimed.
+- Verification: 359 focused Node cases passed across the initial run and two
+  corrected assertions; all 53 onnxhost cases passed again after the BOS fix.
+  Types, Chrome packaging, and all 53 real-browser DOM/clipping cases passed.
+  Browser tests use deterministic providers and are not model-quality evidence.
+- Real q4f16 replay: `onnx-policy-fix-FPIShT-policy02/report.json` under
+  `test-results/browser/`. The emoji heading completed at EOS; `52` remained
+  `52`; the opening instruction was no longer omitted; QuQu remained unchanged;
+  the minne paragraph completed at EOS rather than exhausting the token cap.
+  This small replay does not certify terminology or general translation quality.
+
+### Installed-extension verification
+
+`test-results/browser/onnx-policy-fix-FPIShT-live02/report.json`: original
+q4f16, headed Chrome 143 / Apple WebGPU, eight slots, Japanese → Korean,
+immediate rendering. Model installation and one warmup are excluded. This is
+one sequential baseline/candidate pair, not a repeated latency distribution.
+
+| Page | First observed settled state | Host translation requests | Result |
+| --- | ---: | ---: | --- |
+| Fixed 8-unit page, baseline | 0.639 s | 20 | Echo error; ruby and clipped suffix incomplete |
+| Same page, candidate | 0.533 s | 8 | All units settled, full clipped source translated |
+| BOOTH 4252664, candidate | 10.058 s | 170 | Translated; no host translation error |
+| Nenkin pension-system page, candidate | 4.019 s | 70 | Translated; no host translation error |
+
+Completion is sampled at 100 ms on the fixture and 1 s on live pages. The
+baseline's failed completion is not a valid speed denominator. The fixture
+uses 60% fewer model requests; large live pages still exceed three seconds.
+Neither this fixture nor these two pages replace the earlier 60-page audit.
+
+No committed-to-source reversion or host preview clear was observed during the
+live pages' 30-second windows. Explicit OFF restored every connected tracked
+Text: 22 fixture, 307 BOOTH, 612 Nenkin; zero mismatches. BOOTH's actual
+BlendShapeClip paragraph retained `52`, and its FAQ heading completed.
+Terminology remains imperfect (`unitypackage` can become `Unity`); no glossary
+or site-specific correction was added. One BOOTH page error, `Uncaught (in
+promise) #<Event>`, was recorded; its origin was not established. No host error
+was recorded. Screenshots of the fixture and BOOTH were inspected.
+
+The driver uses the real `SET_TAB_ENABLED` command, not native popup automation.
+The first live attempt sampled before content-script injection and stopped;
+`live02` adds an explicit injection-pending status. The first kernel diagnostic
+also recorded a favicon 404; subsequent diagnostics serve it normally.
+Diagnostic sources and the pre-change compiled modules are archived in
+`test-results/browser/onnx-policy-fix-FPIShT-evidence/`.
+
+## Earlier BOOTH description rollback correction (historical, unreleased)
+
+- Target: `https://booth.pm/ko/items/4252664`, real headed Chrome 143,
+  original PLaMo ONNX q4f16, Apple WebGPU, eight slots, default Aurora.
+- Four of eleven Japanese description paragraphs displayed generated Korean,
+  then discarded it. The host's script guard incorrectly classified the shared
+  list bullet `・` (U+30FB) as kana because it matched an entire Unicode block.
+  Both original/context-retry outputs were rejected; fragment cancellation
+  cleared the uncommitted preview. No source DOM replacement or OFF command
+  caused the rollback.
+- At that stage, `plamo3.checkScript` identified Hiragana/Katakana by Unicode
+  Script properties. The broader script guard is now removed as described above.
+  That stage's Chrome build and 70 plamo3/onnxhost tests passed.
+- Fixed build: all eleven tracked paragraphs retained Korean during a
+  60-second observation, no remaining kana or committed-to-source reversions;
+  explicit OFF restored all eleven exact source strings. Screenshot inspected.
+  The diagnostic used the real `SET_TAB_ENABLED` command after native popup
+  automation hit a window-focus error; it did not replace inference.
+- This is a rollback fix, not a translation-quality pass: the model still
+  omitted the opening unitypackage instruction, rendered `52` as `5`, and
+  mistranslated some terms. The page-level echo error also remained.
+- Evidence: `test-results/browser/booth-reversion-preview-trace/` (rejected
+  Korean outputs) and `test-results/browser/booth-reversion-fixed/`
+  (`verification.json`, `events.json`, `calls.json`, `body.png`).
+  The published v0.1.12 package has not been replaced.
+
 ## ONNX-only cutover verification
 
 - `npm run build` and `npm run verify`: Chrome/Firefox 0.1.11 packages passed,

@@ -34,10 +34,6 @@ namespace AT.background {
     sourceLang?: string;
     targetLang?: string;
     translationKey?: string;
-    /** What the content script read off the page, if the module is there. */
-    context?: unknown;
-    /** Which region of the page the batch came from. */
-    role?: unknown;
     fragmentConcurrency?: unknown;
   };
 
@@ -544,11 +540,8 @@ if (typeof self.importScripts === 'function') {
         texts: message.texts ?? [],
         source: message.sourceLang ?? settings.sourceLang,
         target: message.targetLang ?? settings.targetLang,
-        context: AT.pagecontext.normalize(message.context),
-        role: AT.targets.normalizeRole(message.role),
         localModelId: settings.localModelId,
         localMaxTokens: settings.localMaxTokens,
-        sourceChunkTokens: AT.local.SOURCE_CHUNK_TOKENS,
         fragmentConcurrency: Math.min(settings.translationConcurrency, requestedWidth) as AT.settings.TranslationConcurrency,
         fragmentScheduler: { run: (job, signal) => scheduler.run(job, signal, tabId) }
       };

@@ -559,21 +559,16 @@ test('at/content-ping answers with a pong', async () => {
   assert.deepEqual(env.page.cards(), [], 'a ping leaves no card behind');
 });
 
-test('the page context travels with the batch, and only when it says something', async () => {
-  const plain = environment();
-  await plain.send(translateMessage(snapshot({ targetLang: 'de' })));
-  assert.equal(plain.recorded.batch[0]?.context, null, 'an unidentified page adds no context');
-
-  const news = environment({
-    meta: { 'og:type': 'article', 'og:site_name': 'Example News', 'article:section': 'Politics' },
-    title: 'Headline'
-  });
-  await news.send(translateMessage(snapshot({ targetLang: 'de' })));
-  const context = news.recorded.batch[0]?.context as ATNamespace;
-  assert.equal(context.kind, 'article', 'og:type article is an article, not a news claim');
-  assert.equal(context.site, 'Example News');
-  assert.equal(context.section, 'Politics');
-  assert.equal(context.title, 'Headline', 'the title is read when no og:title is present');
+test('page metadata leaves authored source translation and restoration unchanged', async () => {
+  const metadata: Record<string, string>[] = [{}, { 'og:type': 'article', 'og:site_name': 'Example News', 'article:section': 'Politics' }];
+  for (const meta of metadata) {
+    const env = environment({ meta, title: 'Headline' });
+    const reply = await env.send(translateMessage(snapshot({ targetLang: 'de' })));
+    assert.equal(reply.error, null);
+    assert.deepEqual(pageTexts(env.page.body), wrap(DEFAULT_TEXTS));
+    await env.send({ type: 'at/content-restore' });
+    assert.deepEqual(pageTexts(env.page.body), DEFAULT_TEXTS);
+  }
 });
 
 test('visible content and chrome lead whole-document admission of distant prose', async () => {
@@ -594,16 +589,11 @@ test('visible content and chrome lead whole-document admission of distant prose'
 
   const batches = env.recorded.batch;
   assert.equal(batches[0]?.texts[0], 'Hello there', 'the article is finished before the menu, whatever its position');
-  assert.equal(batches[0]?.role, 'article');
   assert.equal(
-    batches.some((batch: ATNamespace) => batch.texts.includes('Home') && batch.role === 'navigation'),
+    batches.some((batch: ATNamespace) => batch.texts.includes('Home')),
     true,
-    'menu labels travel in their own batch, marked as navigation'
+    'menu labels are translated after article content'
   );
-  const farBatch = batches.find((batch: ATNamespace) => batch.texts.includes('Far away text'));
-  assert.equal(farBatch?.role, 'article');
-  const menuBatch = batches.find((batch: ATNamespace) => batch.texts.includes('Home'));
-  assert.equal(menuBatch?.role, 'navigation');
   assert.deepEqual(pageTexts(second), ['»Far away text«']);
   await env.finish();
   assert.equal(batches.at(-1)?.texts[0], 'Far away text');
@@ -712,8 +702,6 @@ test('serial opt-out completes the page with one request at a time', async () =>
     targetLang: 'de',
     sourceLang: 'auto',
     url: 'https://example.com/article',
-    context: null,
-    role: 'unknown',
     fragmentConcurrency: 1
   });
 
@@ -1432,4 +1420,38 @@ test('an active offscreen request survives scrolling while unsent work is reprio
   assert.equal(pageTexts(nearer)[0], '»Active distant prose«');
   assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts),
     ['Visible opening prose', 'Active distant prose', 'Next distant prose']);
+});
+
+test('unchanged names and one-character labels do not leave a translated page in error', async () => {
+  const sources = ['QuQu', '年', '新しい記事を読みます。'];
+  const env = environment({ texts: sources,
+    translate: texts => texts.map(text => text === sources[2] ? '새 기사를 읽습니다.' : text) });
+  const reply = await env.send(translateMessage(snapshot({ targetLang: 'ko' })));
+  await env.finish();
+  assert.equal(reply.status, 'translated');
+  assert.equal(reply.failed, 0);
+  assert.equal(reply.error, null);
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), [sources[0], sources[2]]);
+  assert.deepEqual(pageTexts(env.page.body), ['QuQu', '年', '새 기사를 읽습니다.']);
+  assert.equal(env.states().at(-1)?.error, null);
+  await env.send({ type: 'at/content-restore' });
+  assert.deepEqual(pageTexts(env.page.body), sources);
+});
+
+test('content dispatch keeps ruby and inline formatting in one semantic input with maxTexts one', async () => {
+  const env = environment({ texts: [], translate: texts => texts.map(text =>
+    text === '年金を受け取ります。' ? '연금을 받습니다.' : '') });
+  const base = t('年'), pronunciation = t('ねん'), rest = t('金を受け取ります。');
+  const ruby = env.page.make('ruby', {}, [base, env.page.make('rt', {}, [pronunciation])]);
+  const paragraph = env.page.make('p', {}, [ruby, rest]);
+  env.page.body.append(paragraph);
+  const reply = await env.send(translateMessage(snapshot({ targetLang: 'ko' })));
+  await env.finish();
+  assert.equal(reply.failed, 0);
+  assert.equal(reply.error, null);
+  assert.deepEqual(env.recorded.batch.flatMap(batch => batch.texts), ['年金を受け取ります。']);
+  assert.equal(paragraph.textContent, '연금을 받습니다.');
+  assert.equal(paragraph.childNodes[0], ruby);
+  await env.send({ type: 'at/content-restore' });
+  assert.deepEqual(pageTexts(paragraph), ['年', 'ねん', '金を受け取ります。']);
 });

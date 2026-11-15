@@ -62,6 +62,8 @@ namespace AT.hostworker {
   /** The kernel decode loop, when it is the backend in use. It batches: each
    *  step carries up to `C.ENGINE_BATCH` sequences, one row each. */
   let kernels: AT.kernels.Runner | null = null;
+  let contextTokens = 0;
+  let stopTokens: number[] = [];
   /** `past_key_values.N.{key,value}` of the cohort being decoded. */
   let cache: Record<string, AT.pipelinehost.Tensor> | null = null;
 
@@ -94,14 +96,18 @@ namespace AT.hostworker {
 
   /** The sentinels the graph stops on: the card's `generation_config` names an
    *  end-of-turn id that `config.json` alone does not carry. */
-  async function sentinels(): Promise<{ eos: number[]; pad: number }> {
-    const generation = (await AT.pipelinehost.modelJson('generation_config.json')) ?? {};
-    const config = (await AT.pipelinehost.modelJson('config.json')) ?? {};
+  async function sentinels(modelId: string): Promise<{ eos: number[]; pad: number; contextTokens: number }> {
+    const generation = (await AT.pipelinehost.modelJson('generation_config.json', modelId)) ?? {};
+    const config = (await AT.pipelinehost.modelJson('config.json', modelId)) ?? {};
     const ids = (value: unknown): number[] =>
       (Array.isArray(value) ? value : [value]).filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry));
     const eos = [...new Set([...ids(generation.eos_token_id), ...ids(config.eos_token_id)])];
     const pad = ids(generation.pad_token_id)[0] ?? ids(config.pad_token_id)[0] ?? eos[0] ?? 0;
-    return { eos, pad };
+    const limit = Number(config.max_position_embeddings);
+    if (!Number.isSafeInteger(limit) || limit <= 1 || !eos.length) {
+      throw new Error('The model must declare its context limit and end-of-turn tokens');
+    }
+    return { eos, pad, contextTokens: limit };
   }
 
   /** One tensor in the dtype the graph declares for that input. */
@@ -172,7 +178,7 @@ namespace AT.hostworker {
   /** The kernel backend: parse the graph's weights out of the stored file and
    *  build the pipeline. Throwing here is not fatal - `boot` falls back to the
    *  ONNX Runtime path in the same worker. */
-  async function bootKernels(modelId: string): Promise<void> {
+  async function bootKernels(modelId: string, ends: { eos: number[]; contextTokens: number }): Promise<void> {
     const blob = await AT.modelstore.read(modelId);
     if (!blob) throw new Error(`model ${modelId} is not stored`);
     const buffer = await blob.arrayBuffer();
@@ -185,7 +191,8 @@ namespace AT.hostworker {
       device,
       matrixSubgroupSize,
       model: weights,
-      maxTokens: 2048,
+      maxTokens: Math.min(ends.contextTokens, 2048),
+      eosTokens: ends.eos,
       rows: AT.kernels.POSITIONS,
       ablate: AT.C.PROFILE_ABLATION,
       // A page's packs arrive in the same tick and must share the first step.
@@ -199,6 +206,7 @@ namespace AT.hostworker {
             id: outcome.id,
             ok: true,
             tokens: outcome.tokens,
+            finishReason: stopTokens.includes(outcome.tokens[outcome.tokens.length - 1] ?? -1) ? 'eos' : 'length',
             ...(measured ? { stats: measured } : {})
           });
         } else {
@@ -220,10 +228,20 @@ namespace AT.hostworker {
       post({ type: L.WORKER_MESSAGE.READY, ok: false, error: 'Only ONNX models are supported; the stored file has not been deleted', code: 'worker-init' });
       return;
     }
+    let ends: Awaited<ReturnType<typeof sentinels>>;
+    try {
+      ends = await sentinels(modelId);
+      stopTokens = ends.eos;
+      contextTokens = ends.contextTokens;
+    } catch (error) {
+      post({ type: L.WORKER_MESSAGE.READY, ok: false, error: messageOf(error), code: 'worker-init' });
+      return;
+    }
     if (AT.C.ENGINE_KERNELS) {
       try {
-        await bootKernels(modelId);
-        post({ type: L.WORKER_MESSAGE.READY, ok: true, backend: 'kernels', rows: kernels?.rows() ?? 1 });
+        await bootKernels(modelId, ends);
+        contextTokens = Math.min(ends.contextTokens, 2048);
+        post({ type: L.WORKER_MESSAGE.READY, ok: true, backend: 'kernels', rows: kernels?.rows() ?? 1, contextTokens });
         return;
       } catch (error: unknown) {
         // The runtime path below is the reference implementation: keep the
@@ -237,7 +255,6 @@ namespace AT.hostworker {
       const names = Object.keys(opened.model.sessions);
       const info = opened.model.sessions[names.includes('model') ? 'model' : names[0] ?? ''] ?? null;
       if (!info) throw new Error('the session exposes no graph to run');
-      const ends = await sentinels();
       open = {
         tf: opened.tf,
         model: opened.model,
@@ -258,7 +275,10 @@ namespace AT.hostworker {
         coalesceMs: AT.C.ENGINE_COALESCE_MS,
         onDone: (outcome) => {
           finishProgress(outcome);
-          if (outcome.ok) post({ type: L.WORKER_MESSAGE.RESULT, id: outcome.id, ok: true, tokens: outcome.tokens });
+          if (outcome.ok) post({
+            type: L.WORKER_MESSAGE.RESULT, id: outcome.id, ok: true, tokens: outcome.tokens,
+            finishReason: stopTokens.includes(outcome.tokens[outcome.tokens.length - 1] ?? -1) ? 'eos' : 'length'
+          });
           else {
             post({
               type: L.WORKER_MESSAGE.RESULT,
@@ -274,7 +294,7 @@ namespace AT.hostworker {
       // on the first run of a shape, and that cost used to land on the first
       // real sentence. One short row, one step, then the cache goes away.
       await warm(open);
-      post({ type: L.WORKER_MESSAGE.READY, ok: true, backend: 'runtime' });
+      post({ type: L.WORKER_MESSAGE.READY, ok: true, backend: 'runtime', contextTokens });
     } catch (error: unknown) {
       open = null;
       runner = null;
@@ -291,6 +311,14 @@ namespace AT.hostworker {
     }
     if (message?.type === L.WORKER_MESSAGE.GENERATE) {
       const job = message as AT.local.WorkerGenerate;
+      if (!Array.isArray(job.inputIds) || !job.inputIds.length ||
+          job.inputIds.some(id => !Number.isSafeInteger(id) || id < 0) ||
+          !Number.isSafeInteger(job.maxNewTokens) || job.maxNewTokens < 1 ||
+          job.inputIds.length + job.maxNewTokens > contextTokens) {
+        post({ type: L.WORKER_MESSAGE.RESULT, id: job.id, ok: false,
+          error: 'Generation exceeds the backend context limit or contains invalid token IDs', code: 'worker-generate' });
+        return;
+      }
       if (job.stream) streaming.set(job.id, { at: -Infinity, count: 0 });
       const onProgress = job.stream ? (tokens: number[]) => progress(job.id, tokens) : undefined;
       if (kernels) {

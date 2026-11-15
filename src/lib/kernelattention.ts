@@ -95,10 +95,10 @@ namespace AT.kernelattention {
             if (dotLane == 0u) {
               let scores = (scratch[tid] + scratch[tid + 1u]) +
                 (scratch[tid + 2u] + scratch[tid + 3u]);
-              if (token < end) { probs[token] = scores.x; }
-              if (token + 64u < end) { probs[token + 64u] = scores.y; }
-              if (token + 128u < end) { probs[token + 128u] = scores.z; }
-              if (token + 192u < end) { probs[token + 192u] = scores.w; }
+              if (token < end) { probs[token] = quantizeToF16(scores.x); }
+              if (token + 64u < end) { probs[token + 64u] = quantizeToF16(scores.y); }
+              if (token + 128u < end) { probs[token + 128u] = quantizeToF16(scores.z); }
+              if (token + 192u < end) { probs[token + 192u] = quantizeToF16(scores.w); }
             }
             // All partial readers finish before scratch is reused.
             workgroupBarrier();
@@ -161,7 +161,7 @@ namespace AT.kernelattention {
         if (tid < 64u) { scratch[tid] = scratch[tid] + scratch[tid + 64u]; }
         workgroupBarrier();
         if (tid < 32u) {
-          out[qbase + tid] = (scratch[tid] + scratch[tid + 32u]) / denominator;
+          out[qbase + tid] = quantizeToF16((scratch[tid] + scratch[tid + 32u]) / denominator);
         }
       }
     `;
@@ -281,7 +281,7 @@ namespace AT.kernelattention {
                 (scratch${h}[tid + 2u] + scratch${h}[tid + 3u]);`)}
               ${components.map((component, i) => `
               if (localToken + ${i * 32}u < count) {
-                probs[localToken + ${i * 32}u] = ${vector}(${headIndices.map(h => `scores${h}.${component}`).join(', ')});
+                probs[localToken + ${i * 32}u] = quantizeToF16(${vector}(${headIndices.map(h => `scores${h}.${component}`).join(', ')}));
               }`).join('\n')}
             }
             workgroupBarrier();
@@ -402,7 +402,7 @@ namespace AT.kernelattention {
           }
           accumulator = accumulator / total;
         }
-        out[queryIndex * 32u + tid] = accumulator;
+        out[queryIndex * 32u + tid] = quantizeToF16(accumulator);
       }
     `;
   }
@@ -590,7 +590,7 @@ namespace AT.kernelattention {
 
             // XOR 1 combines each QK pair. XOR 2/4/8/16 stays within its
             // verified 32-lane query block, even for 64/128-lane subgroups.
-            score = score + subgroupShuffleXor(score, 1u);
+            score = quantizeToF16(score + subgroupShuffleXor(score, 1u));
             var top = select(-3.402823466e+38, score, visible);
             top = max(top, subgroupShuffleXor(top, 2u));
             top = max(top, subgroupShuffleXor(top, 4u));
@@ -632,7 +632,7 @@ namespace AT.kernelattention {
         }
         if (row < info.rows) {
           out[(row * info.heads + wg.x) * 32u + lane] =
-            accumulator / max(denominator, 1.0e-20);
+            quantizeToF16(accumulator / max(denominator, 1.0e-20));
         }
         return;
       }
@@ -670,8 +670,8 @@ namespace AT.kernelattention {
               var localMax = -3.402823466e+38;
               for (var j = 0u; j < 4u; j = j + 1u) {
                 let key = firstKey + j;
-                let value = partial[firstPartial + j * 2u] +
-                  partial[firstPartial + j * 2u + 1u];
+                let value = quantizeToF16(partial[firstPartial + j * 2u] +
+                  partial[firstPartial + j * 2u + 1u]);
                 weights[queryIndex * 16u + key] = value;
                 if (matches && base + key >= query.z && base + key < query.y) {
                   localMax = max(localMax, value);
@@ -745,7 +745,7 @@ namespace AT.kernelattention {
         }
         if (row < info.rows) {
           let result = accumulator / max(state[queryIndex].y, 1.0e-20);
-          out[(row * info.heads + wg.x) * 32u + lane] = result;
+          out[(row * info.heads + wg.x) * 32u + lane] = quantizeToF16(result);
         }
       }
     `;
@@ -759,8 +759,7 @@ namespace AT.kernelattention {
    * Seven storage bindings fit the ordinary-browser limit of eight.
    * Info retains {heads,rows,half,scale,stride,start,pad,pad2}; heads=1, half=64.
    * QKV offsets are specialised by qkvWidth and heads; stride/start are unused.
-   * Preserve RMS lane ownership, the 64..1 sum tree and x*inv*w ordering.
-   * Shared normalised values replace kN without changing the RoPE arithmetic.
+   * FP32 shared storage retains the graph's FP16 Cast/Mul boundaries.
    * Lanes 0..63 rotate split-half pairs and copy V after all 128 lanes reduce.
    * Each active row must have a unique (cacheRows[row], positions[row]) pair
    * and a valid cache slot. Invalid positions skip writes after all barriers.
@@ -806,19 +805,19 @@ namespace AT.kernelattention {
           stride = stride / 2u;
         }
         let normInv = 1.0 / sqrt(sums[0] / 128.0 + 1e-6);
-        normalised[d] = v * normInv * norm[d];
+        normalised[d] = quantizeToF16(quantizeToF16(v * normInv) * norm[d]);
         workgroupBarrier();
         // Storage-derived position checks must not precede the RMS barriers.
         let position = positions[row];
         if (d >= info.half || position >= MAX_TOKENS) { return; }
         let angle = f32(position) * frequencies[d];
-        let c = cos(angle);
-        let s = sin(angle);
+        let c = quantizeToF16(cos(angle));
+        let s = quantizeToF16(sin(angle));
         let low = normalised[d];
         let high = normalised[d + info.half];
         let destination = cacheRows[row] * CACHE_STRIDE + position * 128u + d;
-        kcache[destination] = (low * c - high * s) * info.scale;
-        kcache[destination + info.half] = (high * c + low * s) * info.scale;
+        kcache[destination] = quantizeToF16(quantizeToF16(quantizeToF16(low * c) - quantizeToF16(high * s)) * quantizeToF16(info.scale));
+        kcache[destination + info.half] = quantizeToF16(quantizeToF16(quantizeToF16(high * c) + quantizeToF16(low * s)) * quantizeToF16(info.scale));
         let valueSource = row * QKV_WIDTH + VALUE_OFFSET + d;
         vcache[destination] = qkv[valueSource];
         vcache[destination + info.half] = qkv[valueSource + info.half];

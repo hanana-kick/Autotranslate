@@ -4,7 +4,39 @@
 > PLaMo 3 q4f16 custom WebGPU kernels and ONNX Runtime fallback. GGUF loading,
 > tokenizers, shaders and benchmark entry points have been removed. GGUF
 > measurements below are historical evidence, not currently supported paths.
-> This cutover changes supported formats, not the accepted ONNX arithmetic.
+> Historical ONNX-only cutover measurements predate the 0.1.13 correction below.
+
+## Report-driven ONNX correction (0.1.13)
+
+Removed synthetic page/role prompts and their retry policy. Source planning now
+uses exact tokenizer costs and the model/backend context rather than source64.
+The model template receives the requested source language; its BOS is no longer
+duplicated during encoding. A non-EOS result is rejected as incomplete.
+
+Inline text and ruby base text share one owner-bounded source even when the
+page dispatches one request entry. This reduces repeated prompt/prefill work
+without assigning surrounding prose to links. Full clipped text is translated
+under its existing CSS clip. Model-approved identity output is settled rather
+than retried.
+
+The q4f16 kernels retain fused dispatch and batching while rounding graph
+boundaries to FP16. This is not bitwise ORT parity or a standalone kernel speed
+claim. Removing duplicate BOS corrected the reproduced `52` → `5` error;
+precision-boundary changes alone did not.
+
+Verification details and artifacts: [validation contract](testing.md).
+The old per-region hints, numbered inline alignment and source64 descriptions
+below are historical, not the current translation contract.
+
+Installed-extension measurement: the same 8-unit Japanese fixture went from
+20 model requests with incomplete ruby/clipped text and an echo error to
+8 requests and a settled page observed at 0.533 s. This is a 60% request
+reduction, not a valid whole-page speed ratio against the failed baseline.
+BOOTH and Nenkin first reported completion at 10.058 s and 4.019 s respectively
+(1-second sampling). Large pages still miss three seconds. The evidence uses
+eight slots and immediate rendering, excludes installation/warmup, and does
+not establish a general latency percentile.
+
 
 ## Removed scheduling overhead
 
