@@ -139,7 +139,12 @@ check('native Fetch streams bytes into real OPFS and persists IndexedDB metadata
 // the store insists on, because a graph without it answers nothing.
 const ONNX_PARTS = ['tokenizer.json', 'tokenizer_config.json', 'config.json', 'generation_config.json', 'chat_template.jinja'];
 const graphFile = (name = 'model_q4f16.onnx') => ({ name, mimeType: 'application/octet-stream', buffer: Buffer.alloc(1024 * 1024, 17) });
-const partFiles = () => ONNX_PARTS.map((name) => ({ name, mimeType: 'application/octet-stream', buffer: Buffer.from('{}') }));
+const partFiles = () => ONNX_PARTS.map((name) => ({
+  name, mimeType: 'application/octet-stream',
+  buffer: Buffer.from(JSON.stringify(name === 'config.json'
+    ? { max_position_embeddings: 2048, eos_token_id: 16 }
+    : name === 'generation_config.json' ? { eos_token_id: 16 } : {}))
+}));
 
 check('file picker installs through the real UI and starts the extension', async () => {
   const page = await context.newPage(); await page.setViewportSize({ width: 1100, height: 800 });
@@ -244,8 +249,8 @@ check('failed replacement keeps the selected model and both native files recover
   await model({ failWarmup: true });
   const outcome = await control.evaluate(async (parts) => AT.modelflow.installFromFiles([
     new File([new Uint8Array(1024 * 1024)], 'model_q4f16.onnx'),
-    ...parts.map((name) => new File(['{}'], name))
-  ]), ONNX_PARTS);
+    ...parts.map(({ name, text }) => new File([text], name))
+  ]), partFiles().map(({ name, buffer }) => ({ name, text: buffer.toString() })));
   assert.equal(outcome.ok, false); assert.equal(outcome.stored, true);
   assert.match(outcome.error, /warmup rejected/);
   assert.equal((await control.evaluate(() => AT.settings.load())).localModelId, before.localModelId);

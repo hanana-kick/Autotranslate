@@ -97,7 +97,11 @@
             });
           }
         }
-        return [{ generated_text: decoded(prompt) + answer(prompt) }];
+        const generated = answer(prompt);
+        options.streamer?.put([Array.from(tokenizer(prompt).input_ids.data)]);
+        options.streamer?.put([[...tokenizer(generated).input_ids.data, 16]]);
+        options.streamer?.end();
+        return [{ generated_text: decoded(prompt) + generated }];
       };
     }
   };

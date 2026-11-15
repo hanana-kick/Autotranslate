@@ -547,7 +547,7 @@ check('all presentation lifecycle transitions cancel a queued repaint', async (p
   }
 });
 
-check('inline previews preserve clipping and final hidden source suffix', async (page) => {
+check('inline previews preserve clipping while translating the full hidden source', async (page) => {
   await start(page, '<p style="font:16px/24px monospace;white-space:pre-wrap;height:24px;overflow:hidden;width:500px">Visible first source line.\nHidden source line that must not be consumed.\nAnother hidden source line.</p>');
   const result = await page.evaluate(async () => {
     const sent = requests[0].texts[0];
@@ -563,21 +563,21 @@ check('inline previews preserve clipping and final hidden source suffix', async 
       getComputedStyle(preview).position === 'static';
     const withinLine = [...range.getClientRects()].every((rect) =>
       rect.left >= bounds.left && rect.right <= bounds.right && rect.height <= 24);
-    requests[0].resolve(['보이는 첫 문장.']); await task;
+    const translation = '보이는 첫 문장.\n숨겨진 문장도 번역합니다.\n마지막 숨겨진 문장입니다.';
+    requests[0].resolve([translation]); await task;
     await new Promise((resolve) => setTimeout(resolve, 220));
     const result = { sent, inline, withinLine, same: paragraph.contains(source),
-      hiddenPreserved: source.data.includes('Hidden source line that must not be consumed.') &&
-        source.data.includes('Another hidden source line.'),
-      committedPreview: previewElement() === preview && preview.textContent === source.data };
+      hiddenTranslated: source.data === translation,
+      clippingPreserved: paragraph.clientHeight === 24 && getComputedStyle(paragraph).overflow === 'hidden' };
     translator.restore();
     return { ...result, restored: document.querySelector('#fixture').innerHTML === originalHTML };
   });
-  assert.equal(result.sent.includes('Hidden source'), false);
+  assert.equal(result.sent, 'Visible first source line.\nHidden source line that must not be consumed.\nAnother hidden source line.');
   assert.equal(result.inline, true);
   assert.equal(result.withinLine, true);
   assert.equal(result.same, true);
-  assert.equal(result.hiddenPreserved, true);
-  assert.equal(result.committedPreview, true);
+  assert.equal(result.hiddenTranslated, true);
+  assert.equal(result.clippingPreserved, true);
   assert.equal(result.restored, true);
 });
 

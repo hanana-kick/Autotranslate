@@ -11,6 +11,11 @@ preferences remain global settings.
 
 ## Report-driven ONNX policy and reading-unit correction (0.1.13)
 
+Release lifecycle fixtures supply model context/EOS metadata and emit the
+prompt/generated-token streamer protocol. Clipping regressions require the
+whole hidden source to be translated under the unchanged CSS clip; they do not
+require an internal preview node to survive final handoff.
+
 - No fabricated site/role hints, 40-character prompt switch, contextual retry,
   fixed source64 split, hint truncation, or blanket Han/kana rejection.
   The model tokenizer template receives only source text and requested languages.
