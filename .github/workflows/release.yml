@@ -1,8 +1,9 @@
-name: Release (Chrome)
+name: Release
 
 # Browser/planner regressions and reproducible builds gate publication.
 # Original-model inference and speed certification use separate native harnesses.
-# No Firefox archive is published; its on-device path remains unverified.
+# Chrome and Firefox archives publish together; Firefox is unsigned and its
+# on-device ONNX execution remains unverified.
 on:
   push:
     branches: [main]
@@ -41,12 +42,16 @@ jobs:
           import { createHash } from 'node:crypto';
           const version = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
           assert.match(version, /^\d+\.\d+\.\d+$/, 'a release needs a plain semantic version');
-          const archive = 'dist/autotranslate-' + version + '-chrome.zip';
-          const sha = createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
-          fs.writeFileSync('dist/SHA256SUMS.txt', sha + '  ' + path.basename(archive) + '\n');
-          console.log(JSON.stringify({ version, sha256: sha }));
+          const archives = ['chrome', 'firefox'].map(target =>
+            'dist/autotranslate-' + version + '-' + target + '.zip');
+          const lines = archives.map(archive => {
+            const digest = createHash('sha256').update(fs.readFileSync(archive)).digest('hex');
+            return digest + '  ' + path.basename(archive);
+          });
+          fs.writeFileSync('dist/SHA256SUMS.txt', lines.join('\n') + '\n');
+          console.log(JSON.stringify({ version, sha256: lines.map(line => line.split(' ')[0]) }));
           JS
-      - name: Publish Chrome with explicit verification scope
+      - name: Publish Chrome and Firefox with explicit verification scope
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
@@ -54,15 +59,19 @@ jobs:
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
           tag="v$version"
+          title="Autotranslate $version (Chrome, Firefox)"
           notes="$RUNNER_TEMP/release-notes.md"
           cat > "$notes" <<EOF
-          Autotranslate $version — Chrome, built from \`${GITHUB_SHA::12}\`.
+          Autotranslate $version — Chrome and Firefox, built from \`${GITHUB_SHA::12}\`.
 
           - Translation runs on-device through ONNX only, retaining the q4f16 WebGPU kernels and ONNX Runtime fallback; page text stays in the browser.
+          - Notion dictionary: a database published with "Share to web" is read without a token, and the official API with an integration token stays available. A fresh install ships both view URLs, syncs on a 5/15/60/360/1440-minute alarm (plus a catch-up at browser start) and retranslates authorized tabs when the dictionary changes.
+          - One counterpart per concept is resolved per language (기본형 mark, then the source note, then register), and each bundle ships only the background block its store accepts.
           - The toolbar popup controls per-tab ON/OFF. Settings are global and open without a source-tab binding or side panel.
           - Whole-page translation, up to eight concurrent fragments, optional immediate/no-animation rendering, dynamic DOM translation and current-source restoration are retained.
-          - Type/unit/package, deterministic browser, planner and reproducible-build gates passed. SHA256SUMS.txt identifies this archive.
-          - These gates do not certify a fresh native-model run or a local-inference speed benchmark. No Firefox archive is published; its on-device execution remains unverified.
+          - Type/unit/package, deterministic browser, planner, reproducible-build and AMO lint gates passed; the Firefox archive also installed as a temporary add-on in a real Firefox. SHA256SUMS.txt identifies both archives.
+          - Firefox is published unsigned: load it through \`about:debugging\` → This Firefox → Load Temporary Add-on → \`manifest.json\`. Its on-device ONNX execution is not certified by these gates.
+          - These gates do not certify a fresh native-model run or a local-inference speed benchmark.
 
           Verification run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           Setup: Options → download or select an on-device model → Save → explicitly enable the intended tab.
@@ -70,17 +79,42 @@ jobs:
           # Publishing the same version twice must be a no-op, not a red build:
           # every push to main triggers this workflow, including a docs-only one.
           # Different bytes under a version already out there is the case that
-          # must fail, and does.
+          # must fail, and does. An archive missing from a published version is
+          # uploaded, so a target added later reaches the release it belongs to.
           if gh release view "$tag" >/dev/null 2>&1; then
-            published="$(mktemp)"
-            gh release download "$tag" -p '*-chrome.zip' -O "$published" --clobber >/dev/null
-            shipped="$(cut -d' ' -f1 dist/SHA256SUMS.txt)"
-            if [ "$(shasum -a 256 "$published" | cut -d' ' -f1)" = "$shipped" ]; then
-              echo "v$version already publishes this exact archive ($shipped); nothing to do."
-              exit 0
+            staged="$(mktemp -d)"
+            published="$(gh release view "$tag" --json assets -q '.assets[].name')"
+            added=0
+            for archive in dist/*.zip; do
+              name="$(basename "$archive")"
+              if grep -qx "$name" <<< "$published"; then
+                gh release download "$tag" -p "$name" -D "$staged" --clobber >/dev/null
+                if [ "$(shasum -a 256 "$archive" | cut -d' ' -f1)" != "$(shasum -a 256 "$staged/$name" | cut -d' ' -f1)" ]; then
+                  echo "published $name differs from this build" >&2
+                  exit 1
+                fi
+                echo "$name already published unchanged"
+              else
+                gh release upload "$tag" "$archive"
+                echo "uploaded missing $name"
+                added=1
+              fi
+            done
+            if gh release download "$tag" -p SHA256SUMS.txt -D "$staged" --clobber >/dev/null 2>&1; then
+              if ! diff -q "$staged/SHA256SUMS.txt" dist/SHA256SUMS.txt >/dev/null; then
+                gh release upload "$tag" dist/SHA256SUMS.txt --clobber
+                added=1
+              fi
+            else
+              gh release upload "$tag" dist/SHA256SUMS.txt
+              added=1
             fi
-            echo 'An existing release is never silently overwritten.' >&2
-            exit 1
+            if [ "$added" = 1 ]; then
+              gh release edit "$tag" --title "$title" --notes-file "$notes"
+              echo "release $tag completed with every target"
+            fi
+            gh release view "$tag"
+            exit 0
           fi
-          gh release create "$tag" dist/*-chrome.zip dist/SHA256SUMS.txt --title "Autotranslate $version (Chrome)" --notes-file "$notes" --target "$GITHUB_SHA"
+          gh release create "$tag" dist/*.zip dist/SHA256SUMS.txt --title "$title" --notes-file "$notes" --target "$GITHUB_SHA"
           gh release view "$tag"

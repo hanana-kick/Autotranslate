@@ -11,6 +11,62 @@ permissions:
   contents: read
 
 jobs:
+  firefox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run build:firefox
+      # AMO's own manifest and permission rules. Errors fail; the remaining
+      # warnings are the vendored ONNX runtime's dynamic code and a collection
+      # notice that only matters for an AMO submission.
+      - name: AMO manifest lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p test-results/browser
+          npx --yes web-ext@8 lint --source-dir build/firefox --output json > test-results/browser/firefox-lint.json
+          node --input-type=module -e "
+            import fs from 'node:fs';
+            import assert from 'node:assert/strict';
+            const report = JSON.parse(fs.readFileSync('test-results/browser/firefox-lint.json', 'utf8'));
+            assert.equal(report.summary.errors, 0, 'AMO lint reported errors');
+            console.log('AMO lint: ' + report.summary.errors + ' errors, ' +
+              report.summary.warnings + ' warnings, ' + report.summary.notices + ' notices');
+          "
+      - uses: browser-actions/setup-firefox@v1
+      - name: Install as a temporary add-on in real Firefox
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "firefox: $FIREFOX_BIN"
+          # web-ext stays attached while Firefox runs, so a timed run is the
+          # smoke test: the log has to show the temporary install.
+          set +e
+          timeout 120 xvfb-run -a npx --yes web-ext@8 run \
+            --firefox "$FIREFOX_BIN" --source-dir build/firefox \
+            --no-reload --start-url about:blank 2>&1 | tee test-results/browser/firefox-run.log
+          status="${PIPESTATUS[0]}"
+          set -e
+          test "$status" = 124 || test "$status" = 0
+          grep -qE "temporary add-on" test-results/browser/firefox-run.log
+          ! grep -qiE "install failed|failed to install" test-results/browser/firefox-run.log
+      - name: Firefox evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-evidence-${{ github.run_id }}-firefox
+          path: test-results/browser/
+          if-no-files-found: warn
+          retention-days: 14
+
   chromium:
     runs-on: ubuntu-24.04
     timeout-minutes: 15

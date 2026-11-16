@@ -335,6 +335,23 @@ Diagnostic sources and the pre-change compiled modules are archived in
   Evidence and screenshots:
   `test-results/browser/onnx-only-extension/full-page-onnx-only.json`.
 
+## Firefox release gate
+
+The release publishes two archives. `build/chrome` and `build/firefox` are built
+by the same action, checked by the packaging gate for their own store's
+background shape, and listed together in `SHA256SUMS.txt`. The browser workflow
+adds a `firefox` job: `web-ext lint` must report **0 errors** (the four warnings
+are the vendored ONNX runtime's dynamic code and one AMO submission notice), and
+the built bundle is installed as a temporary add-on in a real Firefox under
+`xvfb`, where the run log must show the temporary install and no install
+failure. Publication is blocked on that job because the release workflow needs
+the browser workflow.
+
+The Firefox archive is unsigned, so installing it means
+`about:debugging` → This Firefox → Load Temporary Add-on → `manifest.json`.
+These gates cover the manifest, the package and a real install; they do not
+certify on-device ONNX execution in Firefox.
+
 ## Deterministic type, module and package checks
 
 Use Node 24 or newer:
@@ -446,11 +463,11 @@ See [the measured comment sessions](translation-performance.md#youtube-comment-s
 
 ## Release, evidence and limits
 
-The current Chrome release workflow requires browser regressions, planner
-acceptance, and the build action's type/unit/package and reproducibility checks.
-The release records the archive SHA-256. Native-model smoke results remain
-separate evidence; these gates do not certify original-model inference.
-No Firefox archive is published; its on-device execution remains unverified.
+The release workflow requires browser regressions (Chromium and Firefox),
+planner acceptance, and the build action's type/unit/package and reproducibility
+checks. It publishes the Chrome and Firefox archives together and records both
+SHA-256 digests. Native-model smoke results remain separate evidence; these
+gates do not certify original-model inference or Firefox on-device execution.
 
 No token or model file is committed. Authenticated browser traces/profiles are excluded from artifacts; text evidence is scanned before upload. Screenshots, sanitized logs, before/after HTML, installed-file inventories, environment and tested package hashes are retained.
 
