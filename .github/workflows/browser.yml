@@ -42,10 +42,14 @@ jobs:
               report.summary.warnings + ' warnings, ' + report.summary.notices + ' notices');
           "
       - uses: browser-actions/setup-firefox@v1
+        id: firefox
       - name: Install as a temporary add-on in real Firefox
         shell: bash
+        env:
+          FIREFOX_BIN: ${{ steps.firefox.outputs.firefox-path }}
         run: |
           set -euo pipefail
+          test -x "$FIREFOX_BIN" || { echo "no Firefox binary from setup-firefox: '$FIREFOX_BIN'" >&2; exit 1; }
           echo "firefox: $FIREFOX_BIN"
           # web-ext stays attached while Firefox runs, so a timed run is the
           # smoke test: the log has to show the temporary install.
