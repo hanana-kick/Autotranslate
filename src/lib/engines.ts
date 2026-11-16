@@ -169,6 +169,7 @@ namespace AT.engines {
     /** model id; empty means nothing is selected and the call is a config error */
     localModelId?: string;
     localMaxTokens?: number;
+    glossary?: AT.glossary.Entry[];
     fragmentConcurrency?: AT.settings.TranslationConcurrency;
     /** Internal shared admission, independent of this request's worker count. */
     fragmentScheduler?: FragmentScheduler;
@@ -207,7 +208,8 @@ namespace AT.engines {
       texts: args.texts,
       source: source ?? '',
       target,
-      maxTokens: args.localMaxTokens
+      maxTokens: args.localMaxTokens,
+      glossary: args.glossary
     }, args.onProgress, args.signal);
     AT.local.throwIfAborted(args.signal);
     if (!reply?.ok) {
@@ -373,7 +375,8 @@ namespace AT.engines {
       maxTokens: localMaxTokens,
       texts: unique,
       source: resolved.lang ?? '',
-      target: AT.plamo3.langFor(target) ?? ''
+      target: AT.plamo3.langFor(target) ?? '',
+      glossary: request.glossary
     }, undefined, request.signal);
     AT.local.throwIfAborted(request.signal);
     if (counted?.code === 'cancelled') throw AT.local.cancelled();

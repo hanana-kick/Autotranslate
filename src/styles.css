@@ -214,6 +214,12 @@ progress::-moz-progress-bar { background: var(--accent); }
 .language-checklist label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .language-checklist input { min-height: 18px; width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
 
+#notionFields { border: 0; padding: 0; margin: 12px 0 0; min-inline-size: 0; }
+#notionFields > label, #notionFields .field > label:has(input) { display: flex; align-items: center; gap: 8px; }
+#notionFields input[type="checkbox"] { min-height: 18px; width: 18px; height: 18px; flex: 0 0 18px; accent-color: var(--accent); }
+#notionFields details { margin: 16px 0; }
+#notionFields summary { cursor: pointer; font-weight: 500; }
+
 @media (max-width: 480px) {
   .grid { grid-template-columns: minmax(0, 1fr); }
   h1 { font-size: 20px; }

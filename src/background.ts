@@ -94,6 +94,8 @@ if (typeof self.importScripts === 'function') {
     'lib/constants.js',
     'lib/browser.js',
     'lib/plamo3.js',
+    'lib/glossary.js',
+    'lib/notion.js',
     'lib/pagecontext.js',
     'lib/targets.js',
     'lib/rules.js',
@@ -161,7 +163,7 @@ if (typeof self.importScripts === 'function') {
   const TARGETS_KEY = 'translationTargets.v1';
   const AUTOMATIC_KEY = 'translationAutomatic.v1';
   const DISABLED_KEY = 'translationDisabled.v1';
-  const LANGUAGES_KEY = 'translationLanguages.v1';
+  const LANGUAGES_KEY = 'translationLanguages.v2';
   const targets = new Set<number>();
   const automatic = new Set<number>();
   const disabled = new Set<number>();
@@ -217,9 +219,84 @@ if (typeof self.importScripts === 'function') {
     return write;
   }
 
+  const GLOSSARY_ALARM = 'notion-glossary-sync';
+  let glossaryEntries: AT.glossary.Entry[] = [];
+  let glossaryRevision = '';
+  let glossaryRead = 0;
+
+  /** Only the revision crosses to content; entries and credentials stay trusted. */
+  async function refreshGlossary(retarget = true): Promise<void> {
+    const read = ++glossaryRead;
+    const [config, snapshot] = await Promise.all([AT.notionsync.loadConfig(), AT.notionsync.loadSnapshot()]);
+    if (read !== glossaryRead) return;
+    const revision = config.enabled && snapshot ? snapshot.revision : '';
+    if (revision === glossaryRevision) return;
+    glossaryEntries = revision && snapshot ? snapshot.entries : [];
+    glossaryRevision = revision;
+    if (!retarget) return;
+    for (const id of targets) {
+      targetRevisions.set(id, (targetRevisions.get(id) ?? 0) + 1);
+      cancelTabBatches(id);
+    }
+    await targetsReady;
+    // Do not enroll other tabs or alter explicit OFF choices on a dictionary update.
+    await Promise.all([...targets].map(id =>
+      translateTab(id).catch(error => AT.warn('applying local glossary failed', error))));
+  }
+
+  const glossaryReady = refreshGlossary(false).catch(error => AT.warn('loading local glossary failed', error));
+
+  let glossarySchedule: Promise<void> = Promise.resolve();
+  function scheduleGlossary(): Promise<void> {
+    const next = glossarySchedule.then(async () => {
+      if (!api.alarms) return;
+      const config = await AT.notionsync.loadConfig();
+      if (!config.intervalMinutes || !AT.notionsync.ready(config)) {
+        await api.alarms.clear(GLOSSARY_ALARM);
+        return;
+      }
+      const alarm = await api.alarms.get(GLOSSARY_ALARM);
+      if (alarm?.periodInMinutes !== config.intervalMinutes) {
+        await api.alarms.create(GLOSSARY_ALARM, {
+          delayInMinutes: config.intervalMinutes, periodInMinutes: config.intervalMinutes
+        });
+      }
+    });
+    glossarySchedule = next.catch(() => undefined);
+    return next;
+  }
+
+  async function glossaryStatus(): Promise<AT.MessageResult> {
+    const [stored, snapshot, state] = await Promise.all([
+      AT.notionsync.loadConfig(), AT.notionsync.loadSnapshot(), AT.notionsync.loadState()
+    ]);
+    const { token, ...config } = stored;
+    return { config, hasToken: Boolean(token), state,
+      snapshot: snapshot ? { version: snapshot.version, revision: snapshot.revision,
+        syncedAt: snapshot.syncedAt, concepts: snapshot.concepts, entries: snapshot.entries.length } : null };
+  }
+
+  async function syncGlossary(): Promise<AT.MessageResult> {
+    await AT.notionsync.sync();
+    await refreshGlossary();
+    return await glossaryStatus();
+  }
+
+  api.alarms?.onAlarm.addListener(alarm => {
+    if (alarm.name !== GLOSSARY_ALARM) return;
+    void AT.notionsync.loadConfig().then(config => {
+      if (config.enabled && config.intervalMinutes) return syncGlossary();
+      return undefined;
+    }).catch(() => AT.warn('Notion glossary sync failed; keeping the saved dictionary'));
+  });
+  // Alarms can disappear on restart/update; reconstruct from saved preferences.
+  void scheduleGlossary().catch(() => AT.warn('Notion glossary scheduling failed'));
+
   function targetSnapshot(settings: AT.settings.Settings): AT.settings.ContentSnapshot {
     // Legacy settings.enabled is no longer an authorization source.
-    return AT.settings.contentSnapshot({ ...settings, enabled: true });
+    const snapshot = AT.settings.contentSnapshot({ ...settings, enabled: true });
+    if (glossaryRevision) snapshot.translationKey = JSON.stringify([snapshot.translationKey, glossaryRevision]);
+    return snapshot;
   }
 
   async function setTabEnabled(tabId: number | undefined, enabled: boolean): Promise<AT.MessageResult> {
@@ -347,6 +424,25 @@ if (typeof self.importScripts === 'function') {
     return { action: 'translate', reason: 'selected-tab' };
   }
 
+  async function declaredPageLanguage(tabId: number, href: string, current: () => boolean): Promise<string> {
+    const cached = pageLanguages.get(tabId);
+    if (cached?.url === href) return cached.language;
+    if (!AT.scripting) return '';
+    const results = await AT.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const root = document.documentElement;
+        const declared = root.getAttribute('lang') ?? root.getAttribute('xml:lang') ??
+          document.querySelector('meta[http-equiv="content-language" i]')?.getAttribute('content') ?? '';
+        const code = declared.trim().toLowerCase();
+        return /^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/.test(code) ? code : '';
+      }
+    }).catch(() => []);
+    const language = typeof results[0]?.result === 'string' ? results[0].result : '';
+    if (current()) pageLanguages.set(tabId, { url: href, language });
+    return language;
+  }
+
   /** Reconcile a live tab with preferences without paying for unread tabs. */
   async function reconcileTab(tabId: number, policy?: AT.settings.Settings, revision?: number): Promise<void> {
     await targetsReady;
@@ -368,13 +464,7 @@ if (typeof self.importScripts === 'function') {
       permitted = rule?.action === 'always';
       reason = 'site-always';
       if (!permitted && settings.alwaysTranslateLanguages.length && tab.active !== false) {
-        const cached = pageLanguages.get(tabId);
-        let language = cached?.url === href ? cached.language : '';
-        if (!language && api.tabs.detectLanguage) {
-          language = await api.tabs.detectLanguage(tabId).catch(() => '');
-          // Do not infer a language from undetermined/failed detection.
-          if (language && language !== 'und' && current()) pageLanguages.set(tabId, { url: href, language });
-        }
+        const language = await declaredPageLanguage(tabId, href, current);
         permitted = Boolean(language) && language !== 'und' && !C.sameLanguage(language, settings.targetLang) &&
           settings.alwaysTranslateLanguages.some(code => C.sameLanguage(language, code));
         reason = 'language-always';
@@ -423,6 +513,7 @@ if (typeof self.importScripts === 'function') {
     if (tab?.id == null) throw new Error('no active tab');
     if (!isInjectable(tab.url)) throw new Error('this page cannot be translated');
     await targetsReady;
+    await glossaryReady;
     if (!targets.has(tab.id)) return { status: 'skipped', reason: 'tab-disabled' };
     const targetRevision = targetRevisions.get(tab.id) ?? 0;
     const currentTarget = () => targets.has(tab.id!) && (targetRevisions.get(tab.id!) ?? 0) === targetRevision;
@@ -512,6 +603,7 @@ if (typeof self.importScripts === 'function') {
     AT.local.throwIfAborted(signal);
     await AT.local.withSignal(targetsReady, signal);
     AT.local.throwIfAborted(signal);
+    await AT.local.withSignal(glossaryReady, signal);
     const tabId = sender.tab?.id;
     if (tabId == null || !targets.has(tabId)) throw new Error('translation is turned off for this tab');
     const revision = targetRevisions.get(tabId) ?? 0;
@@ -525,23 +617,33 @@ if (typeof self.importScripts === 'function') {
     try {
       const settings = await AT.local.withSignal(getSettings(), controller.signal);
       AT.local.throwIfAborted(controller.signal);
-      if (message.translationKey && message.translationKey !== AT.settings.contentSnapshot(settings).translationKey) {
+      if (message.translationKey && message.translationKey !== targetSnapshot(settings).translationKey) {
         throw AT.local.cancelled();
       }
       if (!batchScheduler) batchScheduler = AT.engines.createFragmentScheduler(settings.translationConcurrency);
       else batchScheduler.setConcurrency(settings.translationConcurrency);
       const scheduler = batchScheduler;
       const requestedWidth = AT.settings.isTranslationConcurrency(message.fragmentConcurrency) ? message.fragmentConcurrency : 1;
+      let source = message.sourceLang ?? settings.sourceLang;
+      if (source === 'auto' && glossaryEntries.length) {
+        // Short names often defeat CLD; the page's declaration is the source
+        // language hint when a local dictionary is active, never a domain rule.
+        const tab = await api.tabs.get(tabId);
+        const language = tab?.url ? await declaredPageLanguage(tabId, tab.url,
+          () => !controller.signal.aborted && (targetRevisions.get(tabId) ?? 0) === revision) : '';
+        source = AT.plamo3.langFor(language) ?? source;
+      }
       const request: AT.engines.TranslateRequest = {
         signal: controller.signal,
         ...(onProgress ? { onProgress: (index: number, text: string) => {
           if (!controller.signal.aborted && targets.has(tabId) && (targetRevisions.get(tabId) ?? 0) === revision) onProgress(index, text);
         } } : {}),
         texts: message.texts ?? [],
-        source: message.sourceLang ?? settings.sourceLang,
+        source,
         target: message.targetLang ?? settings.targetLang,
         localModelId: settings.localModelId,
         localMaxTokens: settings.localMaxTokens,
+        ...(glossaryEntries.length ? { glossary: glossaryEntries } : {}),
         fragmentConcurrency: Math.min(settings.translationConcurrency, requestedWidth) as AT.settings.TranslationConcurrency,
         fragmentScheduler: { run: (job, signal) => scheduler.run(job, signal, tabId) }
       };
@@ -568,7 +670,8 @@ if (typeof self.importScripts === 'function') {
       source: settings.sourceLang,
       target: message.target ?? settings.targetLang,
       localModelId: settings.localModelId,
-      localMaxTokens: settings.localMaxTokens
+      localMaxTokens: settings.localMaxTokens,
+      ...(glossaryEntries.length ? { glossary: glossaryEntries } : {}),
     });
     return { result };
   }
@@ -805,7 +908,19 @@ if (typeof self.importScripts === 'function') {
 
   api.runtime.onStartup.addListener(() => {
     setupMenus();
+    // The alarm alone would leave a fresh browser session on the previously
+    // saved dictionary until the first tick, so a due sync runs now instead.
+    return catchUpGlossary().catch(() => AT.warn('Notion glossary catch-up failed'));
   });
+
+  /** Sync on startup only when the saved dictionary is older than its interval. */
+  async function catchUpGlossary(): Promise<void> {
+    const [config, snapshot] = await Promise.all([AT.notionsync.loadConfig(), AT.notionsync.loadSnapshot()]);
+    if (!config.intervalMinutes || !AT.notionsync.ready(config)) return;
+    const ageMinutes = (Date.now() - (snapshot?.syncedAt ?? 0)) / 60000;
+    if (ageMinutes < config.intervalMinutes) return;
+    await syncGlossary();
+  }
 
   if (AT.contextMenus?.onClicked) {
     AT.contextMenus.onClicked.addListener((info, tab) => {
@@ -885,6 +1000,10 @@ if (typeof self.importScripts === 'function') {
   // A context with storage always has onChanged; the plain-JS version relied on
   // the same guarantee, so the assertion keeps a missing member a TypeError.
   api.storage.onChanged!.addListener((changes, area) => {
+    if (area === 'local' && (changes[AT.notionsync.CONFIG_KEY] || changes[AT.notionsync.SNAPSHOT_KEY])) {
+      void refreshGlossary().catch(() => AT.warn('refreshing local glossary failed'));
+      if (changes[AT.notionsync.CONFIG_KEY]) void scheduleGlossary().catch(() => AT.warn('Notion glossary scheduling failed'));
+    }
     if (area !== 'local' || !changes[C.STORAGE_KEY]) return;
     const revision = ++policyEpoch;
     const edited = changes[C.STORAGE_KEY];
@@ -918,6 +1037,20 @@ if (typeof self.importScripts === 'function') {
   // The runtime hands over untrusted JSON: each handler names the payload it
   // reads, and the table narrows the message to that shape once, here.
   AT.onMessage({
+    [C.MSG.GLOSSARY_STATUS]: (_message, sender) => {
+      requireExtensionUI(sender);
+      return glossaryStatus();
+    },
+    [C.MSG.GLOSSARY_SAVE]: async (message, sender) => {
+      requireExtensionUI(sender);
+      await AT.notionsync.saveConfig(message.patch);
+      await Promise.all([scheduleGlossary(), refreshGlossary()]);
+      return await glossaryStatus();
+    },
+    [C.MSG.GLOSSARY_SYNC]: (_message, sender) => {
+      requireExtensionUI(sender);
+      return syncGlossary();
+    },
     [C.MSG.BATCH]: (message, sender, onProgress, signal) => translateBatch(message as AT.background.BatchRequest, sender, onProgress, signal),
     [C.MSG.STATE_CHANGED]: (message, sender) => reportState(message as AT.background.StateReport, sender),
     [C.MSG.GET_STATE]: (message) => getState(message as AT.background.TabRequest),

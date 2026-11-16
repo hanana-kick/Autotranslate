@@ -9,8 +9,8 @@
 // custom cache backed by OPFS, so nothing but the extension's own origin is
 // ever fetched.
 //
-// Load after lib/constants.js, lib/browser.js, lib/plamo3.js, lib/local.js,
-// lib/modelstore.js and lib/pipelinehost.js, and after
+// Load after lib/constants.js, lib/browser.js, lib/plamo3.js, lib/glossary.js,
+// lib/local.js, lib/modelstore.js and lib/pipelinehost.js, and after
 // vendor/ort-common.all.js, vendor/ort-webgpu.all.js and
 // vendor/transformers.web.js.
 namespace AT.onnxhost {
@@ -195,18 +195,31 @@ namespace AT.onnxhost {
     return remember(expandedTexts, text, out, out.length);
   }
 
-  /** Render the source and requested languages through the model template. */
-  function renderPrompt(target: string, text: string, source: string | null): string {
+  /** Select against each raw fragment; only the template-ready term sides are
+   *  sanitized and byte-expanded, just like the source content. */
+  function renderPrompt(target: string, text: string, source: string | null, entries?: readonly AT.glossary.Entry[]): string {
     const sourceLang = P.langFor(source);
-    return tokenizer!.apply_chat_template(
+    const glossary = entries?.length ? AT.glossary.select(entries, text, source, target).map(pair => ({
+      source: expandByteFallback(P.sanitize(pair.source)),
+      target: expandByteFallback(P.sanitize(pair.target))
+    })) : [];
+    const prompt = tokenizer!.apply_chat_template(
       [{ role: 'user', content: expandByteFallback(P.sanitize(text)) }],
       {
         target_lang: P.langFor(target)!,
         add_generation_prompt: true,
         tokenize: false,
-        ...(sourceLang ? { source_lang: sourceLang } : {})
+        ...(sourceLang ? { source_lang: sourceLang } : {}),
+        ...(glossary.length ? { glossary } : {})
       }
     );
+    // Older imported templates can accept and silently ignore unknown kwargs.
+    // Require the actual native PFML payload, never an invented prompt hint.
+    if (glossary.length && !prompt.includes('<|plamo:tag|>glossary' +
+        glossary.map(pair => '<|plamo:index|>' + pair.source + '<|plamo:item|>' + pair.target).join(''))) {
+      fail('unsupported-glossary', 'The model chat template did not render the native glossary.');
+    }
+    return prompt;
   }
 
   function requireLifecycle(version: number): void {
@@ -853,23 +866,23 @@ namespace AT.onnxhost {
       ...liveEngines().map(slot => slot.contextTokens ?? 0));
   }
 
-  function generationPlan(target: string, text: string, source: string | null, maxTokens: number) {
-    const prompt = renderPrompt(target, text, source);
+  function generationPlan(target: string, text: string, source: string | null, maxTokens: number, glossary?: readonly AT.glossary.Entry[]) {
+    const prompt = renderPrompt(target, text, source, glossary);
     const inputTokens = promptIds(prompt).length;
     const outputTokens = L.answerTokens(tokenCount(text));
     return { prompt, outputTokens, totalTokens: inputTokens + outputTokens, limit: contextLimit(maxTokens) };
   }
 
-  async function translateOne(target: string, text: string, source: string | null, maxTokens: number, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<string> {
+  async function translateOne(target: string, text: string, source: string | null, maxTokens: number, glossary: readonly AT.glossary.Entry[] | undefined, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<string> {
     L.throwIfAborted(signal);
-    const plan = generationPlan(target, text, source, maxTokens);
+    const plan = generationPlan(target, text, source, maxTokens, glossary);
     if (plan.totalTokens > plan.limit) fail('context-overflow', 'The source and output reserve exceed the model context; plan source fragments first.');
     return await generate(plan.prompt, plan.outputTokens, text, onProgress, signal);
   }
 
-  async function translateChunk(target: string, texts: string[], source: string | null, maxTokens: number, onProgress?: AT.TranslationProgress, signal?: AbortSignal): Promise<string[]> {
+  async function translateChunk(target: string, texts: string[], source: string | null, maxTokens: number, glossary: readonly AT.glossary.Entry[] | undefined, onProgress?: AT.TranslationProgress, signal?: AbortSignal): Promise<string[]> {
     L.throwIfAborted(signal);
-    if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', source, maxTokens, onProgress ? (text) => onProgress(0, text) : undefined, signal)];
+    if (texts.length === 1) return [await translateOne(target, texts[0] ?? '', source, maxTokens, glossary, onProgress ? (text) => onProgress(0, text) : undefined, signal)];
     // WebGPU rows share weights while keeping each source's prompt, output
     // budget and identity independent. Refill only the advertised row count;
     // the worker owns global admission across concurrent application requests.
@@ -886,7 +899,7 @@ namespace AT.onnxhost {
         L.throwIfAborted(controller.signal);
         const index = next++;
         if (index >= texts.length) return;
-        out[index] = await translateOne(target, texts[index]!, source, maxTokens,
+        out[index] = await translateOne(target, texts[index]!, source, maxTokens, glossary,
           onProgress ? (text) => onProgress(index, text) : undefined, controller.signal);
       }
     };
@@ -919,7 +932,7 @@ namespace AT.onnxhost {
     return promptTokens(expandByteFallback(P.sanitize(text)));
   }
 
-  type CountRequest = { modelId?: unknown; maxTokens?: unknown; texts?: unknown; target?: unknown; source?: unknown };
+  type CountRequest = AT.local.TranslateRequest;
 
   /** Exact costs and sentence-first plans, including prompt and output reserve. */
   async function countNow(request: CountRequest, signal?: AbortSignal): Promise<AT.local.TokenCounts> {
@@ -942,11 +955,13 @@ namespace AT.onnxhost {
       L.throwIfAborted(signal);
       requireLifecycle(version);
       result.counts.push(tokenCount(text));
+      const matches = request.glossary?.length
+        ? AT.glossary.selectSpans(request.glossary, text, source, target) : [];
       result.sourceChunks.push(await L.sourceChunks(text, limit, fragment => {
         requireLifecycle(version);
         L.throwIfAborted(signal);
-        return generationPlan(target, fragment, source, maxTokens).totalTokens;
-      }, signal));
+        return generationPlan(target, fragment, source, maxTokens, request.glossary).totalTokens;
+      }, signal, matches));
     }
     L.throwIfAborted(signal);
     requireLifecycle(version);
@@ -974,7 +989,7 @@ namespace AT.onnxhost {
       version = await ensureLoaded(modelId, maxTokens, askedTarget);
       L.throwIfAborted(signal);
       requireLifecycle(version);
-      const translations = await translateChunk(askedTarget, texts, source, maxTokens, onProgress, signal);
+      const translations = await translateChunk(askedTarget, texts, source, maxTokens, request.glossary, onProgress, signal);
       L.throwIfAborted(signal);
       requireLifecycle(version);
       state.state = 'ready';

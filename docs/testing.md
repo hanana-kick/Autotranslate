@@ -9,6 +9,214 @@ binding. Browser/native harnesses operate the shipped toolbar popup for ON/OFF;
 opening settings must not select or restore a web tab. Automatic URL/language
 preferences remain global settings.
 
+## Notion local glossary synchronization
+
+`lib/notion.ts` owns read-only dictionary synchronization from two sources. The
+official API path pins `Notion-Version: 2025-09-03`, resolves database data
+sources and configured column names/property IDs, and fully paginates both
+concept and expression tables. The shared-page path reads a database published
+with "Share to web" through the viewer endpoints its own page calls, with no
+credential. The expression relation identifies a Notion concept page, whose UUID
+title becomes the canonical `conceptId`; these IDs are not interchangeable.
+Only a complete, schema-valid result from either source replaces the local v1
+snapshot. Incomplete queries, truncated properties, inaccessible relations,
+malformed rows and stale configuration fail without replacing it. HTTP 429 uses
+bounded Retry-After handling. Unchanged canonical entries keep the same SHA-256
+revision.
+
+The background reconstructs an extension alarm from saved preferences, handles
+manual synchronization and keeps credentials/dictionary data out of content
+snapshots. Local dictionary changes cancel old generations and retarget only
+already-authorized tabs; explicit OFF is preserved. Token removal stops
+scheduled requests but does not delete the local dictionary. Tokens are stored
+unencrypted in trusted extension-local storage, never `storage.sync` or prompts.
+
+A database edit reaches open tabs without any manual step: the alarm
+(5, 15, 60, 360 or 1440 minutes, or manual only) syncs the configured source, the
+new snapshot bumps the revision, in-flight batches for authorized tabs are
+cancelled, and those tabs are retranslated. A browser start also syncs once when
+the saved snapshot is older than the configured interval, so a restart does not
+wait for the first tick.
+
+Two sources fill the same snapshot. `api` reads the official token API. `public`
+reads a database published with **Share to web** and needs no credential and no
+server: the page's own viewer endpoints (`getPublicPageData`, `queryCollection`,
+`syncRecordValues`) answer unauthenticated requests, which is why the shared page
+works in a browser at all. The page URL carries the workspace, the page block and
+the view; the reader grows `loader.reducers.collection_group_results.limit` until
+the view reports no more rows, then fetches the row bodies the viewer omitted in
+batches of 100. The viewer's internal shapes are translated into the same
+property objects the API path validates, so both sources share one validation,
+one assembly and one SHA-256 revision. `share`-only pages, missing rows,
+unmapped column types and non-page rows fail without replacing the last complete
+dictionary.
+
+The shared page's HTML alone is not a source: it is a client-rendered shell
+(22,765 bytes, no rows, no embedded state). The viewer endpoints are the reason
+a public database can be read at all.
+
+The build emits one legal background block per target: Chrome MV3 ships only
+`background.service_worker` (Chrome rejects `background.scripts` with "requires
+manifest version of 2 or lower"), and the Firefox bundle ships only
+`background.scripts` for its event page. The validator checks each emitted
+manifest for its own store, not the source manifest's union of both.
+The options page names an empty shared-page URL before requesting a sync, so the
+service never has to answer with a generic "configure both URLs" sentence. A
+fresh install already carries both published view URLs and defaults to the
+public source, so opening the settings and pressing sync needs no typing.
+
+Verification: a headed Chrome run with a fresh profile and the built extension,
+**no token and no typing**, showed both view URLs filled in with the public
+source selected, then synced in **11.6 s** producing **647 concepts /
+1,886 entries**. A second headed run read the same pages in 12.0 s, and
+all **1,886** rows matched the independently collected reference snapshot field
+for field (term, language, conceptId, group, traits, description). The viewer
+joins multiple multi-select options into one comma-separated value; splitting
+them changed 211 rows to match. Unit tests cover the two-url configuration,
+row batching, the login-only page, a row that never arrives, and the
+missing-view-identifier URL. Evidence:
+`test-results/browser/public-sync-check.json` and `public-sync-check.png`.
+
+`lib/glossary.ts` selects exact longest nonoverlapping matches with Latin word
+boundaries, matching concept/group/languages and omitting ambiguous or missing
+counterparts. One counterpart per concept is resolved in a fixed order: a
+`기본형` mark **in the target language**, then the candidate the source-language
+usage note names, then the candidate with the same register (traits) as the
+source term. A mark in one language never marks another language's spelling, so
+`ChroNoiR` (Japanese `기본형`) pairs with `쿠로노와르`, not with the identical
+Korean spelling variant. Candidates that stay tied remain ambiguous and are
+omitted. The compiled index is cached per dictionary snapshot, because the
+snapshot array is replaced wholesale on every sync.
+
+`onnxhost.ts` supplies matched pairs through the model template's
+native `glossary` parameter, including byte fallback and reserved-token escaping.
+The source fragment planner counts this exact prompt and protects matched spans
+from splitting. Unsupported templates and indivisible over-budget terms fail
+explicitly; no output replacement, synthetic site hint, shortened reserve or
+silent dictionary clipping is used. The template accepts exactly `source` and
+`target` per glossary entry, so usage notes cannot travel with a pair.
+
+Verification: typecheck and Chrome/Firefox builds passed. Targeted background,
+options, Notion, matching, engine, local and host tests passed **265/265**.
+Installed Chrome integration passed **18/18**, including custom column mapping,
+two-page expression queries, manual synchronization, a real native alarm event,
+active-page cache invalidation, offline local reuse after sync failure, exact
+OFF restoration and the 390px settings layout. Notion REST responses and model
+inference are deterministic doubles in this integration test; it is not a live
+workspace authorization or real-model quality claim.
+
+Evidence: `test-results/browser/notion-glossary/extension-trace.zip`,
+`notion-glossary-settings.png` and `notion-glossary-translated.png`.
+No live Notion connection token was supplied; the user's database has not been
+modified. Firefox native alarm/sidebar execution remains unverified.
+
+A separate headed Chrome run used the actual 705,701,446-byte q4f16 graph on
+Apple Metal (`backend: kernels`, no unsafe-GPU flag). Two fixed Japanese
+paragraphs used `猫汰つな → 네코타 츠나`, then a manual sync changed the preferred
+spelling to `네코타 쓰나`. Both paragraphs followed each version (**4/4** name
+checks), with no Notion request during translation and exact source restoration
+on OFF. Settings synchronization used the real UI and intercepted official REST
+responses, not a live workspace token. macOS rejected native toolbar opening in
+this headed run, so it activated the same production `SET_TAB_ENABLED` handler
+from privileged options; toolbar UI remains covered separately above.
+
+This is terminology obedience on four outputs, not general semantic accuracy
+or a full-page three-second benchmark. The model still rendered `配信` as
+`출시` in the sample sentence. Evidence and the preserved smoke driver:
+`test-results/browser/notion-glossary-real/report.json`,
+`updated-native-glossary.png`, `smoke-source.mjs`. Initial setup/focus harness
+failures are retained alongside the successful run.
+
+
+### Glossary counterpart resolution correction
+
+The resolver collected `기본형` marks and usage notes per concept across **all**
+languages, so a Japanese name's mark made the identical Korean spelling variant
+look canonical, and a Korean note overwrote the Japanese note for the same
+spelling. `ChroNoiR`, `VΔLZ`, `桜魔皇国`, `Krisis` and twelve other concepts
+therefore produced the wrong Korean counterpart or none at all. Marks and notes
+are now scoped per language, and a third rule picks the candidate whose traits
+match the source term's own register (`専門어` → `전문어`, not `설명형`).
+
+Verification: typecheck and Chrome/Firefox builds passed. The matching test
+file passed **17/17** and the full suite **670/670**; three regression tests
+cover the cross-language mark, the source-language note and the register
+tie-break. Against the shipped 1,886-entry dictionary, **48** term resolutions
+changed (36 gained a counterpart, 12 changed it, none lost one); `ja→ko`
+multi-candidate concepts went from 5 unresolved to 1.
+
+Paired prompts were hashed with the model's own chat template: **61/61** captured
+public sources render byte-identical prompts before and after the fix, so the
+existing corpus is unaffected. An authored probe of the 15 affected terms was
+run against two builds of the extension - one with the previous resolver, one
+with the fixed resolver - on the real installed q4f16 GPU. **13/15** outputs
+changed; the corrections move `ChroNoiR → 쿠로노와르`, `VΔLZ → 발츠`,
+`企業勢 → 기업세`, `オフコラボ → 오프 합방`, `鳩 → 중계질`, `トワ様 → 토와사마`
+and `てぇてぇ → 테에테에` into the Korean output instead of leaving the Japanese
+spelling, a generic paraphrase (`企業 세력`) or the wrong sense
+(`てぇてぇ → 정말 싫다고`).
+
+Evidence: `test-results/browser/glossary-quality/ab-old.json`, `ab-new.json`,
+`probe-affected.json`, `paired-results-fixed.json`. The probe sentences are
+authored, not captured pages; it is a terminology slot comparison, not a
+page-level quality or latency claim.
+
+### Rejected: dictionary notes in the prompt's reference channel
+
+The template's `glossary` parameter accepts exactly `source` and `target`
+(`Each glossary entry must contain exactly source and target.`), so a term's
+usage note cannot travel with its pair. Two one-call alternatives were built and
+measured on the same 61-source corpus with the real q4f16 GPU, both sending the
+notes through the template's `context` channel:
+
+| form | outputs changed | worse | better | prompt growth |
+|---|---|---|---|---|
+| `source → target: note` lines | 12/15 (15-source probe) | 6 | 1 | 41 → 106 tokens |
+| `[{"term","target","meaning"}]` JSON | 17/61 | 7 | 3 | +101 tokens median, ×3.06 prompt |
+
+Structured JSON did not remove the failure mode: the Korean note text competes
+with the pair itself. On `general-13` the model emitted `아카이브` although the
+glossary pair said `다시보기`, and `official-01` produced `하나가 자매` for
+`花芽姉妹` where the pair-only prompt produced `꽃눈 자매`. The reference channel
+is documented as reference text, not per-term metadata, and a 0.8B translation
+model does not separate the two.
+
+Both experiments are reverted: no `context` parameter, no request field and no
+`contextJson` export remain in the shipped code. A final headed run of the
+shipped build on all 61 sources recorded **244** host calls, none carrying a
+context field, **26** distinct glossary pairs sent, and **61/61** outputs
+identical to the pair-only baseline.
+
+Evidence: `test-results/browser/glossary-quality/paired-context.json`. The
+notes are still used, but only host-side, to pick which pair to send.
+
+## Declared page language and native settings sidebar
+
+Automatic language enrollment reads the top document's `html[lang]`, then
+`xml:lang`, then a Content-Language meta declaration when the preceding
+attribute is absent. Empty/invalid/undetermined declarations do not enroll;
+body-language guessing is not a fallback. Regional tags match their base
+language. Cached declarations survive worker suspension and are cleared on
+navigation; v2 language storage does not reuse the previous detector cache.
+Manual OFF and target-language exclusions still win.
+
+Settings open in Chrome's global Side Panel or Firefox's Sidebar directly from
+the settings click, without a tab-bound path or translation switch. Unsupported
+browsers retain the detached-window fallback; sidebar errors remain visible
+rather than silently opening a different surface. Setup stays detached.
+
+Verification: typecheck and both browser builds passed; background/UI unit
+tests passed 60/60. Installed Chrome integration tests passed 17/17 with only
+model inference/GPU capability substituted. The native SIDE_PANEL context,
+unchanged browser-window count, settings saves after source-tab closure, and
+360px panel layout were checked. Declaration tests cover `ja-JP` with an
+English body, meta fallback, HTML precedence, missing/empty declarations and
+manual OFF across reload. Evidence:
+`test-results/browser/language-sidebar/options-native-sidebar.png` and
+`extension-trace.zip` in the same directory. Firefox manifest and API dispatch
+were checked, but its native sidebar was not exercised.
+
+
 ## Report-driven ONNX policy and reading-unit correction (0.1.13)
 
 Release lifecycle fixtures supply model context/EOS metadata and emit the

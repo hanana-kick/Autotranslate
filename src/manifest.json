@@ -3,7 +3,7 @@
   "name": "__MSG_extensionName__",
   "short_name": "__MSG_shortName__",
   "description": "__MSG_description__",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "default_locale": "en",
   "minimum_chrome_version": "121",
   "icons": {
@@ -28,6 +28,8 @@
       "lib/constants.js",
       "lib/browser.js",
       "lib/plamo3.js",
+      "lib/glossary.js",
+      "lib/notion.js",
       "lib/pagecontext.js",
       "lib/targets.js",
       "lib/rules.js",
@@ -48,11 +50,16 @@
     "page": "options.html",
     "open_in_tab": true
   },
+  "side_panel": {
+    "default_path": "options.html"
+  },
   "permissions": [
     "storage",
+    "alarms",
     "scripting",
     "contextMenus",
     "offscreen",
+    "sidePanel",
     "unlimitedStorage"
   ],
   "host_permissions": [

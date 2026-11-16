@@ -28,6 +28,9 @@ const MSG_NAMES = [
   'CONTENT_RESTORE',
   'CONTENT_PING',
   'CONTENT_STATE',
+  'GLOSSARY_STATUS',
+  'GLOSSARY_SAVE',
+  'GLOSSARY_SYNC',
   // The on-device protocol: background <-> host, and the UI asking the
   // background to keep the host warm.
   'LOCAL_TRANSLATE',

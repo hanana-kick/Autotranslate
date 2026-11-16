@@ -9,6 +9,8 @@ import { SRC, load, resetGlobals, deferred, type ATNamespace } from './helpers.t
 const LIBS = [
   'lib/constants.js',
   'lib/browser.js',
+  'lib/glossary.js',
+  'lib/notion.js',
   'lib/plamo3.js',
   'lib/pagecontext.js',
   'lib/targets.js',
@@ -316,7 +318,6 @@ function environment({
       update: async () => {},
       onUpdated: { addListener: (fn: Listener) => events.updated.push(fn) },
       onActivated: { addListener: (fn: Listener) => events.activated.push(fn) },
-      detectLanguage: async () => 'en',
       onRemoved: { addListener: (fn: Listener) => events.removed.push(fn) },
       sendMessage: async (tabId: number, message: TabMessage) => {
         recorded.tabMessages.push({ tabId, message });
@@ -325,6 +326,7 @@ function environment({
     },
     scripting: {
       executeScript: async (details: ATNamespace) => {
+        if (details.func) return [{ result: 'en' }];
         recorded.injected.push(details);
         // A real injection leaves a listener behind; a tab marked `deaf` is the
         // document that navigated under it and lost the files.
@@ -490,6 +492,39 @@ test('install seeds settings, opens onboarding and registers the context menu', 
   assert.deepEqual(recorded.menus.map((item) => item.id), MENU_IDS, 'an update rebuilds the menu');
 });
 
+test('a due dictionary sync runs on startup, a fresh one does not', async () => {
+  const stale = Date.now() - 60 * 60 * 1000;
+  const seeded = (syncedAt: number) => ({
+    'notionGlossaryConfig.v1': {
+      version: 1, enabled: true, token: 'ntn-secret', intervalMinutes: 5,
+      conceptDatabaseId: '11111111-1111-1111-1111-111111111111',
+      termDatabaseId: '22222222-2222-2222-2222-222222222222',
+      conceptDataSourceId: '', termDataSourceId: '',
+      mapping: { conceptId: '개념 ID', conceptType: '개념 유형', definition: '정의', term: '용어',
+        language: '언어', conceptRelation: '원문', group: '표현 묶음', traits: '표현 특성', description: '설명' }
+    },
+    'notionGlossarySnapshot.v1': { version: 1, revision: 'a'.repeat(64), syncedAt, concepts: 0, entries: [] }
+  });
+  const attempts: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    attempts.push(String(input));
+    return new Response(JSON.stringify({ message: 'unauthorized' }), { status: 401, headers: { 'content-type': 'application/json' } });
+  }) as typeof fetch;
+  try {
+    const due = environment();
+    Object.assign(due.recorded.storage, seeded(stale));
+    await fire(due.events.startup);
+    assert.ok(attempts.length > 0, 'a dictionary older than its interval syncs when the browser starts');
+
+    attempts.length = 0;
+    const fresh = environment();
+    Object.assign(fresh.recorded.storage, seeded(Date.now()));
+    await fire(fresh.events.startup);
+    assert.deepEqual(attempts, [], 'a fresh dictionary is not refetched on every browser start');
+  } finally { globalThis.fetch = realFetch; }
+});
+
 test('an update migrates retired settings without opening UI or initializing inference', async () => {
   const { events, recorded } = environment({ settings: {
     version: 1, engine: 'openai', serverApiKey: 'retired-secret',
@@ -510,7 +545,8 @@ test('an update migrates retired settings without opening UI or initializing inf
 test('page senders cannot test the model or change extension settings', async () => {
   const { AT, send, recorded } = environment();
   const sender = { tab: { id: 7, url: 'https://example.com/' }, url: 'https://example.com/' };
-  for (const type of [AT.C.MSG.TEST_ENGINE, AT.C.MSG.SET_SETTINGS, AT.C.MSG.RESET_SETTINGS]) {
+  for (const type of [AT.C.MSG.TEST_ENGINE, AT.C.MSG.SET_SETTINGS, AT.C.MSG.RESET_SETTINGS,
+    AT.C.MSG.GLOSSARY_STATUS, AT.C.MSG.GLOSSARY_SAVE, AT.C.MSG.GLOSSARY_SYNC]) {
     const response = await send({ type, patch: { localModelId: 'untrusted-model' } }, sender);
     assert.equal(response.ok, false);
     assert.match(response.error, /extension page/);
@@ -1191,19 +1227,19 @@ test('automatic rules wait for activation and manual OFF survives reload and wor
   assert.deepEqual(session['translationDisabled.v1'], [7]);
 });
 
-test('source-language enrollment excludes the target language and unknown detection', async () => {
-  for (const language of ['en-US', 'ko', 'und']) {
+test('declared-language enrollment excludes the target language and missing declarations', async () => {
+  for (const language of ['en-US', 'ko', 'und', '']) {
     const tab = { id: 7, url: 'https://example.com/article', active: true };
     const env = environment({ tab, selectedTabs: [], settings: {
       enabled: true, localModelId: 'model-a', targetLang: 'ko', alwaysTranslateLanguages: ['en', 'ko']
     } });
-    env.browser.tabs.detectLanguage = async () => language;
+    env.browser.scripting.executeScript = async () => [{ result: language }];
     await fire(env.events.updated, 7, { status: 'complete' }, tab);
     assert.equal(env.types().includes('at/content-translate'), language === 'en-US', language);
   }
 });
 
-test('original language survives worker sleep without redetecting translated text', async () => {
+test('declared language survives worker sleep without reading translated content', async () => {
   const tab = { id: 7, url: 'https://example.com/article', active: true };
   const settings = { enabled: true, localModelId: 'model-a', targetLang: 'ko', alwaysTranslateLanguages: ['en'] };
   const session: ATNamespace = {};
@@ -1211,10 +1247,10 @@ test('original language survives worker sleep without redetecting translated tex
   await fire(env.events.updated, 7, { status: 'complete' }, tab);
   assert.equal(env.types().includes('at/content-translate'), true);
   env = environment({ tab, settings, session });
-  let detected = false;
-  env.browser.tabs.detectLanguage = async () => { detected = true; return 'ko'; };
+  let inspected = false;
+  env.browser.scripting.executeScript = async () => { inspected = true; return [{ result: 'ko' }]; };
   await fire(env.events.activated, { tabId: 7 });
-  assert.equal(detected, false);
+  assert.equal(inspected, false);
   assert.equal(env.types().includes('at/content-translate'), true);
 });
 
@@ -1225,7 +1261,7 @@ test('manual OFF invalidates an outstanding automatic language decision', async 
   } });
   const detection = deferred<string>();
   const started = deferred<void>();
-  env.browser.tabs.detectLanguage = () => { started.resolve(); return detection.promise; };
+  env.browser.scripting.executeScript = async () => { started.resolve(); return [{ result: await detection.promise }]; };
   const navigation = fire(env.events.updated, 7, { status: 'complete' }, tab);
   await started.promise;
   await env.send({ type: env.AT.C.MSG.SET_TAB_ENABLED, tabId: 7, enabled: false });

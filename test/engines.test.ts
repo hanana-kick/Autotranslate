@@ -24,6 +24,7 @@ const AT = load(
   'lib/constants.js',
   'lib/browser.js',
   'lib/plamo3.js',
+  'lib/glossary.js',
   'lib/pagecontext.js',
   'lib/targets.js',
   'lib/rules.js',
@@ -84,6 +85,24 @@ test('local: the model is asked through the offscreen host, never fetched', asyn
   assert.equal(first.target, 'ko');
   assert.equal(first.maxTokens, AT.local.DEFAULT_MAX_TOKENS);
   assert.equal(first.url, undefined, 'there is no endpoint to call');
+});
+
+test('local: canonical glossary entries reach both source planning and every generated fragment', async () => {
+  const glossary = [
+    { id: 'en-gpu', conceptId: 'gpu', language: 'en', term: 'GPU', group: 'default', traits: [], description: '' },
+    { id: 'ko-gpu', conceptId: 'gpu', language: 'ko', term: '그래픽 장치', group: 'default', traits: [], description: '' }
+  ];
+  const parts = ['GPU first. ', 'GPU second.'];
+  stubSend(message => ({ ok: true, translations: ['응답: ' + message.texts[0]] }),
+    () => ({ ok: true, sourceChunks: [parts] }));
+  const result = await localModel({ source: 'en', texts: [parts.join('')], glossary });
+  assert.deepEqual(result.translations, ['응답: GPU first. 응답: GPU second.']);
+  assert.deepEqual(translates().map(message => message.texts), parts.map(part => [part.trim()]));
+  for (const message of sent) {
+    assert.deepEqual(message.glossary, glossary);
+    assert.equal(message.source, 'en', 'planning and generation resolve one source language');
+    assert.equal(message.target, 'ko');
+  }
 });
 
 test('local: the source comes from the browser detector when the setting says auto', async () => {

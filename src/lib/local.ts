@@ -107,6 +107,7 @@ namespace AT.local {
     source?: unknown;
     target?: unknown;
     maxTokens?: unknown;
+    glossary?: AT.glossary.Entry[];
   };
 
   /** Exact source costs and complete source coverage within the model budget. */
@@ -371,13 +372,15 @@ namespace AT.local {
    * never a character/token estimate. Only trimmed content is translated.
    * Prefer whole sentences, then words, then whole graphemes. Whitespace stays
    * attached to its neighbor; a whitespace-only source stays raw and must not
-   * be translated. Empty input has no fragments.
+   * be translated. Empty input has no fragments. Sorted, nonoverlapping
+   * protected ranges (UTF-16 offsets) keep selected glossary matches indivisible.
    */
   export async function sourceChunks(
     source: string,
     maxTokens: number,
     count: (text: string) => number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    protectedRanges: readonly { start: number; end: number }[] = []
   ): Promise<string[]> {
     throwIfAborted(signal);
     if (!Number.isSafeInteger(maxTokens) || maxTokens < 1) {
@@ -403,14 +406,23 @@ namespace AT.local {
     if (!source.trim() || await fits(source)) return [source];
     const granularities = ['sentence', 'word', 'grapheme'] as const;
     const segmenters: Intl.Segmenter[] = [];
-    const split = async (text: string, level: number): Promise<string[]> => {
+    const split = async (text: string, level: number, offset: number): Promise<string[]> => {
       const segmenter = segmenters[level] ??= new Intl.Segmenter(undefined, {
         granularity: granularities[level]!
       });
       const chunks: string[] = [];
       let current = '';
-      for (const { segment } of segmenter.segment(text)) {
+      let pending = '';
+      let protectedIndex = 0;
+      for (const part of segmenter.segment(text)) {
         throwIfAborted(signal);
+        pending += part.segment;
+        const end = offset + part.index + part.segment.length;
+        while (protectedIndex < protectedRanges.length && protectedRanges[protectedIndex]!.end <= end) protectedIndex += 1;
+        const protectedRange = protectedRanges[protectedIndex];
+        if (protectedRange && protectedRange.start < end && end < protectedRange.end) continue;
+        const segment = pending;
+        pending = '';
         const combined = current + segment;
         if (!combined.trim() || await fits(combined)) {
           current = combined;
@@ -426,11 +438,11 @@ namespace AT.local {
           continue;
         }
         if (level === granularities.length - 1) {
-          throw Object.assign(new Error(`One source grapheme exceeds the ${maxTokens}-token fragment budget.`), {
+          throw Object.assign(new Error(`One source grapheme or glossary term exceeds the ${maxTokens}-token fragment budget.`), {
             reason: 'context-overflow', code: 'config'
           });
         }
-        const smaller = await split(remainder, level + 1);
+        const smaller = await split(remainder, level + 1, end - remainder.length);
         for (let index = 0; index < smaller.length - 1; index += 1) chunks.push(smaller[index]!);
         current = smaller[smaller.length - 1]!;
       }
@@ -438,7 +450,7 @@ namespace AT.local {
       else if (chunks.length) chunks[chunks.length - 1] += current;
       return chunks;
     };
-    return await split(source, 0);
+    return await split(source, 0, 0);
   }
 
 
@@ -624,6 +636,7 @@ namespace AT.local {
     'unsupported-browser': true,
     'no-webgpu': true,
     'no-target': true,
+    'unsupported-glossary': true,
     'runtime-load-failed': true,
     'no-model': true,
     'model-missing': true,
@@ -647,6 +660,7 @@ namespace AT.local {
     // The target has no code in the model's language table, so no prompt can
     // ask for it; retrying would fail the same way.
     'no-target': true,
+    'unsupported-glossary': true,
     // A broken vendored runtime is a broken installation, not a provider that
     // might answer differently on a retry.
     'runtime-load-failed': true,

@@ -46,8 +46,8 @@ test('chrome gets a Chrome-flavoured manifest', () => {
   assert.equal(manifest.version, pkg.version, 'the build pins the manifest to package.json');
   assert.equal(manifest.minimum_chrome_version, '121');
   assert.equal('browser_specific_settings' in manifest, false);
-  assert.equal(manifest.background.service_worker, 'background.js');
-  assert.equal(manifest.background.scripts.at(-1), 'background.js');
+  assert.deepEqual(manifest.background, { service_worker: 'background.js' },
+    'Chrome MV3 rejects background.scripts, so only the worker may ship');
 });
 
 test('firefox gets a gecko id and no chrome-only keys', () => {
@@ -56,6 +56,8 @@ test('firefox gets a gecko id and no chrome-only keys', () => {
   assert.equal(manifest.browser_specific_settings.gecko.id, GECKO_ID);
   assert.equal(manifest.browser_specific_settings.gecko.strict_min_version, GECKO_MIN_VERSION);
   assert.equal('minimum_chrome_version' in manifest, false);
+  assert.equal(manifest.background.service_worker, undefined, 'Firefox runs an event page, not a worker entry');
+  assert.equal(manifest.background.scripts.at(-1), 'background.js');
 });
 
 test('both bundles carry the polyfill, icons, locales and entry points', () => {
@@ -240,16 +242,16 @@ test('only the chrome bundle asks for the permissions it can use', () => {
   assert.ok(chrome.permissions.includes('unlimitedStorage'), 'the multi-gigabyte model needs durable extension storage');
   assert.ok(firefox.permissions.includes('unlimitedStorage'), 'Firefox must not block installation on a persistence prompt');
   assert.equal(firefox.permissions.includes('offscreen'), false, 'Firefox has no offscreen API');
+  assert.equal(firefox.permissions.includes('sidePanel'), false, 'Firefox uses sidebar_action, not chrome sidePanel');
   assert.deepEqual(
     firefox.permissions,
-    chrome.permissions.filter((permission: string) => permission !== 'offscreen'),
+    chrome.permissions.filter((permission: string) => permission !== 'offscreen' && permission !== 'sidePanel'),
     'firefox ships the same grant minus the ones it cannot use'
   );
 
-  for (const manifest of [chrome, firefox]) {
-    assert.equal(manifest.permissions.includes('sidePanel'), false, 'global settings need no side-panel grant');
-    assert.equal('side_panel' in manifest, false, 'settings open in a separate window');
-  }
+  assert.ok('side_panel' in chrome && chrome.permissions.includes('sidePanel'),
+    'Chrome opens the settings surface in its side panel');
+  assert.equal('side_panel' in firefox, false, 'Firefox has sidebar_action instead of a side panel');
 });
 
 test('the packaging gate trades the wasm exception for eval only at the cost of failing', () => {

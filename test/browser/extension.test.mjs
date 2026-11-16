@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { chromium, launchOptions, ROOT, OUTPUT, screenshot } from './support.mjs';
+import { notionFixture, NOTION_IDS } from './fixtures/notion.mjs';
 
 // Chromium's REAL extension service worker, offscreen document, runtime IPC,
 // scripting injection, storage, IndexedDB and OPFS. ONLY model inference and
@@ -14,7 +15,7 @@ import { chromium, launchOptions, ROOT, OUTPUT, screenshot } from './support.mjs
 let temporary, context, control, server, origin, extensionId;
 const errors = [];
 const pages = new Map();
-const documentHtml = (content) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title translate="no">Autotranslate integration fixture</title></head><body><main>${content}</main></body></html>`;
+const documentHtml = (content, language = 'en', metadata = '') => `<!doctype html><html${language === null ? '' : ` lang="${language}"`}><head><meta charset="utf-8"><title translate="no">Autotranslate integration fixture</title>${metadata}</head><body><main>${content}</main></body></html>`;
 async function policy(patch) { return control.evaluate((value) => AT.settings.save(value), patch); }
 async function model(patch = {}) { return control.evaluate((value) => AT.sendMessage({ type: 'qa/control', ...value }), patch); }
 async function until(fn, description, timeout = 10000) {
@@ -22,8 +23,8 @@ async function until(fn, description, timeout = 10000) {
   do { if (await fn()) return; await new Promise((resolve) => setTimeout(resolve, 30)); } while (Date.now() < end);
   throw new Error(`timed out: ${description}`);
 }
-async function fixture(path, html) {
-  pages.set(path, documentHtml(html));
+async function fixture(path, html, language = 'en', metadata = '') {
+  pages.set(path, documentHtml(html, language, metadata));
   const page = await context.newPage();
   await page.setViewportSize({ width: 1100, height: 800 });
   await page.goto(`${origin}${path}`);
@@ -297,34 +298,44 @@ check('popup ON/OFF controls only the intended tab and OFF restores its source',
   await screenshot(control,'options-global-after-tab-off');
 });
 
-check('detached global settings never bind to the opening tab, active tab, or a closed tab', async () => {
+check('global settings open in the native sidebar without binding translation to a tab', async () => {
   const a=await fixture('/window-a','<p>Original text</p>');const b=await fixture('/window-b','<p>Original text</p>');
   await policy({enabled:true,sourceLang:'auto',targetLang:'ko'});
   await select(a,true);await a.waitForFunction(()=>document.querySelector('p').textContent==='원문 번역');
   const before=await control.evaluate(()=>AT.settings.load());
   const popup=await prepareTabEnabledUI(control,await tabIdFor(control,a));
-  const created=context.waitForEvent('page');
-  await popup.locator('#options').click();
-  const panel=await created;await optionsReady(panel);
+  const windowsBefore = await control.evaluate(async () => (await AT.api.windows.getAll()).length);
+  const attachOther = process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
+  process.env.PW_CHROMIUM_ATTACH_TO_OTHER = '1';
+  let panel;
+  try {
+    [panel] = await Promise.all([
+      context.waitForEvent('page', page => page.url().endsWith('/options.html')),
+      popup.locator('#options').click()
+    ]);
+  } finally {
+    if (attachOther === undefined) delete process.env.PW_CHROMIUM_ATTACH_TO_OTHER;
+    else process.env.PW_CHROMIUM_ATTACH_TO_OTHER = attachOther;
+  }
+  await optionsReady(panel);
   assert.equal(new URL(panel.url()).pathname,'/options.html');
   assert.equal(new URL(panel.url()).search,'','global settings have no source-tab query');
   assert.equal(await panel.locator('#enabled').count(),0);
-  const kind=await panel.evaluate(async()=>{
-    const tab=await AT.api.tabs.getCurrent();
-    return (await AT.api.windows.get(tab.windowId)).type;
-  });
-  assert.equal(kind,'popup','real separate browser window, not tabs.create');
+  const contexts = await control.evaluate(() => AT.api.runtime.getContexts({ contextTypes: ['SIDE_PANEL'] }));
+  assert.equal(contexts.length, 1, 'settings rendered in a native side panel');
+  assert.equal(contexts[0].documentUrl, panel.url());
+  assert.equal(await control.evaluate(async () => (await AT.api.windows.getAll()).length), windowsBefore);
   assert.deepEqual(await panel.evaluate(()=>AT.settings.load()),before,'opening settings preserves global preferences');
   assert.equal(await a.locator('p').textContent(),'원문 번역','opening settings preserves translation');
-  await b.bringToFront();await panel.bringToFront();
+  await b.bringToFront();
   await panel.locator('#save').click();
   await panel.waitForFunction(()=>document.querySelector('#saveStatus').dataset.kind==='ok');
   assert.equal(await panel.locator('#enabled').count(),0);
   assert.equal(await a.locator('p').textContent(),'원문 번역');
   assert.equal(await b.locator('p').textContent(),'Original text');
-  await panel.setViewportSize({width:390,height:780});assert.ok(await panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
-  await screenshot(panel,'options-separate-window');
-  await a.close();await b.bringToFront();await panel.bringToFront();
+  assert.ok(await panel.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  await screenshot(panel,'options-native-sidebar');
+  await a.close();await b.bringToFront();
   await panel.locator('#save').click();
   await panel.waitForFunction(()=>document.querySelector('#saveStatus').dataset.kind==='ok');
   assert.equal(await panel.locator('#enabled').count(),0,'closing the opening tab cannot create a tab control');
@@ -357,16 +368,28 @@ check('compact settings enroll matching URLs and respect a tab-level OFF', async
   await b.waitForFunction(() => document.querySelector('p').textContent === 'Original text');
 });
 
-check('source-language checklist enrolls an English page without a URL rule', async () => {
+check('language checklist follows page declarations rather than the body language', async () => {
   await control.goto(`chrome-extension://${extensionId}/options.html`); await optionsReady(control);
   await control.locator('#targetLang').selectOption('ko');
-  await control.locator('#alwaysTranslateLanguages input[value="en"]').check();
+  await control.locator('#alwaysTranslateLanguages input[value="ja"]').check();
   await control.locator('#save').click();
-  await until(async () => (await control.evaluate(() => AT.settings.load())).alwaysTranslateLanguages.includes('en'), 'saved language preference');
-  const english = 'This article explains how people read information on the internet. Readers usually begin with the title and continue through the main text before looking at related stories. The translation should follow this order and preserve the original information.';
-  const page = await fixture('/language-auto', `<p translate="no">${english.repeat(5)}</p><p id="translated">Original text</p>`);
+  await until(async () => (await control.evaluate(() => AT.settings.load())).alwaysTranslateLanguages.includes('ja'), 'saved language preference');
+  // English body deliberately disagrees with the declared Japanese language.
+  const page = await fixture('/language-auto', '<p id="translated">Original text</p>', 'ja-JP');
   await page.bringToFront();
   await page.waitForFunction(() => document.querySelector('#translated').textContent === '원문 번역');
+  await select(page, false);
+  await page.reload(); await page.waitForTimeout(350);
+  assert.equal(await page.locator('#translated').innerText(), 'Original text', 'manual OFF wins over language preference');
+  const meta = await fixture('/language-meta', '<p>Original text</p>', null, '<meta http-equiv="Content-Language" content="ja">');
+  await meta.bringToFront();
+  await meta.waitForFunction(() => document.querySelector('p').textContent === '원문 번역');
+  for (const language of ['en', 'ko', '', null]) {
+    const excluded = await fixture(`/language-excluded-${language}`, '<p>Original text</p>', language,
+      language === 'en' ? '<meta http-equiv="Content-Language" content="ja">' : '');
+    await excluded.bringToFront(); await excluded.waitForTimeout(350);
+    assert.equal(await excluded.locator('p').innerText(), 'Original text', `declaration ${language} must not enroll`);
+  }
   await control.setViewportSize({width:390,height:844});
   assert.ok(await control.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
   await screenshot(control, 'options-compact-mobile');
@@ -414,6 +437,63 @@ check('idle active page pretranslates distant prose after visible text completes
   assert.equal(await page.evaluate(() => scrollY), 0);
   await select(page, false);
   assert.equal(await page.locator('#future').textContent(), 'First paragraph');
+});
+
+check('Notion schema-mapped manual and scheduled sync update local page translations without network lookup', async () => {
+  const notion = notionFixture();
+  const api = 'https://api.notion.com/v1/**';
+  await context.route(api, notion.route);
+  try {
+    await control.reload(); await optionsReady(control);
+    await control.waitForFunction(() => document.querySelector('#glossarySection').dataset.ready === 'true');
+    await control.locator('#notionEnabled').check();
+    await control.locator('#notionToken').fill('ntn-synthetic-browser-fixture-secret');
+    await control.locator('#notionConceptDatabase').fill(NOTION_IDS.conceptDatabase);
+    await control.locator('#notionTermDatabase').fill(NOTION_IDS.termDatabase);
+    await control.locator('#notionInterval').selectOption('60');
+    await control.locator('#glossarySection summary').click();
+    await control.locator('#notionMap-term').fill('Expression');
+    await control.locator('#notionSync').click();
+    await control.waitForFunction(() => document.querySelector('#notionStatus').dataset.kind === 'ok');
+    const saved = await control.evaluate(() => AT.sendMessage({ type: AT.C.MSG.GLOSSARY_STATUS }));
+    assert.equal(saved.snapshot.concepts, 1);
+    assert.equal(saved.snapshot.entries, 2, 'all expression query pages were joined');
+    assert.equal(saved.config.mapping.term, 'Expression');
+    assert.equal(JSON.stringify(saved).includes('ntn-synthetic-browser-fixture-secret'), false, 'status never returns credentials');
+    assert.equal(await control.locator('#notionToken').inputValue(), '');
+    const alarm = await control.evaluate(() => AT.api.alarms.get('notion-glossary-sync'));
+    assert.equal(alarm.periodInMinutes, 60);
+    await policy({sourceLang:'auto', targetLang:'ko', translationRendering:'immediate'});
+    const page = await fixture('/glossary-japanese', '<p>猫汰つな</p>', 'ja');
+    const requests = notion.calls.length;
+    await select(page, true); await page.bringToFront();
+    await page.waitForFunction(() => document.querySelector('p').textContent === '네코타 츠나');
+    assert.equal(notion.calls.length, requests, 'translation reads only the local snapshot');
+    // Exercise a real native alarm event, without waiting for its one-hour period.
+    notion.target = '네코타 쓰나';
+    await control.evaluate(() => AT.api.alarms.create('notion-glossary-sync', { when: Date.now() + 100, periodInMinutes: 60 }));
+    await page.waitForFunction(() => document.querySelector('p').textContent === '네코타 쓰나');
+    const updated = await control.evaluate(() => AT.sendMessage({ type: AT.C.MSG.GLOSSARY_STATUS }));
+    assert.notEqual(updated.snapshot.revision, saved.snapshot.revision, 'a changed local glossary invalidates translated results');
+    await control.setViewportSize({width:390,height:844});
+    await control.locator('#glossarySection').scrollIntoViewIfNeeded();
+    assert.ok(await control.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
+    await screenshot(control, 'notion-glossary-settings');
+    await screenshot(page, 'notion-glossary-translated');
+    await control.setViewportSize({width:1100,height:800});
+    notion.fail = true;
+    await control.locator('#notionSync').click();
+    await control.waitForFunction(() => document.querySelector('#notionStatus').dataset.kind === 'error');
+    const failed = await control.evaluate(() => AT.sendMessage({ type: AT.C.MSG.GLOSSARY_STATUS }));
+    assert.equal(failed.snapshot.revision, updated.snapshot.revision, 'failed sync preserves the last complete dictionary');
+    await page.reload(); await page.bringToFront();
+    await page.waitForFunction(() => document.querySelector('p').textContent === '네코타 쓰나');
+    await select(page, false);
+    assert.equal(await page.locator('p').textContent(), '猫汰つな');
+  } finally {
+    await control.evaluate(() => AT.sendMessage({type:AT.C.MSG.GLOSSARY_SAVE,patch:{enabled:false,token:'',intervalMinutes:0}}));
+    await context.unroute(api, notion.route);
+  }
 });
 
 test('extension UI and injected pages have no uncaught JavaScript errors', () => { assert.deepEqual(errors, []); });

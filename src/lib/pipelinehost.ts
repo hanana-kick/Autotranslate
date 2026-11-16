@@ -32,7 +32,7 @@ namespace AT.pipelinehost {
     decode(ids: number[] | ArrayLike<number | bigint>, options?: { skip_special_tokens?: boolean }): string;
     apply_chat_template(
       messages: { role: string; content: string }[],
-      options: { target_lang: string; source_lang?: string; add_generation_prompt: boolean; tokenize: false }
+      options: { target_lang: string; source_lang?: string; glossary?: AT.glossary.Pair[]; add_generation_prompt: boolean; tokenize: false }
     ): string;
     pad_token_id?: number | null;
     eos_token_id?: number | null;

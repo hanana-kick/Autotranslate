@@ -927,14 +927,18 @@ latency on held-out domains, CJK/RTL, generic forums, news, technical prose and
 virtualized feeds—not YouTube alone. A model cannot repair stale source ownership
 or unstable scheduling.
 
-### Notion glossary research — proposal, not an implemented connector
+### Notion glossary research — historical proposal
 
-No Notion URL, database ID or authorized connection was supplied or found in
-repository references; the user's actual glossary/schema was not inspected.
-The [upstream PLaMo template](https://huggingface.co/pfnet/plamo-3-translate-0.8b/raw/main/chat_template.jinja)
-accepts `glossary: [{source, target}]`, and `lib/plamo3.ts` can serialize PFML3
-glossary pairs. The production tokenizer-template call does not yet supply
-them. Existing page-context terms are definitions, not bilingual glossary pairs.
+The research proposal below predates the supplied 25Taku database and is not
+the current connector contract. The extension now implements read-only Notion
+database/data-source synchronization, configurable column mappings, local v1
+concept/expression snapshots, scheduled/manual refresh and native model
+`glossary: [{source,target}]` input. Current setup and limitations are documented
+in [README](../README.md#notion-단어장) and
+[testing](testing.md#notion-local-glossary-synchronization).
+The JSON/CSV interchange, scopes and override policies below remain research
+proposals, not implemented settings. Existing page-context definitions are not
+used as bilingual glossary pairs.
 
 Recommended user-controlled interchange format:
 

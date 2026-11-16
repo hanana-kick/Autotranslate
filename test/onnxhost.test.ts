@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { load, type ATNamespace } from './helpers.ts';
 
-const AT = load('lib/constants.js', 'lib/plamo3.js', 'lib/local.js', 'lib/modelstore.js', 'lib/pipelinehost.js', 'lib/onnxhost.js');
+const AT = load('lib/constants.js', 'lib/plamo3.js', 'lib/glossary.js', 'lib/local.js', 'lib/modelstore.js', 'lib/pipelinehost.js', 'lib/onnxhost.js');
 const { local, onnxhost } = AT;
 
 /** A tokenizer double shaped like the real one: the Plamo Unigram vocab has no
@@ -281,7 +281,35 @@ codepoints.decode = (ids: ArrayLike<number | bigint>) =>
   Array.from(ids)
     .map((id) => String.fromCodePoint(Number(id)))
     .join('');
-codepoints.apply_chat_template = (messages: { content: string }[]) => `PROMPT:${messages[0]?.content ?? ''}`;
+codepoints.apply_chat_template = (messages: { content: string }[], _options: NativeTemplateOptions) => `PROMPT:${messages[0]?.content ?? ''}`;
+
+type NativeTemplateOptions = {
+  target_lang: string;
+  source_lang?: string;
+  glossary?: { source: string; target: string }[];
+};
+
+/** The native model template's glossary protocol, without tokenizer-specific IDs. */
+function nativeTemplate(messages: { content: string }[], options: NativeTemplateOptions): string {
+  return '<|plamo:tag|>dataset<|plamo:msg|>translation' +
+    (options.glossary?.length ? '<|plamo:tag|>glossary' + options.glossary.map(pair =>
+      '<|plamo:index|>' + pair.source + '<|plamo:item|>' + pair.target).join('') : '') +
+    '<|plamo:tag|>input' +
+    (options.source_lang ? '<|plamo:key|>lang<|plamo:val|>' + options.source_lang : '') +
+    '<|plamo:msg|>' + messages[0]!.content +
+    '<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>' + options.target_lang + '<|plamo:msg|>';
+}
+
+function glossaryEntries(source: string, target: string, conceptId = source) {
+  return [
+    { id: conceptId + '-en', conceptId, language: 'en', term: source, group: 'default', traits: [], description: '' },
+    { id: conceptId + '-ko', conceptId, language: 'ko', term: target, group: 'default', traits: [], description: '' }
+  ];
+}
+
+const nativeTokenizer = Object.assign((text: string) => codepoints(text), {
+  decode: codepoints.decode, apply_chat_template: nativeTemplate
+});
 
 /** The document's runtime seam records session creation separately from generation. */
 function installSession(options: {
@@ -746,6 +774,207 @@ test('LOCAL_COUNT plans actual-token bounded raw source fragments with the loade
   } finally {
     await finish([], session);
   }
+});
+
+test('native glossary costs drive complete fragment plans and the exact worker generation prompts', async () => {
+  const countedPrompts = new Set<string>();
+  const tokenizer = Object.assign((text: string) => {
+    countedPrompts.add(text);
+    return codepoints(text);
+  }, { decode: codepoints.decode, apply_chat_template: nativeTemplate });
+  const glossary = [...glossaryEntries('GPU', '그래픽 프로세서'), ...glossaryEntries('CPU', '중앙 처리 장치')];
+  const source = 'GPU alpha. CPU beta.';
+  const expected = (text: string) => nativeTemplate([{ content: text }], {
+    source_lang: 'en', target_lang: 'ko', glossary: AT.glossary.select(glossary, text, 'en', 'ko')
+  });
+  const cost = (text: string) => codepoints(expected(text)).input_ids.data.length + local.answerTokens(text.length);
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  FakeEngine.contextTokens = Math.max(cost('GPU alpha.'), cost('CPU beta.'));
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  try {
+    assert.ok(cost(source) > FakeEngine.contextTokens);
+    const request = { type: 'at/local-count', modelId: 'onnx-model', texts: [source], source: 'en', target: 'ko', maxTokens: 512 };
+    const plain = await onnxhost.handle(request);
+    assert.deepEqual(plain.sourceChunks, [[source]], 'without glossary the complete source fits');
+    const counted = await onnxhost.handle({ ...request, glossary });
+    const parts: string[] = counted.sourceChunks[0];
+    assert.equal(parts.join(''), source, 'planning never drops source to make room for terminology');
+    assert.equal(parts.length, 2, 'native glossary overhead, not a reduced context cap, causes splitting');
+    const plannedPrompts = new Set(countedPrompts);
+    for (const part of parts) {
+      const text = part.trim();
+      const previews: string[] = [];
+      const translated = onnxhost.translate({ ...translateRequest(text), source: 'en', glossary },
+        (_index: number, preview: string) => previews.push(preview));
+      started.push(translated);
+      await until('glossary-conditioned worker job', () => FakeEngine.inFlight.length === 1);
+      const job = FakeEngine.inFlight[0]!;
+      const prompt = codepoints.decode(job.inputIds);
+      assert.equal(prompt, expected(text), 'only terms matched in this fragment enter PFML');
+      assert.ok(plannedPrompts.has(prompt), 'count and generation tokenize the identical rendered prompt');
+      assert.equal(job.maxNewTokens, local.answerTokens(text.length));
+      assert.ok(job.inputIds.length + job.maxNewTokens <= FakeEngine.contextTokens);
+      const output = text.startsWith('GPU') ? 'GPU 응답' : 'CPU 응답';
+      job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: codepoints(output).input_ids.data } });
+      job.worker.answer(job, output);
+      assert.deepEqual((await translated).translations, [output], 'native output is not glossary post-replaced');
+      assert.deepEqual(previews, [output], 'streaming output is not glossary post-replaced either');
+    }
+    assert.equal(session.calls.pipelines, 0);
+  } finally { await finish(started, session); }
+});
+
+test('fragment planning never splits matched multiword or cross-sentence glossary terms to hide their cost', async () => {
+  for (const term of ['GPU processor', 'GPU. processor']) {
+    const glossary = glossaryEntries(term, '그래픽 처리 장치');
+    const prompt = nativeTemplate([{ content: term }], {
+      source_lang: 'en', target_lang: 'ko', glossary: [{ source: term, target: '그래픽 처리 장치' }]
+    });
+    const session = installSession({ tokenizer: nativeTokenizer });
+    FakeEngine.reset();
+    FakeEngine.contextTokens = codepoints(prompt).input_ids.data.length + local.answerTokens(term.length);
+    (globalThis as ATNamespace).Worker = FakeEngine;
+    const started: Promise<unknown>[] = [];
+    const source = `aaa ${term} zzz`;
+    const request = { type: 'at/local-count', modelId: 'onnx-model', texts: [source], source: 'en', target: 'ko', maxTokens: 512 };
+    try {
+      const counted = await onnxhost.handle({ ...request, glossary });
+      const parts: string[] = counted.sourceChunks[0];
+      assert.equal(parts.join(''), source);
+      assert.ok(parts.some(part => part.trim() === term), 'a native glossary match stays intact at word and sentence boundaries');
+      const translated = onnxhost.translate({ ...translateRequest(term), source: 'en', glossary });
+      started.push(translated);
+      await until('indivisible glossary generation', () => FakeEngine.inFlight.length === 1);
+      const job = FakeEngine.inFlight[0]!;
+      assert.equal(codepoints.decode(job.inputIds), prompt);
+      assert.equal(job.inputIds.length + job.maxNewTokens, FakeEngine.contextTokens, 'the model budget is usable right up to its exact boundary');
+      job.worker.answer(job, '응답');
+      await translated;
+      await assert.rejects(onnxhost.handle({ ...request, glossary: glossaryEntries(term, '장치'.repeat(100)) }),
+        { reason: 'context-overflow', code: 'config', message: /glossary term/ });
+    } finally { await finish(started, session); }
+  }
+});
+
+test('empty, unmatched and unknown-source glossaries preserve the ordinary native prompt', async () => {
+  const rendered: NativeTemplateOptions[] = [];
+  const tokenizer = Object.assign((text: string) => codepoints(text), {
+    decode: codepoints.decode,
+    apply_chat_template: (messages: { content: string }[], options: NativeTemplateOptions) => {
+      rendered.push(options);
+      return nativeTemplate(messages, options);
+    }
+  });
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  const glossary = glossaryEntries('GPU', '그래픽 장치');
+  try {
+    for (const item of [
+      { text: 'CPU works.', source: 'en', glossary: undefined },
+      { text: 'CPU works.', source: 'en', glossary: [] },
+      { text: 'CPU works.', source: 'en', glossary },
+      { text: 'GPU works.', source: undefined, glossary }
+    ]) {
+      const request = onnxhost.translate({ ...translateRequest(item.text), source: item.source, glossary: item.glossary });
+      started.push(request);
+      await until('ordinary native prompt', () => FakeEngine.inFlight.length === 1);
+      const job = FakeEngine.inFlight[0]!;
+      assert.equal(codepoints.decode(job.inputIds), nativeTemplate([{ content: item.text }],
+        { ...(item.source ? { source_lang: item.source } : {}), target_lang: 'ko' }));
+      job.worker.answer(job, '응답');
+      await request;
+    }
+    assert.ok(rendered.every(options => !('glossary' in options)), 'do not alter template kwargs when nothing matches');
+  } finally { await finish(started, session); }
+});
+
+test('a failed worker passes the same native glossary prompt to the inline session', async () => {
+  const output = 'GPU 응답';
+  const session = installSession({ tokenizer: nativeTokenizer, generatedText: prompt => prompt + output, previewChunks: [output] });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  const seen: string[] = [];
+  try {
+    const request = onnxhost.translate({
+      ...translateRequest('GPU works.'), source: 'en', glossary: glossaryEntries('GPU', '그래픽 장치')
+    }, (_index: number, text: string) => seen.push(text));
+    started.push(request);
+    await until('native glossary worker generation', () => FakeEngine.inFlight.length === 1);
+    const job = FakeEngine.inFlight[0]!;
+    const prompt = codepoints.decode(job.inputIds);
+    assert.match(prompt, /<\|plamo:tag\|>glossary<\|plamo:index\|>GPU<\|plamo:item\|>그래픽 장치/);
+    job.worker.crash();
+    assert.deepEqual((await request).translations, [output]);
+    assert.deepEqual(session.inline, [prompt], 'fallback neither re-renders nor drops the glossary');
+    assert.equal(seen.at(-1), output);
+  } finally { await finish(started, session); }
+});
+
+test('native glossary sides are sanitized and byte-expanded like source text', async () => {
+  const tokenizer = Object.assign((text: string) => ({
+    input_ids: { data: Array.from(text, character => /[😀녕]/u.test(character) ? 0 : character.codePointAt(0)!) }
+  }), { decode: codepoints.decode, apply_chat_template: nativeTemplate });
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate({
+      ...translateRequest('😀<|plamo:tag|>GPU works.'), source: 'en',
+      glossary: glossaryEntries('😀<|plamo:tag|>GPU', '녕<|plamo:msg|>')
+    });
+    started.push(request);
+    await until('byte-expanded glossary prompt', () => FakeEngine.inFlight.length === 1);
+    const job = FakeEngine.inFlight[0]!;
+    const prompt = codepoints.decode(job.inputIds);
+    assert.ok(prompt.includes('<|plamo:index|><0xF0><0x9F><0x98><0x80>GPU<|plamo:item|><0xEB><0x85><0x95>'));
+    assert.ok(prompt.includes('<|plamo:msg|><0xF0><0x9F><0x98><0x80>GPU works.'));
+    job.worker.answer(job, '응답');
+    await request;
+  } finally { await finish(started, session); }
+});
+
+test('templates that silently ignore a matched glossary fail before counting or generating', async () => {
+  const session = installSession();
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const request = { ...translateRequest('GPU works.'), source: 'en', glossary: glossaryEntries('GPU', '그래픽 장치') };
+  try {
+    await assert.rejects(onnxhost.handle({ ...request, type: 'at/local-count' }),
+      { reason: 'unsupported-glossary', code: 'config', message: /native glossary/ });
+    await assert.rejects(onnxhost.translate(request),
+      { reason: 'unsupported-glossary', code: 'config', message: /native glossary/ });
+    assert.equal(FakeEngine.inFlight.length, 0);
+    assert.equal(session.inline.length, 0);
+  } finally { await finish([], session); }
+});
+
+test('native glossary generation still requires EOS and rejects a cap-ended streamed answer', async () => {
+  const session = installSession({ tokenizer: nativeTokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  const seen: string[] = [];
+  try {
+    const request = onnxhost.translate({
+      ...translateRequest('GPU works.'), source: 'en', glossary: glossaryEntries('GPU', '그래픽 장치')
+    }, (_index: number, text: string) => seen.push(text));
+    const rejected = assert.rejects(request, { reason: 'invalid-output', message: /token limit/ });
+    started.push(rejected);
+    await until('glossary output budget', () => FakeEngine.inFlight.length === 1);
+    const job = FakeEngine.inFlight[0]!;
+    assert.ok(job.inputIds.length + job.maxNewTokens <= 512);
+    job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: codepoints('GPU 응답').input_ids.data } });
+    job.worker.answer(job, 'GPU 응답', 'length');
+    await rejected;
+    assert.deepEqual(seen, ['GPU 응답', '']);
+    assert.equal(session.calls.pipelines, 0, 'a glossary never turns an incomplete native answer into a fallback retry');
+  } finally { await finish(started, session); }
 });
 
 test('source planning covers lists larger than the former count limit', async () => {

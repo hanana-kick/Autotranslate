@@ -37,6 +37,9 @@ namespace AT {
     LOCAL_PREPARE: string;
     LOCAL_RELEASE: string;
     LOCAL_GET_STATUS: string;
+    GLOSSARY_STATUS: string;
+    GLOSSARY_SAVE: string;
+    GLOSSARY_SYNC: string;
   };
 
   export type Constants = {
@@ -185,7 +188,10 @@ namespace AT {
       // popup / options -> background
       LOCAL_PREPARE: 'at/local-prepare',
       LOCAL_RELEASE: 'at/local-release',
-      LOCAL_GET_STATUS: 'at/local-get-status'
+      LOCAL_GET_STATUS: 'at/local-get-status',
+      GLOSSARY_STATUS: 'at/glossary-status',
+      GLOSSARY_SAVE: 'at/glossary-save',
+      GLOSSARY_SYNC: 'at/glossary-sync'
     },
     LANGS: [
       { code: 'en', native: 'English' },

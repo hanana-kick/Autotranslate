@@ -50,6 +50,8 @@
     const content = messages[0]?.content ?? '';
     return (
       '<|plamo:tag|>dataset<|plamo:msg|>translation' +
+      (options?.glossary?.length ? '<|plamo:tag|>glossary' +
+        options.glossary.map(term => `<|plamo:index|>${term.source}<|plamo:item|>${term.target}`).join('') : '') +
       `<|plamo:tag|>input<|plamo:msg|>${content}` +
       `<|plamo:tag|>output<|plamo:key|>lang<|plamo:val|>${options?.target_lang ?? 'ko'}<|plamo:msg|>`
     );
@@ -59,6 +61,12 @@
   function answer(prompt) {
     const body = INPUT.exec(prompt)?.[1] ?? '';
     const japanese = (LANG.exec(prompt)?.[1] ?? '') === 'ja';
+    // The inference double understands the documented native glossary protocol.
+    // Real model obedience is verified separately with the unmodified graph.
+    const glossary = /<\|plamo:tag\|>glossary([\s\S]*?)<\|plamo:tag\|>input/.exec(prompt)?.[1] ?? '';
+    const pairs = [...glossary.matchAll(/<\|plamo:index\|>([\s\S]*?)<\|plamo:item\|>([\s\S]*?)(?=<\|plamo:index\|>|$)/gu)];
+    const exact = pairs.find(pair => pair[1] === body.trim());
+    if (exact) return exact[2];
     const lines = body.split('\n').map((line) => line.trim()).filter(Boolean);
     if (lines.length > 1 && lines.every((line) => /^\d+\.\s/.test(line))) {
       return lines

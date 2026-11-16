@@ -102,8 +102,17 @@ function checkManifest(target: string, bundle: Buffer, names: string[]): void {
   fail(manifest.manifest_version === 3, `${target}: manifest_version must be 3`);
   fail(manifest.version === pkg.version, `${target}: manifest version ${manifest.version} != package.json ${pkg.version}`);
   fail(manifest.name === source.name, `${target}: manifest name drifted from src/manifest.json`);
-  fail(manifest.background?.service_worker === 'background.js', `${target}: background.service_worker must be background.js`);
-  fail(manifest.background?.scripts?.at(-1) === 'background.js', `${target}: background.scripts must end with background.js`);
+  // Each store accepts its own background shape only: Chrome MV3 rejects
+  // `scripts`, and Firefox's event page has no `service_worker` entry.
+  const background = manifest.background ?? {};
+  if (target === 'firefox') {
+    fail(Array.isArray(background.scripts) && background.scripts.at(-1) === 'background.js',
+      `${target}: background.scripts must end with background.js`);
+    fail(!('service_worker' in background), `${target}: background.service_worker must not ship`);
+  } else {
+    fail(background.service_worker === 'background.js', `${target}: background.service_worker must be background.js`);
+    fail(!('scripts' in background), `${target}: background.scripts must not ship`);
+  }
   fail(Array.isArray(manifest.host_permissions) && manifest.host_permissions.length > 0, `${target}: host_permissions must be declared`);
   fail(!('content_scripts' in manifest), `${target}: content scripts are injected on demand, never declared`);
   // The manifest may only constrain the extension's own pages, and those must

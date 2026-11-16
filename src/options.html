@@ -76,6 +76,72 @@
           aria-labelledby="alwaysLanguagesLabel" aria-describedby="alwaysLanguagesHint"></div>
       </at-panel>
 
+      <at-panel id="glossarySection">
+        <h2 data-i18n="glossary_title"></h2>
+        <p class="hint" data-i18n="glossary_hint"></p>
+        <fieldset id="notionFields" disabled>
+          <label><input id="notionEnabled" type="checkbox" /> <span data-i18n="glossary_enabled"></span></label>
+          <div class="field">
+            <label for="notionSource" data-i18n="glossary_source"></label>
+            <select id="notionSource">
+              <option value="public" data-i18n="glossary_sourcePublic"></option>
+              <option value="api" data-i18n="glossary_sourceApi"></option>
+            </select>
+            <p class="hint" data-i18n="glossary_sourceHint"></p>
+          </div>
+          <div class="field" id="notionPublicFields">
+            <label for="notionConceptUrl" data-i18n="glossary_conceptUrl"></label>
+            <input id="notionConceptUrl" type="url" spellcheck="false" />
+            <label for="notionTermUrl" data-i18n="glossary_termUrl"></label>
+            <input id="notionTermUrl" type="url" spellcheck="false" />
+          </div>
+          <div class="field" id="notionTokenFields">
+            <label for="notionToken" data-i18n="glossary_token"></label>
+            <input id="notionToken" type="password" autocomplete="new-password" spellcheck="false" />
+            <p class="hint" id="notionTokenHint"></p>
+            <label><input id="notionClearToken" type="checkbox" /> <span data-i18n="glossary_clearToken"></span></label>
+          </div>
+          <div class="field">
+            <label for="notionConceptDatabase" data-i18n="glossary_conceptDatabase"></label>
+            <input id="notionConceptDatabase" type="text" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="notionTermDatabase" data-i18n="glossary_termDatabase"></label>
+            <input id="notionTermDatabase" type="text" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="notionInterval" data-i18n="glossary_interval"></label>
+            <select id="notionInterval">
+              <option value="0" data-i18n="glossary_manualOnly"></option>
+              <option value="5" data-i18n="glossary_fiveMinutes"></option>
+              <option value="15" data-i18n="glossary_fifteenMinutes"></option>
+              <option value="60" data-i18n="glossary_hourly"></option>
+              <option value="360" data-i18n="glossary_sixHourly"></option>
+              <option value="1440" data-i18n="glossary_daily"></option>
+            </select>
+          </div>
+          <details>
+            <summary data-i18n="glossary_schema"></summary>
+            <p class="hint" data-i18n="glossary_schemaHint"></p>
+            <div class="field">
+              <label for="notionConceptSource" data-i18n="glossary_conceptSource"></label>
+              <input id="notionConceptSource" type="text" spellcheck="false" />
+            </div>
+            <div class="field">
+              <label for="notionTermSource" data-i18n="glossary_termSource"></label>
+              <input id="notionTermSource" type="text" spellcheck="false" />
+            </div>
+            <div id="notionMapping" class="stack"></div>
+          </details>
+          <div class="row wrap">
+            <button id="notionSave" type="button" class="secondary" data-i18n="glossary_save"></button>
+            <button id="notionSync" type="button" data-i18n="glossary_sync"></button>
+          </div>
+        </fieldset>
+        <p class="status" id="notionSummary" role="status"></p>
+        <p class="status" id="notionStatus" role="status"></p>
+      </at-panel>
+
       <footer class="row actions">
         <button id="save" type="button" data-i18n="options_save"></button>
         <p class="status" id="saveStatus" role="status"></p>
@@ -86,6 +152,8 @@
     <script src="vendor/browser-polyfill.js"></script>
     <script src="lib/constants.js"></script>
     <script src="lib/browser.js"></script>
+    <script src="lib/glossary.js"></script>
+    <script src="lib/notion.js"></script>
     <script src="lib/rules.js"></script>
     <script src="lib/local.js"></script>
     <script src="lib/onnxweights.js"></script>
@@ -94,5 +162,6 @@
     <script src="lib/settings.js"></script>
     <script src="lib/components.js"></script>
     <script src="options.js"></script>
+    <script src="lib/glossaryoptions.js"></script>
   </body>
 </html>

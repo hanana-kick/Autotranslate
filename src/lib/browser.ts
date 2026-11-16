@@ -39,8 +39,6 @@ namespace AT {
     get: (tabId: number) => Promise<Tab | undefined>;
     query: (queryInfo: { active?: boolean; currentWindow?: boolean; windowId?: number }) => Promise<(Tab | undefined)[]>;
     sendMessage: (tabId: number, message: unknown) => Promise<unknown>;
-    /** Native page-language detection; no content script or model is needed. */
-    detectLanguage?: (tabId: number) => Promise<string>;
     onUpdated: {
       addListener: (listener: (tabId: number, changeInfo: { status?: string; url?: string }, tab: Tab) => void) => void;
     };
@@ -68,6 +66,7 @@ namespace AT {
 
   export type WindowsApi = {
     create: (options: { url: string; type: 'popup'; width: number; height: number; focused: boolean }) => Promise<unknown>;
+    getCurrent?: () => Promise<{ id?: number }>;
   };
 
   export type ActionApi = {
@@ -76,7 +75,8 @@ namespace AT {
   };
 
   export type ScriptingApi = {
-    executeScript: (details: { target: { tabId?: number }; files: readonly string[] }) => Promise<unknown>;
+    executeScript: (details: { target: { tabId?: number } } &
+      ({ files: readonly string[] } | { func: () => string })) => Promise<{ result?: unknown }[]>;
   };
 
   /** Chrome only: the document that hosts the on-device model. */
@@ -104,6 +104,13 @@ namespace AT {
     detectLanguage?: (text: string) => Promise<unknown>;
   };
 
+  export type AlarmsApi = {
+    get: (name: string) => Promise<{ periodInMinutes?: number } | undefined>;
+    create: (name: string, info: { delayInMinutes?: number; periodInMinutes: number }) => Promise<void> | void;
+    clear: (name: string) => Promise<boolean>;
+    onAlarm: { addListener: (listener: (alarm: { name: string }) => void) => void };
+  };
+
   /** The host object the polyfill installs as `browser`, Chrome as `chrome`. */
   export type BrowserApi = {
     runtime: RuntimeApi;
@@ -113,8 +120,11 @@ namespace AT {
     action?: ActionApi;
     scripting?: ScriptingApi;
     offscreen?: OffscreenApi;
+    sidePanel?: { open: (options: { windowId: number }) => Promise<void> };
+    sidebarAction?: { open: () => Promise<void> };
     contextMenus?: ContextMenusApi;
     i18n?: I18nApi;
+    alarms?: AlarmsApi;
   };
 
   /** Messages cross a trust boundary; only `type` is guaranteed to be there. */

@@ -14,7 +14,7 @@ function environment() {
   return { AT: load('lib/constants.js', 'lib/browser.js', 'lib/ui.js'), calls };
 }
 
-test('settings and setup open as global detached windows, never web tabs', async () => {
+test('browsers without sidebar support open global detached settings and setup', async () => {
   const { AT, calls } = environment();
   for (const page of ['options.html', 'welcome.html']) {
     assert.equal(await AT.ui.openPage(page), 'window');
@@ -46,4 +46,34 @@ test('window creation failure reaches the caller without opening another surface
   AT.windows.create = async () => { throw new Error('window creation failed'); };
   await assert.rejects(() => AT.ui.openPage('options.html'), /window creation failed/);
   assert.deepEqual(calls.tabs, []);
+});
+
+test('Chrome settings use the current window sidebar, while setup stays detached', async () => {
+  const { AT, calls } = environment();
+  const panels: unknown[] = [];
+  AT.windows.getCurrent = async () => ({ id: 42 });
+  AT.api.sidePanel = { open: async (options: unknown) => { panels.push(options); } };
+  assert.equal(await AT.ui.openPage('options.html'), 'sidebar');
+  assert.deepEqual(panels, [{ windowId: 42 }]);
+  assert.deepEqual(calls.windows, []);
+  assert.equal(await AT.ui.openPage('welcome.html'), 'window');
+  assert.equal(calls.windows.length, 1);
+});
+
+test('Firefox sidebar opens synchronously within the user gesture', async () => {
+  const { AT, calls } = environment();
+  let opened = false;
+  AT.api.sidebarAction = { open: async () => { opened = true; } };
+  const opening = AT.ui.openPage('options.html');
+  assert.equal(opened, true);
+  assert.equal(await opening, 'sidebar');
+  assert.deepEqual(calls.windows, []);
+});
+
+test('sidebar failure is reported instead of silently opening a popup', async () => {
+  const { AT, calls } = environment();
+  AT.windows.getCurrent = async () => ({ id: 42 });
+  AT.api.sidePanel = { open: async () => { throw new Error('gesture required'); } };
+  await assert.rejects(() => AT.ui.openPage('options.html'), /gesture required/);
+  assert.deepEqual(calls.windows, []);
 });

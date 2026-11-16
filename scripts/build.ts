@@ -30,7 +30,7 @@ const ONNX_VENDOR_DIR = join(ROOT, 'vendor-src', 'onnxruntime');
 // 'offscreen' hosts the on-device model; Firefox has no such API and the
 // firefox target strips it, so it never ships in that bundle.
 // The original 3.6 GiB model must survive normal extension storage limits.
-const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'unlimitedStorage'];
+const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel', 'alarms', 'unlimitedStorage'];
 type Manifest = {
   manifest_version?: number;
   name?: string;
@@ -41,6 +41,8 @@ type Manifest = {
   icons?: Record<string, string>;
   action?: { default_icon?: Record<string, string>; default_popup?: string };
   options_ui?: { page?: string };
+  side_panel?: { default_path: string };
+  sidebar_action?: { default_panel: string; default_title: string; open_at_install: boolean };
   permissions?: string[];
   browser_specific_settings?: { gecko?: { id?: string; strict_min_version?: string } };
 };
@@ -55,16 +57,26 @@ const TARGETS: Record<string, Target> = {
   chrome: {
     manifest(manifest) {
       delete manifest.browser_specific_settings;
+      // Chrome MV3 rejects `background.scripts` outright ("requires manifest
+      // version of 2 or lower"); the service worker imports those files itself.
+      if (manifest.background) delete manifest.background.scripts;
       return manifest;
     }
   },
   firefox: {
     manifest(manifest) {
       delete manifest.minimum_chrome_version;
+      delete manifest.side_panel;
+      // Firefox runs an event page from `background.scripts` and has no
+      // service worker entry in its manifest.
+      if (manifest.background) delete manifest.background.service_worker;
+      manifest.sidebar_action = {
+        default_panel: 'options.html', default_title: '__MSG_actionTitle__', open_at_install: false
+      };
       // No chrome.offscreen in Firefox: the host runs in the background page,
       // so the permission would be a request for an API that does not exist.
       manifest.permissions = (manifest.permissions ?? []).filter(
-        (permission) => permission !== 'offscreen'
+        (permission) => permission !== 'offscreen' && permission !== 'sidePanel'
       );
       manifest.browser_specific_settings = {
         gecko: { id: GECKO_ID, strict_min_version: GECKO_MIN_VERSION }
@@ -311,6 +323,20 @@ function validate(): Check {
   }
   for (const target of Object.keys(TARGETS)) {
     const transformed = TARGETS[target]?.manifest(structuredClone(manifest)) ?? {};
+    // Each store rejects the other target's background shape, so the emitted
+    // manifest is checked for what its own browser accepts.
+    if (target === 'chrome') {
+      check.fail(
+        transformed.background?.service_worker === 'background.js' && !('scripts' in (transformed.background ?? {})),
+        'chrome: background must be a service worker without scripts'
+      );
+    }
+    if (target === 'firefox') {
+      check.fail(
+        Array.isArray(transformed.background?.scripts) && !('service_worker' in (transformed.background ?? {})),
+        'firefox: background must be scripts without a service worker'
+      );
+    }
     if (target === 'firefox') {
       check.fail(
         transformed.browser_specific_settings?.gecko?.id === GECKO_ID,
