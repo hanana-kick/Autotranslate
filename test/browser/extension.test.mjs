@@ -446,6 +446,9 @@ check('Notion schema-mapped manual and scheduled sync update local page translat
   try {
     await control.reload(); await optionsReady(control);
     await control.waitForFunction(() => document.querySelector('#glossarySection').dataset.ready === 'true');
+    // The shared-page source is the default, so the API fields only appear once
+    // this case selects the token API.
+    await control.locator('#notionSource').selectOption('api');
     await control.locator('#notionEnabled').check();
     await control.locator('#notionToken').fill('ntn-synthetic-browser-fixture-secret');
     await control.locator('#notionConceptDatabase').fill(NOTION_IDS.conceptDatabase);
