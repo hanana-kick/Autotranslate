@@ -3,7 +3,7 @@
   "name": "__MSG_extensionName__",
   "short_name": "__MSG_shortName__",
   "description": "__MSG_description__",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "default_locale": "en",
   "minimum_chrome_version": "121",
   "icons": {
@@ -60,7 +60,8 @@
     "contextMenus",
     "offscreen",
     "sidePanel",
-    "unlimitedStorage"
+    "unlimitedStorage",
+    "webNavigation"
   ],
   "host_permissions": [
     "<all_urls>"

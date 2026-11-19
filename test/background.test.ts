@@ -79,6 +79,7 @@ type MessageListener = (message: ATNamespace, sender: ATNamespace, respond: (pay
 type Events = {
   installed: Listener[];
   startup: Listener[];
+  committed: ((details: { tabId: number; frameId: number; url: string }) => void)[];
   menuClicks: Listener[];
   updated: Listener[];
   activated: Listener[];
@@ -210,7 +211,7 @@ function environment({
   };
 
   let hasHostDocument = resident === true;
-  const events: Events = { installed: [], startup: [], menuClicks: [], updated: [], activated: [], removed: [], storageChanged: [], messages: [] };
+  const events: Events = { installed: [], startup: [], menuClicks: [], updated: [], activated: [], removed: [], storageChanged: [], messages: [], committed: [] };
 
   const dispatch = (message: ATNamespace, sender: ATNamespace = {}) => {
     if (message?.to === OFFSCREEN_HOST) {
@@ -249,6 +250,9 @@ function environment({
     tabs?.find((candidate) => candidate.id === tabId) ?? (tab7.id === tabId ? tab7 : undefined);
 
   const surface: ATNamespace = {
+    webNavigation: {
+      onCommitted: { addListener: (fn: (details: { tabId: number; frameId: number; url: string }) => void) => events.committed.push(fn) }
+    },
     runtime: {
       lastError: null,
       id: 'autotranslate@hanana-kick',
@@ -319,8 +323,8 @@ function environment({
       onUpdated: { addListener: (fn: Listener) => events.updated.push(fn) },
       onActivated: { addListener: (fn: Listener) => events.activated.push(fn) },
       onRemoved: { addListener: (fn: Listener) => events.removed.push(fn) },
-      sendMessage: async (tabId: number, message: TabMessage) => {
-        recorded.tabMessages.push({ tabId, message });
+      sendMessage: async (tabId: number, message: TabMessage, options?: { frameId?: number }) => {
+        recorded.tabMessages.push({ tabId, message, ...(options?.frameId === undefined ? {} : { frameId: options.frameId }) });
         return tabReply(message, lookupTab(tabId) ?? tab);
       }
     },
@@ -432,7 +436,7 @@ const unloadedStatus = {
  * handlers, stubbed host replies) has run by the time it fires, so nothing
  * has to be guessed at.
  */
-const fire = async (list: Listener[], ...args: unknown[]) => {
+const fire = async (list: ((...args: any[]) => unknown)[], ...args: unknown[]) => {
   for (const listener of list) await listener(...args);
   // Let the work a handler started land: it awaits storage, so one tick is not
   // enough, and "nothing was injected" must be observed after the handler's own
@@ -523,6 +527,28 @@ test('a due dictionary sync runs on startup, a fresh one does not', async () => 
     await fire(fresh.events.startup);
     assert.deepEqual(attempts, [], 'a fresh dictionary is not refetched on every browser start');
   } finally { globalThis.fetch = realFetch; }
+});
+
+test('a chat frame that commits after enable is injected and told to translate', async () => {
+  const { AT, events, recorded: rec } = environment({ selectedTabs: [7], settings: { enabled: true } });
+  await fire(events.updated, 7, { status: 'complete' }, { id: 7, url: 'https://www.youtube.com/watch?v=abc', title: 'live' });
+  rec.injected.length = 0;
+  rec.tabMessages.length = 0;
+
+  // The chat viewer appears later, in its own frame.
+  assert.equal(events.committed.length, 1, 'the background subscribes to frame commits');
+  await fire(events.committed, { tabId: 7, frameId: 42, url: 'https://www.youtube.com/live_chat?continuation=x' });
+  for (let turn = 0; turn < 40 && !rec.injected.length; turn += 1) await new Promise((done) => setImmediate(done));
+  assert.deepEqual(rec.injected.at(-1), { target: { tabId: 7, frameIds: [42] }, files: CONTENT_FILES },
+    'only that frame is injected');
+  const translate = rec.tabMessages.find((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE);
+  assert.ok(translate, 'the frame is told to translate');
+  assert.equal((translate as { frameId?: number }).frameId, 42, 'the command targets the chat frame');
+
+  // An unrelated frame navigation is ignored.
+  const before = rec.injected.length;
+  await fire(events.committed, { tabId: 7, frameId: 43, url: 'https://www.youtube.com/embed/ads' });
+  assert.equal(rec.injected.length, before, 'other frames stay untouched');
 });
 
 test('an update migrates retired settings without opening UI or initializing inference', async () => {

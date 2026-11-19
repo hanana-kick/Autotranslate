@@ -30,7 +30,7 @@ const ONNX_VENDOR_DIR = join(ROOT, 'vendor-src', 'onnxruntime');
 // 'offscreen' hosts the on-device model; Firefox has no such API and the
 // firefox target strips it, so it never ships in that bundle.
 // The original 3.6 GiB model must survive normal extension storage limits.
-const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel', 'alarms', 'unlimitedStorage'];
+const PERMISSIONS = ['storage', 'scripting', 'contextMenus', 'offscreen', 'sidePanel', 'alarms', 'unlimitedStorage', 'webNavigation'];
 type Manifest = {
   manifest_version?: number;
   name?: string;

@@ -928,6 +928,33 @@ if (typeof self.importScripts === 'function') {
     });
   }
 
+  /** The only frame a page's own viewer renders chat in. */
+  const CHAT_VIEW = /^https:\/\/(?:www\.)?youtube\.com\/live_chat(?:[?#]|$)/;
+
+  /**
+   * A chat frame is created long after its page, so the injection that ran at
+   * enable time never saw it. Inject the frame when it commits and hand it the
+   * same settings the page already has.
+   */
+  api.webNavigation?.onCommitted.addListener((details) => {
+    if (details.tabId < 0 || !CHAT_VIEW.test(details.url)) return;
+    void (async () => {
+      await targetsReady;
+      if (!targets.has(details.tabId)) return;
+      const settings = await getSettings();
+      if (!settings.enabled) return;
+      await AT.scripting!.executeScript({
+        target: { tabId: details.tabId, frameIds: [details.frameId] },
+        files: CONTENT_FILES
+      });
+      await api.tabs.sendMessage(details.tabId, {
+        type: C.MSG.CONTENT_TRANSLATE,
+        decision: { action: 'translate', reason: 'frame' },
+        settings: targetSnapshot(settings)
+      }, { frameId: details.frameId });
+    })().catch((error) => AT.warn('chat frame injection failed', error));
+  });
+
   api.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     try {
       await targetsReady;

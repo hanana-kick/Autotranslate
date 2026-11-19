@@ -38,7 +38,7 @@ namespace AT {
     create: (properties: { url: string; active?: boolean }) => Promise<Tab | undefined>;
     get: (tabId: number) => Promise<Tab | undefined>;
     query: (queryInfo: { active?: boolean; currentWindow?: boolean; windowId?: number }) => Promise<(Tab | undefined)[]>;
-    sendMessage: (tabId: number, message: unknown) => Promise<unknown>;
+    sendMessage: (tabId: number, message: unknown, options?: { frameId?: number }) => Promise<unknown>;
     onUpdated: {
       addListener: (listener: (tabId: number, changeInfo: { status?: string; url?: string }, tab: Tab) => void) => void;
     };
@@ -111,6 +111,11 @@ namespace AT {
     onAlarm: { addListener: (listener: (alarm: { name: string }) => void) => void };
   };
 
+  /** Frame navigation, which a page's own chat viewer needs. */
+  export type WebNavigationApi = {
+    onCommitted: { addListener: (listener: (details: { tabId: number; frameId: number; url: string }) => void) => void };
+  };
+
   /** The host object the polyfill installs as `browser`, Chrome as `chrome`. */
   export type BrowserApi = {
     runtime: RuntimeApi;
@@ -125,6 +130,7 @@ namespace AT {
     contextMenus?: ContextMenusApi;
     i18n?: I18nApi;
     alarms?: AlarmsApi;
+    webNavigation?: WebNavigationApi;
   };
 
   /** Messages cross a trust boundary; only `type` is guaranteed to be there. */
@@ -207,6 +213,7 @@ namespace AT {
   /** The `offscreen` surface; named apart from `AT.offscreen`, which is the
    *  Chrome placement of the on-device host, not the API. */
   export let offscreenApi: OffscreenApi | null | undefined;
+  export let webNavigation: WebNavigationApi | null | undefined;
 
   api = extensionApi;
   runtime = extensionApi.runtime ?? null;

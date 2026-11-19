@@ -339,7 +339,11 @@ Diagnostic sources and the pre-change compiled modules are archived in
 
 A page's chat is a frame, so the background injects the content script into
 every frame and the script stays inert unless the frame is the live-chat viewer
-(`youtube.com/live_chat`). In that frame it does not run the article pipeline:
+(`youtube.com/live_chat`). A chat frame is created long after its page, so the
+injection that runs at enable time cannot see it: the background also listens to
+frame commits (`webNavigation.onCommitted`) and injects and commands that one
+frame when the chat URL arrives. Without that hook, enabling the tab before the
+chat exists translated **1 of 82** messages; with it, **71 of 72**. In that frame it does not run the article pipeline:
 it observes the virtualized message list, translates each new `#message` in the
 page's own language, writes the Korean text in place and keeps the original in
 `data-at-original` for restore. Counters are published on
@@ -354,8 +358,9 @@ model requests for 33 texts (max 8 per request), per-message latency
 a media-pausing init script, aborted `googlevideo` segments) and stayed
 `paused` at `currentTime 0` with 11 media requests aborted.
 
-Evidence: `test-results/browser/youtube-live-chat/chat-performance.json` and
-`chat-translated.png`. Short, noisy chat lines translate unevenly — the run
+Evidence: `test-results/browser/youtube-live-chat/chat-performance.json`,
+`chat-translated.png`, `release-vs-local.json` (release archive and local build
+translate identically, 90/91 and 88/89) and `early-only.json` (the fix). Short, noisy chat lines translate unevenly — the run
 above produced `분분 결정이지` for 「ブンブンで決まりやな」 — so this certifies
 plumbing and speed, not chat-level fluency.
 
