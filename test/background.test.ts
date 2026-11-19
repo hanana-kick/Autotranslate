@@ -618,7 +618,9 @@ test('navigation injects the content script and asks it to translate', async () 
   await fire(events.updated, 7, { status: 'complete' }, tab);
 
   assert.equal(recorded.injected.length, 1);
-  assert.deepEqual(recorded.injected[0], { target: { tabId: 7 }, files: CONTENT_FILES });
+  // Frames are injected too, so a page's own chat viewer is reachable; the
+  // script stays inert in frames that are not the chat.
+  assert.deepEqual(recorded.injected[0], { target: { tabId: 7, allFrames: true }, files: CONTENT_FILES });
   const translate = recorded.tabMessages.find((entry) => entry.message.type === AT.C.MSG.CONTENT_TRANSLATE);
   assert.equal(translate!.tabId, 7);
   assert.deepEqual(translate!.message.decision, { action: 'translate', reason: 'selected-tab' }, 'the switch alone means translate');

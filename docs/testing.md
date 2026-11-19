@@ -335,6 +335,30 @@ Diagnostic sources and the pre-change compiled modules are archived in
   Evidence and screenshots:
   `test-results/browser/onnx-only-extension/full-page-onnx-only.json`.
 
+## Live chat translation
+
+A page's chat is a frame, so the background injects the content script into
+every frame and the script stays inert unless the frame is the live-chat viewer
+(`youtube.com/live_chat`). In that frame it does not run the article pipeline:
+it observes the virtualized message list, translates each new `#message` in the
+page's own language, writes the Korean text in place and keeps the original in
+`data-at-original` for restore. Counters are published on
+`documentElement.dataset.atChat` so a test can read them without privileged
+access.
+
+Measured on ANNnewsCH live chat (`FulNIhfsBjQ`) with the real q4f16 GPU,
+90 seconds after enabling the tab: **33/33 messages translated, 0 failed**, 5
+model requests for 33 texts (max 8 per request), per-message latency
+**median 2.30 s, p90 2.99 s, max 3.74 s**, arrival-limited throughput
+**24 messages/minute**. Video playback was blocked three ways (autoplay policy,
+a media-pausing init script, aborted `googlevideo` segments) and stayed
+`paused` at `currentTime 0` with 11 media requests aborted.
+
+Evidence: `test-results/browser/youtube-live-chat/chat-performance.json` and
+`chat-translated.png`. Short, noisy chat lines translate unevenly — the run
+above produced `분분 결정이지` for 「ブンブンで決まりやな」 — so this certifies
+plumbing and speed, not chat-level fluency.
+
 ## Firefox release gate
 
 The release publishes two archives. `build/chrome` and `build/firefox` are built

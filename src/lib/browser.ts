@@ -75,7 +75,7 @@ namespace AT {
   };
 
   export type ScriptingApi = {
-    executeScript: (details: { target: { tabId?: number } } &
+    executeScript: (details: { target: { tabId?: number; allFrames?: boolean; frameIds?: number[] } } &
       ({ files: readonly string[] } | { func: () => string })) => Promise<{ result?: unknown }[]>;
   };
 

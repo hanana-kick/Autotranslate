@@ -120,10 +120,20 @@ namespace AT.content {
 declare var __autotranslate: AT.content.Boot | undefined;
 
 (() => {
+  const frame = (globalThis as { window?: Window }).window;
+  const framed = Boolean(frame && frame.top !== frame);
+  if (framed && !/^https:\/\/(?:www\.)?youtube\.com\/live_chat(?:[?#]|$)/.test(location.href)) {
+    // Every frame is injected so a page's chat is reachable. Only the chat
+    // viewer has work in a frame; anything else stays inert rather than
+    // translating ads, embeds or tracking pixels.
+    return;
+  }
   if (globalThis.__autotranslate) return;
 
   const C = AT.C;
 
+  /** The live-chat viewer, which is a page of its own inside an iframe. */
+  const inChatFrame = framed;
   const state: AT.content.State = {
     pipeline: null,
     settings: null,
@@ -880,10 +890,154 @@ declare var __autotranslate: AT.content.Boot | undefined;
     }
   }
 
+  /* ---- live chat ---------------------------------------------------------
+   * The chat viewer is a page of its own inside an iframe, and its message list
+   * is virtualized: renderers appear and are recycled while the list scrolls.
+   * Translation is therefore incremental and keyed by the node that showed the
+   * text, not by a whole-page pass.
+   */
+  const CHAT_MESSAGE = 'yt-live-chat-text-message-renderer';
+  const chat = {
+    observer: null as MutationObserver | null,
+    settings: null as AT.settings.ContentSnapshot | null,
+    queue: new Map<Element, { text: string; at: number }>(),
+    timer: 0,
+    busy: false,
+    stats: { seen: 0, translated: 0, failed: 0, requests: 0, texts: 0,
+      latencies: [] as number[], startedAt: 0 }
+  };
+  const JAPANESE = /[\u3040-\u30ff\u4e00-\u9fff]/;
+
+  /** Reading the counters from the page needs no privileged access. */
+  function chatPublish(): void {
+    const sorted = [...chat.stats.latencies].sort((a, b) => a - b);
+    const at = (quantile: number): number | null => sorted.length
+      ? Math.round(sorted[Math.min(sorted.length - 1, Math.floor(quantile * sorted.length))]!)
+      : null;
+    document.documentElement.dataset.atChat = JSON.stringify({
+      seen: chat.stats.seen, translated: chat.stats.translated, failed: chat.stats.failed,
+      requests: chat.stats.requests, texts: chat.stats.texts,
+      medianMs: at(0.5), p90Ms: at(0.9), maxMs: at(1),
+      elapsedMs: chat.stats.startedAt ? Date.now() - chat.stats.startedAt : 0
+    });
+  }
+
+  function chatEnqueue(element: Element): void {
+    const node = element as HTMLElement;
+    if (node.dataset.atDone) return;
+    const text = node.textContent?.trim() ?? '';
+    if (!text || !JAPANESE.test(text)) return;
+    chat.stats.seen += 1;
+    chat.queue.set(element, { text, at: Date.now() });
+    if (!chat.timer) chat.timer = window.setTimeout(() => { chat.timer = 0; void chatFlush(); }, 400);
+  }
+
+  function chatScan(root: ParentNode = document): void {
+    for (const message of root.querySelectorAll(`${CHAT_MESSAGE} #message`)) chatEnqueue(message);
+    chatPublish();
+  }
+
+  async function chatFlush(): Promise<void> {
+    if (chat.busy || !chat.settings || chat.queue.size === 0) return;
+    chat.busy = true;
+    const batch = [...chat.queue.entries()].slice(0, 8);
+    for (const [element] of batch) chat.queue.delete(element);
+    const texts = batch.map(([, item]) => item.text);
+    try {
+      chat.stats.requests += 1;
+      chat.stats.texts += texts.length;
+      const reply = (await AT.sendMessage({
+        type: C.MSG.BATCH,
+        texts,
+        targetLang: chat.settings.targetLang,
+        sourceLang: chat.settings.sourceLang,
+        ...(chat.settings.translationKey ? { translationKey: chat.settings.translationKey } : {}),
+        url: location.href,
+        fragmentConcurrency: chat.settings.translationConcurrency ?? 1
+      })) as AT.content.BatchReply | undefined;
+      if (!reply?.ok || !Array.isArray(reply.translations)) throw new Error(reply?.error ?? 'chat batch failed');
+      const done = Date.now();
+      batch.forEach(([element, item], index) => {
+        const translation = reply.translations[index];
+        const node = element as HTMLElement;
+        if (typeof translation !== 'string' || !translation.trim()) { chat.stats.failed += 1; return; }
+        node.dataset.atOriginal = item.text;
+        node.dataset.atDone = '1';
+        node.textContent = translation;
+        chat.stats.translated += 1;
+        chat.stats.latencies.push(done - item.at);
+        if (chat.stats.latencies.length > 500) chat.stats.latencies.shift();
+      });
+    } catch (error) {
+      chat.stats.failed += batch.length;
+      AT.warn('chat translation failed', error);
+    } finally {
+      chat.busy = false;
+      chatPublish();
+      if (chat.queue.size) {
+        if (!chat.timer) chat.timer = window.setTimeout(() => { chat.timer = 0; void chatFlush(); }, 0);
+      }
+    }
+  }
+
+  function chatStart(settings: AT.settings.ContentSnapshot): void {
+    chat.settings = settings;
+    if (!chat.stats.startedAt) chat.stats.startedAt = Date.now();
+    if (!chat.observer) {
+      chat.observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (node.nodeType !== 1) continue;
+            const element = node as Element;
+            if (element.matches?.(CHAT_MESSAGE)) {
+              const message = element.querySelector('#message');
+              if (message) chatEnqueue(message);
+            }
+            for (const message of element.querySelectorAll?.(`${CHAT_MESSAGE} #message`) ?? []) chatEnqueue(message);
+          }
+        }
+        chatPublish();
+      });
+      chat.observer.observe(document.documentElement, { childList: true, subtree: true });
+    }
+    chatScan();
+  }
+
+  function chatStop(): void {
+    chat.observer?.disconnect();
+    chat.observer = null;
+    chat.settings = null;
+    chat.queue.clear();
+    if (chat.timer) { clearTimeout(chat.timer); chat.timer = 0; }
+  }
+
+  function chatRestore(): number {
+    let restored = 0;
+    for (const node of document.querySelectorAll('#message[data-at-done]')) {
+      const element = node as HTMLElement;
+      const original = element.dataset.atOriginal;
+      if (typeof original === 'string') { element.textContent = original; restored += 1; }
+      delete element.dataset.atDone;
+      delete element.dataset.atOriginal;
+    }
+    chatStop();
+    chatPublish();
+    return restored;
+  }
+
   async function translate(message: AT.content.TranslateRequest): Promise<AT.MessageResult> {
     const settings = message.settings;
     if (!settings) throw new Error('translate request without settings');
     const decision = message.decision ?? { action: 'translate' };
+    if (inChatFrame) {
+      // The chat viewer has no article to plan: it is a stream of messages.
+      if (!settings.enabled || decision.action === 'skip') {
+        chatRestore();
+        return { status: 'idle', reason: decision.reason ?? 'disabled' };
+      }
+      chatStart(settings);
+      return { status: 'translated', translated: chat.stats.translated };
+    }
     if (!settings.enabled || decision.action === 'skip') {
       await restore();
       return { status: 'idle', reason: decision.reason ?? 'disabled' };
@@ -908,6 +1062,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
   }
 
   async function restore(): Promise<AT.MessageResult> {
+    if (inChatFrame) return { status: 'idle', restored: chatRestore() } as AT.MessageResult;
     const restored = invalidate();
     closeCard();
     await report({ status: 'idle' });

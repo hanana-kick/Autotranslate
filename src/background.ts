@@ -402,7 +402,7 @@ if (typeof self.importScripts === 'function') {
 
   async function ensureInjected(tabId: number): Promise<void> {
     if (await hasContentScript(tabId)) return;
-    await AT.scripting!.executeScript({ target: { tabId }, files: CONTENT_FILES });
+    await AT.scripting!.executeScript({ target: { tabId, allFrames: true }, files: CONTENT_FILES });
     // executeScript resolves when the files ran, not when the document kept
     // them: a navigation under it leaves a page with no listener, and the
     // translate message that follows is then lost without an error. Confirm the
@@ -410,7 +410,7 @@ if (typeof self.importScripts === 'function') {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       if (await hasContentScript(tabId)) return;
       await new Promise<void>((done) => setTimeout(done, 60 * (attempt + 1)));
-      if (attempt === 0) await AT.scripting!.executeScript({ target: { tabId }, files: CONTENT_FILES });
+      if (attempt === 0) await AT.scripting!.executeScript({ target: { tabId, allFrames: true }, files: CONTENT_FILES });
     }
     throw new Error('the content script did not answer after injection');
   }
