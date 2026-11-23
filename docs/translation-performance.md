@@ -4654,3 +4654,49 @@ Production kernels and builds remain unchanged; no new page-speedup or
 GGUF-relative gain is claimed. `experiment.json` records the predeclared
 gate; `screen-analysis.json`, `outcome.json`, raw reports and
 `experiment-sources.tar.gz` preserve decisions and reproduction inputs.
+
+## Progressive slowdown on dynamic feeds: queue backlog, not accumulation
+
+A feed that appends paragraphs in waves was translated end to end while every
+paragraph's completion time was stamped by the page itself. Two arrival rates
+separate a leak from a queue:
+
+| Arrival rate (4 texts/wave) | Latency, first waves | Latency, last waves | JS heap |
+| --- | ---: | ---: | ---: |
+| 1 wave / 2 s (2 texts/s) | 0.74–0.79 s | 0.74–0.76 s | 2–5 MB |
+| 1 wave / 300 ms (13.3 texts/s) | 0.7–3.5 s | 21.9–23.0 s | 3–5 MB |
+
+Heap stays flat and no structure grows with translated-node count: the page's
+`done`/`swept`/`failures` tables drop disconnected nodes every pass, and every
+host memo is bounded (256 entries, 8,192 units; 4 MB answers). The slowdown is
+**service time vs arrival rate**: one short paragraph costs ~0.18 s of model
+time at four slots, so the pipeline sustains ~5.7 texts/s. At 13.3 texts/s the
+backlog grows 7.6 texts/s and every paragraph waits behind everything queued
+before it — measured latency tracked `backlog ÷ 5.7` within a few percent.
+
+The fix is admission, not caching. The pipeline already had a reading window
+(visible text plus the next screen; everything else parked until it enters the
+viewport), but `viewportMode` was read once at `create` and the content script
+never passed it, so production always queued the whole page. Now:
+
+- `readingWindow` is a per-pass decision — a page that starts short can grow
+  into a scrolling surface — and the height test (`scrollHeight > 2 × innerHeight`)
+  is evaluated on every pass.
+- Admission, plan re-ranking, work limit and unit granularity all read the same
+  per-pass value.
+
+With the window active, the same page at reading speed (2 texts/s arriving, a
+0.25 screen/s scroll) finishes every wave in **0.41–0.70 s** — the last waves
+are the fastest — and nothing is parked. At an aggressive 1.6 screens/s scroll
+the remainder is parked instead of queued (62 of 240 paragraphs), and scrolling
+back re-admits it. Total translation work is unchanged: nothing is discarded,
+it is deferred.
+
+| Same 240-paragraph feed | First waves | Last waves | Parked |
+| --- | ---: | ---: | ---: |
+| Whole page (before) | 0.7 s | 23.0 s | 0 |
+| Reading window, 2 texts/s + 0.25 screen/s | 0.65 s | 0.41 s | 0 |
+| Reading window, 13.3 texts/s + 1.6 screens/s | 0.5 s | 4.1 s | 62 |
+
+Reproduce with `test/browser/feed-bench.mjs`; the raw report is
+`test-results/browser/dynamic-feed/report.json`.

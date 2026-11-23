@@ -379,6 +379,34 @@ test('scrolling during an active request preserves and reorders the unsent tail'
   assert.equal(translator.restore().restored, 3);
 });
 
+test('a page that grows into a scrolling surface starts using the reading window on its own', async () => {
+  // The height check runs per pass: a feed that starts short must not keep
+  // whole-page mode once it is taller than two screens.
+  const fixture = page([
+    { text: 'First paragraph', top: 10, tag: 'main' },
+    { text: 'Second paragraph', top: 40, tag: 'main' },
+    { text: 'Paragraph far below', top: 3000, tag: 'main' }
+  ]);
+  let tallerThanTwoScreens = false;
+  const asked: string[] = [];
+  const translator = pipeline.create({
+    doc: fixture.document, settings: () => ({ maxNodes: 100 }),
+    readingWindow: () => tallerThanTwoScreens,
+    translate: async ({ texts }: { texts: string[] }) => {
+      asked.push(...texts);
+      return texts.map((text) => `»${text}«`);
+    }
+  });
+  const first = await translator.translate(1);
+  assert.equal(first.translated, 1, 'a short page translates in document order');
+  tallerThanTwoScreens = true;
+  const second = await translator.refresh(undefined, 100);
+  assert.equal(asked.includes('Paragraph far below'), false, 'the new mode parks text outside the window');
+  assert.equal(fixture.texts[2]!.nodeValue, 'Paragraph far below');
+  assert.equal(second.translated, 2);
+  assert.equal(translator.restore().restored, 2);
+});
+
 test('viewport invalidation finishes one active quantum and parks the old window until scrolling back', async () => {
   const fixture = page(Array.from({ length: 21 }, (_, index) => ({
     text: `Reader comment ${index}`, tag: 'main', top: index === 20 ? 3000 : index * 30

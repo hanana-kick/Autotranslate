@@ -223,6 +223,14 @@ declare var __autotranslate: AT.content.Boot | undefined;
       state.pipeline = AT.pipeline.create({
         doc: document,
         presentation,
+        // A page taller than two screens is a scrolling surface: translate the
+        // reading window and let scrolling discover the rest. Whole-page work
+        // there queues minutes behind a feed that keeps adding more, and each
+        // new paragraph waits for everything before it.
+        readingWindow: () => {
+          const height = globalThis.innerHeight || 0;
+          return height > 0 && document.documentElement.scrollHeight > height * 2;
+        },
         settings: () => ({ maxNodes: snapshot.maxNodes, translationConcurrency: state.settings?.translationConcurrency ?? 8 }),
         // The host owns source-token planning. One request entry can own many
         // inline Text nodes; DOM collection keeps that semantic unit intact.

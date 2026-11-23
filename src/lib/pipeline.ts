@@ -35,8 +35,9 @@ namespace AT.pipeline {
     /** Sends one batch and returns its translations, in order. */
     translate: (batch: Batch) => Promise<string[]>;
     /** Bound work to the visible/next-screen reading window, yielding after
-     * each inference quantum. Omit for explicit whole-document processing. */
-    readingWindow?: boolean;
+     * each inference quantum. Omit for explicit whole-document processing.
+     * Read on every pass: a short page can grow into a scrolling surface. */
+    readingWindow?: boolean | (() => boolean);
     /** Keep source segmentation independent of viewport admission policy. */
     workLimit?: AT.dom.Options['workLimit'];
     sentences?: AT.dom.Sentences | undefined;
@@ -396,14 +397,15 @@ namespace AT.pipeline {
     /** A re-rank replaced the plan while a pass was working through it. */
     let replanned = false;
     // Viewport changes affect future dispatch, never the answer in flight.
-    const viewportMode = request.readingWindow === true;
+    const readingWindow = (): boolean => (typeof request.readingWindow === 'function'
+      ? request.readingWindow() === true : request.readingWindow === true);
     const viewportWork = { maxChars: AT.C.PACKED_TEXT_CHARS, maxTexts: 1 };
     let engagement: { root: Element; remaining: number; until: number } | null = null;
     // Ordinary reading units finish before switching. Extremely long units
     // yield after 32 bounded DOM quanta; the host splits each by source tokens.
     const UNIT_QUANTA = 32;
     const continuity = new Map<Element | Text, number>();
-    function unitOf(node: Text): Element | Text {
+    function unitOf(node: Text, viewportMode: boolean): Element | Text {
       let block: Element | null = null;
       for (let element = node.parentElement; element; element = element.parentElement) {
         const marker = `${element.tagName.toLowerCase()} ${element.getAttribute?.('class') ?? ''} ${element.id ?? ''}`;
@@ -418,12 +420,12 @@ namespace AT.pipeline {
     }
 
     /** Both initial collection and viewport re-ranking use this exact snapshot. */
-    function candidatesFor(nodes: Text[], viewport: { top: number; height: number; width: number }): AT.targets.Candidate[] {
+    function candidatesFor(nodes: Text[], viewport: { top: number; height: number; width: number }, viewportMode: boolean): AT.targets.Candidate[] {
       const regionOf = readingRegions();
       if (engagement && (engagement.remaining <= 0 || engagement.until < Date.now() || engagement.root.isConnected === false)) engagement = null;
       return nodes.map((node, order): AT.targets.Candidate => {
         const rect = measure(node);
-        const quanta = continuity.get(unitOf(node));
+        const quanta = continuity.get(unitOf(node, viewportMode));
         return {
           id: String(order), order, role: AT.targets.roleOf(describe(node)),
           priority: AT.targets.priorityOf(rect, viewport),
@@ -446,7 +448,7 @@ namespace AT.pipeline {
         sentences: request.sentences,
         presentation: request.presentation,
         shouldTranslate: request.shouldTranslate,
-        workLimit: request.workLimit ?? (() => viewportMode ? viewportWork : ordinaryWork),
+        workLimit: request.workLimit ?? (() => readingWindow() ? viewportWork : ordinaryWork),
         shouldAbort: request.shouldAbort,
         onApply: (translated) => request.onProgress?.({ translated, requested: 0 }),
         translate: (texts, onProgress, signal) => request.translate({ texts, role: 'unknown', onProgress, signal })
@@ -468,6 +470,7 @@ namespace AT.pipeline {
     ): Promise<Result> {
       const dom = executor();
       const cancelled = () => epoch !== generation || request.shouldAbort?.() === true;
+      const viewportMode = readingWindow();
       const empty = (): Result => ({ requested: 0, translated: dom.stats().translated, runs: 0,
         batches: 0, failed: failures.size, error: failures.values().next().value?.error ?? null, processedNodes: 0, hasMore: false });
       if (cancelled()) return empty();
@@ -519,7 +522,7 @@ namespace AT.pipeline {
       const remaining = budgeted ? pending.filter((node) => !swept.has(node)) : pending;
       if (budgeted && remaining.length === 0) swept = new Set<Text>();
       const ordered = previousPlan ? previousPlan.nodes : budgeted && remaining.length > 0 ? remaining : pending;
-      const candidates = previousPlan ? [] : candidatesFor(ordered, viewport);
+      const candidates = previousPlan ? [] : candidatesFor(ordered, viewport, viewportMode);
       // Park work outside the reading window without starting model requests or
       // scheduling empty continuations. Scroll/expansion invalidation rediscovers
       // it; no source is discarded or marked translated.
@@ -547,7 +550,7 @@ namespace AT.pipeline {
         if (viewportMode) {
           const node = ordered[Number(entry.id)];
           if (!node || dom.has(node)) continue;
-          const unit = unitOf(node);
+          const unit = unitOf(node, viewportMode);
           if (selectedUnits.has(unit)) continue;
           if (selectedUnits.size >= width) break;
           selectedUnits.add(unit);
@@ -555,7 +558,7 @@ namespace AT.pipeline {
         let group = groups[groups.length - 1];
         const chars = ordered[Number(entry.id)]?.nodeValue?.length ?? 0;
         if (!group || group.role !== entry.role || group.priority !== entry.priority ||
-            (!viewportMode && unitOf(ordered[Number(group.ids[0])]!) !== unitOf(ordered[Number(entry.id)]!)) ||
+            (!viewportMode && unitOf(ordered[Number(group.ids[0])]!, viewportMode) !== unitOf(ordered[Number(entry.id)]!, viewportMode)) ||
             group.ids.length >= waveNodes || groupChars + chars > waveChars) {
           group = { role: entry.role, priority: entry.priority, ids: [] };
           groups.push(group);
@@ -609,7 +612,7 @@ namespace AT.pipeline {
         if (subset.length === 0) return;
         const jobEngagement = engagement && subset.some(node => engagement!.root.contains(node)) ? engagement : null;
         let jobRequests = 0;
-        const unit = unitOf(subset[0]!);
+        const unit = unitOf(subset[0]!, viewportMode);
         if (!continuity.has(unit)) {
           for (const [previous, count] of continuity) if (count >= UNIT_QUANTA) continuity.delete(previous);
         }
@@ -704,7 +707,7 @@ namespace AT.pipeline {
           if (replanned || inFlight.length >= width) { yielded = true; break; }
           const node = ordered[Number(group.ids[0])];
           if (node) {
-            const unit = unitOf(node);
+            const unit = unitOf(node, viewportMode);
             if (reservedUnits.has(unit)) { yielded = true; continue; }
             reservedUnits.add(unit);
           }
@@ -721,13 +724,13 @@ namespace AT.pipeline {
         const active = new Set<Promise<void>>();
         const ready = Promise.resolve();
         while (groups.length && !cancelled() && !replanned) {
-          const next = groups.findIndex(group => !reservedUnits.has(unitOf(ordered[Number(group.ids[0])]!)));
+          const next = groups.findIndex(group => !reservedUnits.has(unitOf(ordered[Number(group.ids[0])]!, viewportMode)));
           if (active.size >= width || next < 0) {
             await Promise.race(active);
             continue;
           }
           const group = groups.splice(next, 1)[0]!;
-          const unit = unitOf(ordered[Number(group.ids[0])]!);
+          const unit = unitOf(ordered[Number(group.ids[0])]!, viewportMode);
           reservedUnits.add(unit);
           const job = perform(group, ready).finally(() => {
             active.delete(job);
@@ -758,7 +761,8 @@ namespace AT.pipeline {
       if (viewportMode && !prefetch && !unfinished && !replanned) {
         savedPlan = { nodes: ordered, entries: [], cursor: 0 };
       }
-      const liveUnits = new Set(ordered.filter((node) => !dom.has(node) && !failures.has(node)).map(unitOf));
+      const liveUnits = new Set(ordered.filter((node) => !dom.has(node) && !failures.has(node))
+        .map((node) => unitOf(node, viewportMode)));
       for (const unit of continuity.keys()) if (!liveUnits.has(unit)) continuity.delete(unit);
       pass.hasMore = !cancelled() && (viewportMode
         ? replanned || unfinished || (prefetch && offscreen.length > 1)
@@ -803,10 +807,11 @@ namespace AT.pipeline {
         return { visible: 0, queued: 0 };
       }
       const viewport = { top: 0, height: viewportHeight(), width: globalThis.innerWidth || 1200 };
-      const candidates = candidatesFor(nodes, viewport);
+      const mode = readingWindow();
+      const candidates = candidatesFor(nodes, viewport, mode);
       const admitted = candidates.filter((candidate) =>
         !failures.has(nodes[Number(candidate.id)]!) && !candidate.deferred && Number.isFinite(candidate.top) &&
-        (!viewportMode || candidate.priority === 'visible'));
+        (!mode || candidate.priority === 'visible'));
       const entries = AT.targets.plan(admitted, { band: viewport.height }).flatMap((group) =>
         group.ids.map((id) => ({ id, role: group.role, priority: group.priority })));
       savedPlan = { nodes, entries, cursor: 0 };
