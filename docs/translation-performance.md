@@ -4700,3 +4700,10 @@ it is deferred.
 
 Reproduce with `test/browser/feed-bench.mjs`; the raw report is
 `test-results/browser/dynamic-feed/report.json`.
+
+A page that stops writing still fills in the background, so scrolling lands on
+translated text: once the visible window is empty, one parked unit is translated
+per idle tick through `prefetch()`. A page that adds work while the fill waits
+cancels that fill and lets its own pass run, so a live feed never rebuilds the
+whole-page queue — the kill switch is a mutation counter, not a wall-clock
+guess, and the extension's own writes do not count as page work.

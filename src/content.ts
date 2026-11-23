@@ -79,6 +79,10 @@ namespace AT.content {
     working: boolean;
     observer: MutationObserver | null;
     timer: number;
+    /** Idle fill of the next screens; only one is ever scheduled. */
+    prefetchTimer: number;
+    /** Counts page mutations: a page that is still writing is never idle. */
+    mutations: number;
     card: HTMLElement | null;
     busy: Promise<AT.MessageResult | undefined>;
     /** Set by restore(): a pass in flight stops writing its answers. */
@@ -149,6 +153,8 @@ declare var __autotranslate: AT.content.Boot | undefined;
     working: false,
     observer: null,
     timer: 0,
+    prefetchTimer: 0,
+    mutations: 0,
     card: null,
     busy: Promise.resolve(undefined),
     stopped: false,
@@ -227,10 +233,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
         // reading window and let scrolling discover the rest. Whole-page work
         // there queues minutes behind a feed that keeps adding more, and each
         // new paragraph waits for everything before it.
-        readingWindow: () => {
-          const height = globalThis.innerHeight || 0;
-          return height > 0 && document.documentElement.scrollHeight > height * 2;
-        },
+        readingWindow: tallSurface,
         settings: () => ({ maxNodes: snapshot.maxNodes, translationConcurrency: state.settings?.translationConcurrency ?? 8 }),
         // The host owns source-token planning. One request entry can own many
         // inline Text nodes; DOM collection keeps that semantic unit intact.
@@ -640,6 +643,9 @@ declare var __autotranslate: AT.content.Boot | undefined;
     }
     enqueue(regions);
     if (!state.full && state.roots.length === 0) return;
+    // The page added work: its own tick owns the next pass, so a pending idle
+    // fill must not run instead of it. Our own writes leave no regions.
+    state.mutations += 1;
     scheduleTick();
   }
 
@@ -769,7 +775,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       return;
     }
     const queue = takeQueue();
-    if (!queue) return;
+    if (!queue) { scheduleIdlePrefetch(); return; }
     const continuing = queue === 'continue';
     // Multiple changed regions (or an unfinished page) compete in one visual
     // plan. Mutation delivery order must not put a counter ahead of new replies.
@@ -811,6 +817,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
     // Cached work may make no model requests at all, but still has DOM work
     // left. Continuation is the planner's decision, not a request-count guess.
     if (more) requestContinuation();
+    else scheduleIdlePrefetch();
     if (processed > 0) await report({ status: failure ? 'error' : (more ? 'translating' : 'translated'), translated, error: failure });
     updateDebug(pipeline);
   }
@@ -821,12 +828,48 @@ declare var __autotranslate: AT.content.Boot | undefined;
     scheduleTick(true);
   }
 
+  /** A page taller than two screens is a scrolling surface: its distant text
+   *  is parked, not queued, and only scroll or idle fill reaches it. */
+  function tallSurface(): boolean {
+    const height = globalThis.innerHeight || 0;
+    return height > 0 && document.documentElement.scrollHeight > height * 2;
+  }
+
+  /** Fill beyond the window only while the page is quiet, one unit per tick.
+   *  A page that is still writing re-arms its own pass instead, so a feed never
+   *  rebuilds the whole-page queue this window exists to avoid. */
+  function scheduleIdlePrefetch(delay = 400): void {
+    if (state.stopped || !state.pipeline || state.prefetchTimer !== 0) return;
+    if (!tallSurface()) return;
+    const mutations = state.mutations;
+    state.prefetchTimer = setTimeout(() => {
+      state.prefetchTimer = 0;
+      const pipeline = state.pipeline;
+      if (!pipeline || state.stopped || state.working || state.timer !== 0 || state.dirty) return;
+      // The page wrote something since this was scheduled: its own pass owns
+      // the next tick, and that pass will schedule a fresh prefetch.
+      if (state.mutations !== mutations) return;
+      const epoch = state.epoch;
+      state.working = true;
+      void pipeline.prefetch()
+        .then((result) => {
+          if (epoch !== state.epoch || state.stopped) return;
+          // requested: 0 means the window is exhausted, not that nothing ever
+          // happened; translated is a running total.
+          if (result.requested > 0) scheduleIdlePrefetch();
+        })
+        .catch(() => undefined)
+        .finally(() => { if (epoch === state.epoch) state.working = false; });
+    }, delay);
+  }
+
   function sessionKey(settings: AT.settings.ContentSnapshot): string {
     return JSON.stringify([settings.translationKey ?? '', settings.targetLang, settings.sourceLang, settings.maxNodes]);
   }
 
   /** Control commands bypass the work queue. This is synchronous up to the UI report. */
   function invalidate(): number {
+    if (state.prefetchTimer !== 0) { clearTimeout(state.prefetchTimer); state.prefetchTimer = 0; }
     state.epoch++;
     state.stopped = true;
     state.commandPending = false;
@@ -882,6 +925,7 @@ declare var __autotranslate: AT.content.Boot | undefined;
       const result = await pipeline.translate(C.OBSERVER_BATCH_NODES);
       if (epoch !== state.epoch || state.stopped) return { status: 'cancelled' };
       if (result.hasMore) requestContinuation();
+      else scheduleIdlePrefetch();
       const status = result.failed || result.error ? 'error' : (result.hasMore ? 'translating' : 'translated');
       await report({ status, translated: result.translated, error: result.error });
       updateDebug(pipeline);
