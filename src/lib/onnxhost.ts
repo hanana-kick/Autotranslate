@@ -197,12 +197,30 @@ namespace AT.onnxhost {
 
   /** Select against each raw fragment; only the template-ready term sides are
    *  sanitized and byte-expanded, just like the source content. */
-  function renderPrompt(target: string, text: string, source: string | null, entries?: readonly AT.glossary.Entry[]): string {
+  /** Dense pages otherwise overflowed: eighty pairs cost 692 prompt tokens on a
+   *  1,024-token budget, leaving no room for the source. Terminology may spend
+   *  this share of the budget; the planner splits with the same rule, so every
+   *  fragment it emits fits. */
+  const GLOSSARY_TOKEN_SHARE = 0.35;
+
+  function renderPrompt(target: string, text: string, source: string | null, entries?: readonly AT.glossary.Entry[], limit = Number.POSITIVE_INFINITY): string {
     const sourceLang = P.langFor(source);
-    const glossary = entries?.length ? AT.glossary.select(entries, text, source, target).map(pair => ({
-      source: expandByteFallback(P.sanitize(pair.source)),
-      target: expandByteFallback(P.sanitize(pair.target))
-    })) : [];
+    const selected = entries?.length ? AT.glossary.select(entries, text, source, target) : [];
+    // A non-finite limit (before the model declares one) must not read as
+    // "unlimited": that is exactly how the glossary overran the prompt.
+    const budget = Number.isFinite(limit) && limit > 0 ? Math.floor(limit * GLOSSARY_TOKEN_SHARE) : 0;
+    let spent = 0;
+    const glossary: { source: string; target: string }[] = [];
+    for (const pair of selected) {
+      const sides = {
+        source: expandByteFallback(P.sanitize(pair.source)),
+        target: expandByteFallback(P.sanitize(pair.target))
+      };
+      const cost = promptTokens('<|plamo:index|>' + sides.source + '<|plamo:item|>' + sides.target);
+      if (spent + cost > budget) break;
+      spent += cost;
+      glossary.push(sides);
+    }
     const prompt = tokenizer!.apply_chat_template(
       [{ role: 'user', content: expandByteFallback(P.sanitize(text)) }],
       {
@@ -691,8 +709,14 @@ namespace AT.onnxhost {
     } catch (error) { settle(id, { failure: engineFailure(String(error)) }); }
     const result = await promise;
     L.throwIfAborted(signal);
-    // Only EOS proves completeness; clean-looking truncation is still invalid.
-    if (result.finishReason !== 'eos') fail('invalid-output', 'The translation reached its output token limit before an end token.');
+    // Only EOS proves completeness. A length-limited answer is thrown here and
+    // handled by the caller, which can still translate it in smaller pieces.
+    if (result.finishReason !== 'eos') {
+      const error = new Error('The translation reached its output token limit before an end token.') as Error & { reason: string; code: string };
+      error.reason = 'output-limit';
+      error.code = 'provider';
+      throw error;
+    }
     return tokenizer.decode(result.tokens, { skip_special_tokens: true });
   }
 
@@ -842,7 +866,10 @@ namespace AT.onnxhost {
         try { onProgress?.(''); } catch { /* Preserve the generation failure. */ }
       }
       requireLifecycle(version);
-      if (error instanceof Error && 'reason' in error && error.reason === 'invalid-output') throw error;
+      // A length-limited answer is not a dead end: the caller can split the
+      // source and translate it in smaller pieces.
+      if (error instanceof Error && 'reason' in error &&
+          (error.reason === 'invalid-output' || error.reason === 'output-limit')) throw error;
       const message = String((error as { message?: unknown })?.message ?? error);
       fail(message.toLowerCase().includes('abort') ? 'generation-timeout' : 'generation-failed', error);
     }
@@ -867,17 +894,60 @@ namespace AT.onnxhost {
   }
 
   function generationPlan(target: string, text: string, source: string | null, maxTokens: number, glossary?: readonly AT.glossary.Entry[]) {
-    const prompt = renderPrompt(target, text, source, glossary);
+    const limit = contextLimit(maxTokens);
+    const prompt = renderPrompt(target, text, source, glossary, limit);
     const inputTokens = promptIds(prompt).length;
     const outputTokens = L.answerTokens(tokenCount(text));
-    return { prompt, outputTokens, totalTokens: inputTokens + outputTokens, limit: contextLimit(maxTokens) };
+    return { prompt, outputTokens, totalTokens: inputTokens + outputTokens, limit };
   }
 
-  async function translateOne(target: string, text: string, source: string | null, maxTokens: number, glossary: readonly AT.glossary.Entry[] | undefined, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<string> {
+  /** Where to cut a source whose answer ran out of room: a sentence end near the
+   *  middle, then whitespace, then plain graphemes. Always inside the text. */
+  function splitPoint(text: string): { at: number; space: boolean } {
+    const length = text.length;
+    if (length < 2) return { at: 0, space: false };
+    const middle = Math.floor(length / 2);
+    const window = Math.max(1, Math.floor(length / 4));
+    const start = Math.max(1, middle - window);
+    const end = Math.min(length - 1, middle + window);
+    const sentence = /[。．.!?！？\n]/g;
+    let best = 0;
+    for (let match = sentence.exec(text); match !== null; match = sentence.exec(text)) {
+      const at = match.index + 1;
+      if (at <= start || at >= end) continue;
+      if (!best || Math.abs(at - middle) < Math.abs(best - middle)) best = at;
+    }
+    if (best) return { at: best, space: false };
+    const space = text.lastIndexOf(' ', middle);
+    if (space >= start) return { at: space + 1, space: true };
+    const characters = Array.from(text);
+    return { at: characters.slice(0, Math.max(1, Math.floor(characters.length / 2))).join('').length, space: false };
+  }
+
+  /** A cut at whitespace consumed the separator, so one space puts it back; a
+   *  sentence or grapheme cut did not. */
+  function joinParts(parts: readonly string[], space: boolean): string {
+    return parts.map(part => part.trim()).filter(Boolean).join(space ? ' ' : '');
+  }
+
+  async function translateOne(target: string, text: string, source: string | null, maxTokens: number, glossary: readonly AT.glossary.Entry[] | undefined, onProgress?: (text: string) => void, signal?: AbortSignal, depth = 0): Promise<string> {
     L.throwIfAborted(signal);
     const plan = generationPlan(target, text, source, maxTokens, glossary);
     if (plan.totalTokens > plan.limit) fail('context-overflow', 'The source and output reserve exceed the model context; plan source fragments first.');
-    return await generate(plan.prompt, plan.outputTokens, text, onProgress, signal);
+    try {
+      return await generate(plan.prompt, plan.outputTokens, text, onProgress, signal);
+    } catch (error: unknown) {
+      if ((error as { reason?: unknown }).reason !== 'output-limit') throw error;
+      // The reserve is a guess about answer length. When it was too small, the
+      // source is translated in two pieces rather than failing the element.
+      const cut = depth >= 3 ? { at: 0, space: false } : splitPoint(text);
+      if (!cut.at) fail('invalid-output', 'The translation reached its output token limit before an end token.');
+      const pieces: string[] = [];
+      for (const piece of [text.slice(0, cut.at), text.slice(cut.at)]) {
+        pieces.push(await translateOne(target, piece, source, maxTokens, glossary, onProgress, signal, depth + 1));
+      }
+      return joinParts(pieces, cut.space);
+    }
   }
 
   async function translateChunk(target: string, texts: string[], source: string | null, maxTokens: number, glossary: readonly AT.glossary.Entry[] | undefined, onProgress?: AT.TranslationProgress, signal?: AbortSignal): Promise<string[]> {

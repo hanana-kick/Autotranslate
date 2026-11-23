@@ -852,8 +852,6 @@ test('fragment planning never splits matched multiword or cross-sentence glossar
       assert.equal(job.inputIds.length + job.maxNewTokens, FakeEngine.contextTokens, 'the model budget is usable right up to its exact boundary');
       job.worker.answer(job, '응답');
       await translated;
-      await assert.rejects(onnxhost.handle({ ...request, glossary: glossaryEntries(term, '장치'.repeat(100)) }),
-        { reason: 'context-overflow', code: 'config', message: /glossary term/ });
     } finally { await finish(started, session); }
   }
 });
@@ -954,7 +952,7 @@ test('templates that silently ignore a matched glossary fail before counting or 
   } finally { await finish([], session); }
 });
 
-test('native glossary generation still requires EOS and rejects a cap-ended streamed answer', async () => {
+test('native glossary generation never falls back when an answer hits the cap', async () => {
   const session = installSession({ tokenizer: nativeTokenizer });
   FakeEngine.reset();
   (globalThis as ATNamespace).Worker = FakeEngine;
@@ -964,17 +962,72 @@ test('native glossary generation still requires EOS and rejects a cap-ended stre
     const request = onnxhost.translate({
       ...translateRequest('GPU works.'), source: 'en', glossary: glossaryEntries('GPU', '그래픽 장치')
     }, (_index: number, text: string) => seen.push(text));
-    const rejected = assert.rejects(request, { reason: 'invalid-output', message: /token limit/ });
-    started.push(rejected);
+    started.push(request);
     await until('glossary output budget', () => FakeEngine.inFlight.length === 1);
     const job = FakeEngine.inFlight[0]!;
     assert.ok(job.inputIds.length + job.maxNewTokens <= 512);
     job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: codepoints('GPU 응답').input_ids.data } });
     job.worker.answer(job, 'GPU 응답', 'length');
-    await rejected;
-    assert.deepEqual(seen, ['GPU 응답', '']);
+
+    // The cap splits the source; it never switches to the document fallback.
+    await until('first half after the cap', () => FakeEngine.inFlight.length === 1);
+    FakeEngine.inFlight[0]!.worker.answer(FakeEngine.inFlight[0]!, 'GPU 응답', 'eos');
+    await until('second half after the cap', () => FakeEngine.inFlight.length === 1);
+    FakeEngine.inFlight[0]!.worker.answer(FakeEngine.inFlight[0]!, '완료', 'eos');
+    assert.deepEqual((await request).translations, ['GPU 응답 완료']);
     assert.equal(session.calls.pipelines, 0, 'a glossary never turns an incomplete native answer into a fallback retry');
   } finally { await finish(started, session); }
+});
+
+test('a larger dictionary does not enlarge the prompt beyond its share', async () => {
+  const session = installSession({ tokenizer: nativeTokenizer });
+  FakeEngine.reset();
+  FakeEngine.contextTokens = 4096;
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  const sentPairs = async (count: number): Promise<number> => {
+    const pairs = Array.from({ length: count }, (_unused, index) => ({
+      source: 'name' + String(index).padStart(3, '0'),
+      target: '이름' + index
+    }));
+    const glossary = pairs.flatMap(pair => glossaryEntries(pair.source, pair.target));
+    const source = pairs.slice(0, 12).map(pair => pair.source).join(' ');
+    const request = onnxhost.translate({ ...translateRequest(source), source: 'en', glossary, maxTokens: 1024 });
+    started.push(request);
+    await until('dense glossary job', () => FakeEngine.inFlight.length === 1);
+    const job = FakeEngine.inFlight[0]!;
+    const prompt = codepoints.decode(job.inputIds);
+    assert.ok(job.inputIds.length + job.maxNewTokens <= 1024, 'the plan fits the budget');
+    job.worker.answer(job, '이름들');
+    await request;
+    return (prompt.match(/<\|plamo:index\|>/g) ?? []).length;
+  };
+  try {
+    const small = await sentPairs(20);
+    const large = await sentPairs(400);
+    assert.ok(small > 0 && large > 0, 'terminology still reaches the prompt');
+    assert.equal(large, small, 'the dictionary size does not enlarge the prompt; the budget does');
+    assert.ok(large < 20, 'terminology yields to the source and its reserve');
+  } finally { await finish(started, session); }
+});
+
+test('a glossary term that cannot fit the budget does not fail the plan', async () => {
+  const session = installSession({ tokenizer: nativeTokenizer });
+  FakeEngine.reset();
+  FakeEngine.contextTokens = 4096;
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  try {
+    // A dictionary entry longer than one fragment can hold: the source must
+    // still be planned, with that span free to split.
+    const long = 'あ'.repeat(200);
+    const counted = await onnxhost.handle({
+      type: 'at/local-count', modelId: 'onnx-model', maxTokens: 512, target: 'ko', source: 'ja',
+      texts: ['x' + long + 'y'], glossary: glossaryEntries(long, '긴 용어')
+    });
+    const parts: string[] = counted.sourceChunks[0];
+    assert.equal(parts.join(''), 'x' + long + 'y', 'planning still covers the source');
+    assert.ok(parts.length > 1, 'the oversized term is allowed to split');
+  } finally { await finish([], session); }
 });
 
 test('source planning covers lists larger than the former count limit', async () => {
@@ -1625,7 +1678,7 @@ test('one template policy names only the requested languages on both sides of 40
   } finally { await finish(started, session); }
 });
 
-test('emoji byte-token cost raises the reserve and clean cap-ended output is rejected', async () => {
+test('a length-capped answer is translated in smaller pieces instead of failing', async () => {
   const tokenizer = Object.assign((text: string) => ({
     input_ids: { data: Array.from(text).flatMap(character =>
       Array(character === '😀' ? 4 : 1).fill(character.codePointAt(0))) }
@@ -1638,19 +1691,45 @@ test('emoji byte-token cost raises the reserve and clean cap-ended output is rej
   const seen: string[] = [];
   try {
     const request = onnxhost.translate(translateRequest(source), (_index: number, text: string) => seen.push(text));
+    started.push(request);
+    await until('emoji generation', () => FakeEngine.inFlight.length === 1);
+    const first = FakeEngine.inFlight[0]!;
+    assert.equal(first.maxNewTokens, local.answerTokens(tokenizer(source).input_ids.data.length));
+    assert.ok(first.maxNewTokens > 64);
+    first.worker.onmessage?.({ data: { type: 'progress', id: first.id, tokens: codepoints('😀'.repeat(14)).input_ids.data } });
+    first.worker.answer(first, '😀'.repeat(14), 'length');
+
+    // The cap splits the source rather than failing the element: two smaller
+    // requests, each with its own reserve, and the answers are joined in order.
+    await until('first half', () => FakeEngine.inFlight.length === 1);
+    const half = FakeEngine.inFlight[0]!;
+    assert.ok(half.inputIds.length < first.inputIds.length, 'the retry sends less source');
+    half.worker.answer(half, '첫 부분', 'eos');
+    await until('second half', () => FakeEngine.inFlight.length === 1);
+    const rest = FakeEngine.inFlight[0]!;
+    rest.worker.answer(rest, '둘째 부분', 'eos');
+
+    assert.deepEqual((await request).translations, ['첫 부분둘째 부분']);
+    assert.equal(session.calls.pipelines, 0, 'a cap is not a reason to change backend');
+  } finally { await finish(started, session); }
+});
+
+test('a source that cannot be split still fails on a capped answer', async () => {
+  const tokenizer = Object.assign((text: string) => ({
+    input_ids: { data: Array.from(text).map(character => character.codePointAt(0) ?? 0) }
+  }), { decode: codepoints.decode, apply_chat_template: codepoints.apply_chat_template });
+  const session = installSession({ tokenizer });
+  FakeEngine.reset();
+  (globalThis as ATNamespace).Worker = FakeEngine;
+  const started: Promise<unknown>[] = [];
+  try {
+    const request = onnxhost.translate(translateRequest('あ'));
     const rejected = assert.rejects(request, { reason: 'invalid-output', message: /token limit/ });
     started.push(rejected);
-    await until('emoji generation', () => FakeEngine.inFlight.length === 1);
+    await until('single grapheme', () => FakeEngine.inFlight.length === 1);
     const job = FakeEngine.inFlight[0]!;
-    assert.equal(job.maxNewTokens, local.answerTokens(tokenizer(source).input_ids.data.length));
-    assert.ok(job.maxNewTokens > 64);
-    assert.ok(job.inputIds.length + job.maxNewTokens <= 512);
-    const partial = '😀'.repeat(14) + '【자주 묻';
-    job.worker.onmessage?.({ data: { type: 'progress', id: job.id, tokens: codepoints(partial).input_ids.data } });
-    job.worker.answer(job, partial, 'length');
+    job.worker.answer(job, '아', 'length');
     await rejected;
-    assert.deepEqual(seen, [partial, '']);
-    assert.equal(session.calls.pipelines, 0, 'a cap is not a reason to change backend or retry');
   } finally { await finish(started, session); }
 });
 

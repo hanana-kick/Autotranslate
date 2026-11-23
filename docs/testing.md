@@ -335,6 +335,61 @@ Diagnostic sources and the pre-change compiled modules are archived in
   Evidence and screenshots:
   `test-results/browser/onnx-only-extension/full-page-onnx-only.json`.
 
+## Glossary prompt budget
+
+The glossary shares the prompt with the source, and it used to be unbounded: on
+the shipped 1,886-entry dictionary, eighty matched pairs cost **692 prompt
+tokens** on the default 1,024-token budget, and roughly 140 pairs consumed the
+whole budget before any source text. A page dense with dictionary names (a
+member list, a name-heavy article) therefore failed with a token-limit error.
+
+The glossary may now spend **35% of the fragment's budget**; the planner splits
+fragments with that same rule, so every fragment it emits fits. Pairs are taken
+in text order until the share is spent, and a pair that cannot fit is left out
+rather than failing the element. Measured prompt cost per pair: **~7 tokens**
+(5 pairs 60, 20 pairs 177, 80 pairs 692, 256 pairs 1,930).
+
+A budget sweep on a 600-character paragraph showed no failures at 128, 256, 512
+or 1,024 tokens, so a low configured budget is not itself a failure.
+
+Two guards keep the prompt bounded in the remaining cases. A glossary **source**
+term longer than one fragment can hold no longer fails planning: the span loses
+its protected status and is allowed to split, and the pair is then dropped by the
+share. A **non-finite** limit (before the model declares its context) now yields
+zero pairs instead of reading as unlimited, which is how the glossary could
+overrun earlier.
+
+Selection itself is dynamic per fragment: which pairs enter the prompt depends on
+the fragment's text, and the dictionary's size does not change the prompt — a
+400-entry dictionary sends the same pairs as a 20-entry one on the same text.
+Counterpart choice is still static (기본형 mark, then the source note, then
+register): **750 of 1,009** Japanese terms resolve to one Korean counterpart,
+and the remaining 259 are either names that appear in more than one concept
+(`AZKiちゃん`) or groups with no Korean row in the same 표현 묶음.
+
+## Long elements and the output reserve
+
+Translation is per element, not per page: the pipeline plans semantic units and
+sends each unit's text as its own request, and the host splits a long unit into
+model-sized fragments before generating. What fails on long body text is the
+**output** reserve, not the prompt: `answerTokens = 3 × source tokens + 24`
+underestimates a long Korean answer, the generation stops at the cap, and the
+element used to be reported as an error.
+
+Measured on a 1,155-character paragraph: the planner split it into 726 and 429
+characters; the 726-character fragment (242 source tokens, 750-token reserve)
+was cut off while the 429-character fragment finished. After the fix, a
+length-capped answer is no longer a dead end — the host splits that source at a
+sentence or word boundary and translates the pieces (up to three levels),
+joining them with the spacing the cut consumed. A realistic 2,400-character
+paragraph built from captured pages now translates completely in **8.0 s**
+across five fragments.
+
+Two inputs still fail, for reasons outside this fix: one sentence repeated 35
+times produces a repetitive answer that the content validator rejects
+(`repeated-output`), and 6,000 identical kana make the model loop. Both are
+pathological rather than long.
+
 ## Live chat translation
 
 A page's chat is a frame, so the background injects the content script into

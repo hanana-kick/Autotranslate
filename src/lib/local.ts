@@ -404,6 +404,13 @@ namespace AT.local {
       return tokens <= maxTokens;
     };
     if (!source.trim() || await fits(source)) return [source];
+    // A protected term that cannot fit on its own would block every split
+    // inside it and fail the whole page. Such a span loses its protection
+    // instead; the pair is then dropped by the prompt's terminology budget.
+    const protection: { start: number; end: number }[] = [];
+    for (const range of protectedRanges) {
+      if (range.end > range.start && await fits(source.slice(range.start, range.end))) protection.push(range);
+    }
     const granularities = ['sentence', 'word', 'grapheme'] as const;
     const segmenters: Intl.Segmenter[] = [];
     const split = async (text: string, level: number, offset: number): Promise<string[]> => {
@@ -418,8 +425,8 @@ namespace AT.local {
         throwIfAborted(signal);
         pending += part.segment;
         const end = offset + part.index + part.segment.length;
-        while (protectedIndex < protectedRanges.length && protectedRanges[protectedIndex]!.end <= end) protectedIndex += 1;
-        const protectedRange = protectedRanges[protectedIndex];
+        while (protectedIndex < protection.length && protection[protectedIndex]!.end <= end) protectedIndex += 1;
+        const protectedRange = protection[protectedIndex];
         if (protectedRange && protectedRange.start < end && end < protectedRange.end) continue;
         const segment = pending;
         pending = '';
